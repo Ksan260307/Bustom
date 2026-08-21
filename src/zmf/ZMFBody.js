@@ -50,6 +50,8 @@ export class ZMFBody {
     this.hover = 0;         // 0..1, how committed we are to flight
     this.airborneTime = 0;
     this.jumpCooldown = 0;
+    this.dashCooldown = 0;
+    this.dashFlash = 0;      // 0..1, for feedback
 
     this.locked = false;
     this.target = null;
@@ -72,6 +74,7 @@ export class ZMFBody {
     this.jumpPower = legs === 0 ? 6 : legs === 1 ? 15.5 : legs === 2 ? 12 : 9.5;
     this.groundSpeedCap = 8 + legs * 2.2 + stats.agility * 9;
     this.airSpeedCap = 16 + stats.agility * 24;
+    this.dashSpeed = 11 + stats.agility * 11;
   }
 
   reset(position = new THREE.Vector3(0, this.rideHeight, 0)) {
@@ -102,6 +105,8 @@ export class ZMFBody {
   update(input, dt) {
     this.time += dt;
     this.jumpCooldown = Math.max(0, this.jumpCooldown - dt);
+    this.dashCooldown = Math.max(0, this.dashCooldown - dt);
+    this.dashFlash = Math.max(0, this.dashFlash - dt * 4);
 
     // ---------------------------------------------- 1. layer selection
     if (input.wasPressed('layerA')) this.layers.set('A');
@@ -142,13 +147,31 @@ export class ZMFBody {
     this.airborneTime = groundedNow > 0.5 ? 0 : this.airborneTime + dt;
 
     // ---------------------------------------------- energy
-    const burn = this.hover * 0.30 + this.inertia.thrustOutput * 0.11
-      + (input.isDown('boost') ? 0.4 : 0);
+    // Decide whether the boost actually fires BEFORE billing for it: an empty
+    // tank should not keep charging you for thrust you are not getting.
+    const boosting = input.isDown('boost') && this.energy > 0.04;
+    const burn = this.hover * 0.30 + this.inertia.thrustOutput * 0.11 + (boosting ? 0.4 : 0);
     const regen = groundedNow > 0.5 ? 0.55 : 0.10;
     this.energy = clamp01(this.energy + (regen - burn) * dt);
     this.strain = smoothstep(0.28, 0.02, this.energy);
 
-    const boosting = input.isDown('boost') && this.energy > 0.04;
+    // ---------------------------------------------- dash
+    // A dash is an impulse, not a thrust command. Routing it through the
+    // spool would let the deliberately sluggish backward profile swallow a
+    // backward dash entirely, and a dash you cannot feel is not a dash.
+    if (input.dash && this.dashCooldown <= 0 && this.energy > 0.08) {
+      _tmp.copy(input.dash.dir).applyQuaternion(this.angular.quaternion);
+      if (groundedNow > 0.5) _tmp.y = 0;
+      if (_tmp.lengthSq() > 1e-6) {
+        // Backwards is a fraction weaker, but still unmistakably a dash.
+        const back = input.dash.dir.z < -0.5 ? 0.9 : 1;
+        this.inertia.applyImpulse(_tmp.normalize().multiplyScalar(this.dashSpeed * back));
+        this.dashCooldown = 0.42;
+        this.dashFlash = 1;
+        this.energy = clamp01(this.energy - 0.12);
+        input.dash = null;
+      }
+    }
 
     // ---------------------------------------------- 3. substep loop
     const sdt = dt / this.substeps;
@@ -181,7 +204,6 @@ export class ZMFBody {
     // -------- build the thrust command in body-local space
     _tmp.copy(input.move);
     if (boosting) _tmp.z = Math.max(_tmp.z, 0.35) * 1.6;
-    if (input.dash) _tmp.addScaledVector(input.dash.dir, 1.1);
 
     // On the ground, steering happens in the horizontal plane: looking up
     // must not drive the machine into the dirt.
@@ -277,6 +299,7 @@ export class ZMFBody {
       range: this.assist.range,
       closing: this.assist.closingRate,
       frameLock: this.space.blend,
+      dash: this.dashFlash,
       relief: this.inertia.approachRelief ?? 0,
       impact: this.env.impactImpulse,
     };

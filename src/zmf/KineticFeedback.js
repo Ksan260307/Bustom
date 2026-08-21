@@ -109,11 +109,15 @@ export class KineticFeedback {
     const jerkN = clamp01(s.jerk / 300);
 
     // --- visual channel
+    // Every input is clamped on the way in: these values are wired straight
+    // into shader uniforms, so an out-of-range impact must not leak through.
+    const impact = clamp01(s.impact ?? 0);
+    const strain = clamp01(s.strain ?? 0);
     this.visual.chroma = damp(this.visual.chroma, clamp01(s.thrust * 0.85), 0.11, dt);
     this.visual.noise = damp(this.visual.noise, jerkN, 0.07, dt);
-    this.visual.flash = damp(this.visual.flash, s.impact ?? 0, 0.05, dt);
+    this.visual.flash = damp(this.visual.flash, impact, 0.05, dt);
     // Haptics: jitter near the energy limit is promoted to a heavy rumble.
-    this.rumble = damp(this.rumble, clamp01(jerkN * 0.7 + (s.strain ?? 0) * 0.8 + (s.impact ?? 0)), 0.08, dt);
+    this.rumble = damp(this.rumble, clamp01(jerkN * 0.7 + strain * 0.8 + impact), 0.08, dt);
 
     if (!this.enabled || this.muted || !this.ctx) return;
     const t = this.ctx.currentTime;
@@ -127,6 +131,6 @@ export class KineticFeedback {
     n.thrustGain.gain.setTargetAtTime(0.03 + s.thrust * 0.30, t, 0.05);
 
     n.noiseFilter.frequency.setTargetAtTime(600 + jerkN * 3400, t, 0.04);
-    n.noiseGain.gain.setTargetAtTime(jerkN * 0.14 + (s.impact ?? 0) * 0.35, t, 0.03);
+    n.noiseGain.gain.setTargetAtTime(jerkN * 0.14 + impact * 0.35, t, 0.03);
   }
 }

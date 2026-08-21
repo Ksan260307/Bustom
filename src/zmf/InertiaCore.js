@@ -139,6 +139,17 @@ export class InertiaCore {
   }
 
   /**
+   * A one-shot velocity change that ignores the mass term, the same way the
+   * counter-thruster boost does. Dashes use this so a backward dash is just
+   * as sharp as a forward one, instead of being throttled by the deliberately
+   * sluggish backward spool profile.
+   */
+  applyImpulse(worldVelocity) {
+    this.velocity.add(worldVelocity);
+    return this.velocity;
+  }
+
+  /**
    * §3.1 — one velocity-Verlet substep.
    *
    * @param {THREE.Vector3} position    mutated in place

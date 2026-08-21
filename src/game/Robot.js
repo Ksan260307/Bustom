@@ -16,10 +16,14 @@ const _aim = new THREE.Vector3();
 let _glowTexture = null;
 function glowTexture() {
   if (_glowTexture) return _glowTexture;
+  // Headless (tests, tooling): no canvas, so the sprite just goes untextured.
+  if (typeof document === 'undefined') return null;
   const size = 128;
   const c = document.createElement('canvas');
+  if (!c.getContext) return null;
   c.width = c.height = size;
   const g = c.getContext('2d');
+  if (!g) return null;
   const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
   grad.addColorStop(0.0, 'rgba(255,255,255,1)');
   grad.addColorStop(0.25, 'rgba(190,235,255,0.72)');

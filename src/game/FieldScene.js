@@ -36,6 +36,7 @@ export class FieldScene {
     this.fireCooldown = 0;
     this.time = 0;
     this.active = false;
+    this.paused = false;
 
     this._buildTracerPool();
   }
@@ -56,7 +57,7 @@ export class FieldScene {
   _spawnEnemies() {
     const specs = [
       { preset: 'biped', x: 24, z: 18, style: 'orbit', range: 24 },
-      { preset: 'skitter', x: -28, z: 6, style: 'rusher', range: 16 },
+      { preset: 'multileg', x: -28, z: 6, style: 'rusher', range: 16 },
       { preset: 'hopper', x: 6, z: -32, style: 'flyer', range: 30 },
     ];
     for (const s of specs) {
@@ -82,15 +83,26 @@ export class FieldScene {
     this.active = true;
     this.input.setEnabled(true);
     this.hud.visible = true;
-    this.feedback.resume();
   }
 
   exit() {
     this.active = false;
+    this.paused = false;
     this.input.setEnabled(false);
     this.input.exitPointerLock();
     this.feedback.suspend();
     this.hud.ctx.clearRect(0, 0, this.hud.w, this.hud.h);
+  }
+
+  /**
+   * Paused freezes the simulation but keeps rendering, so the pause menu sits
+   * over a still frame of the fight rather than a black screen.
+   */
+  setPaused(on) {
+    this.paused = !!on;
+    this.input.setEnabled(!this.paused);
+    if (this.paused) this.feedback.suspend();
+    return this.paused;
   }
 
   resize(w, h) {
@@ -228,6 +240,7 @@ export class FieldScene {
 
   update(dt) {
     if (!this.active) return;
+    if (this.paused) { this._drawHud(0); return; }
     this.time += dt;
     const p = this.player;
 
@@ -285,13 +298,17 @@ export class FieldScene {
       dir: _screenDir,
     }, this.time);
 
-    // ---- hud
+    this._drawHud(dt);
+  }
+
+  _drawHud(dt) {
+    const p = this.player;
     this.hud.draw({
       camera: this.camera,
       player: p,
       targets: this.enemies.filter((e) => e.alive),
       lock: this.lock,
-      telemetry: tel,
+      telemetry: p.body.telemetry(),
       gait: p.stats.gait,
     }, dt);
   }

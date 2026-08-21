@@ -8,5 +8,14 @@ export default defineConfig({
     strictPort: false,
     open: false,
   },
-  build: { target: 'es2022', outDir: 'dist' },
+  build: {
+    target: 'es2022',
+    outDir: 'dist',
+    rollupOptions: {
+      input: {
+        main: 'index.html',
+        tests: 'tests.html',
+      },
+    },
+  },
 });

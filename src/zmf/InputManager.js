@@ -49,6 +49,10 @@ export class InputManager {
       expo: 0.42,
       deadzone: 0.06,
       invertY: false,
+      /**
+       * A = left, D = right. Set true to swap the two.
+       */
+      invertStrafe: false,
       /** Filled in from the build's stats: heavier machines get slower look. */
       massSensitivityScale: 1.0,
     };
@@ -156,7 +160,12 @@ export class InputManager {
   }
 
   _checkDoubleTap(code) {
-    const dirs = { forward: [0, 0, 1], back: [0, 0, -1], left: [-1, 0, 0], right: [1, 0, 0] };
+    // Dash works in all four directions, including straight backwards.
+    const sx = this.profile.invertStrafe ? -1 : 1;
+    const dirs = {
+      forward: [0, 0, 1], back: [0, 0, -1],
+      left: [-sx, 0, 0], right: [sx, 0, 0],
+    };
     for (const [action, codes] of Object.entries(BINDINGS)) {
       if (!codes.includes(code) || !dirs[action]) continue;
       const prev = this._lastTap.get(action) ?? -99;
@@ -176,7 +185,8 @@ export class InputManager {
   update(dt) {
     this.time += dt;
 
-    const ax = (this.isDown('right') ? 1 : 0) - (this.isDown('left') ? 1 : 0);
+    const strafeSign = this.profile.invertStrafe ? -1 : 1;
+    const ax = ((this.isDown('right') ? 1 : 0) - (this.isDown('left') ? 1 : 0)) * strafeSign;
     const ay = (this.isDown('up') ? 1 : 0) - (this.isDown('down') ? 1 : 0);
     const az = (this.isDown('forward') ? 1 : 0) - (this.isDown('back') ? 1 : 0);
 

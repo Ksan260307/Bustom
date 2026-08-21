@@ -4,14 +4,15 @@ import { clamp, clamp01, damp, lerp, smoothstep } from '../zmf/math.js';
 // ============================================================
 //  Procedural animation driven by bone ATTRIBUTE.
 //
-//    LEG    1 bone  -> hop        2 bones -> walk      3+ -> skitter
+//    LEG    1 leg -> hop      2 legs -> walk      3+ -> multileg
 //    ARM    swings while travelling, points at the lock while armed
 //    FACE   looks down the travel vector, snaps to the lock
 //    CUSTOM whatever the builder wired up in the editor
 //
-//  Every joint is posed in its own parent frame, but the *axes* are
-//  resolved from the body frame at bind time. That is what lets a bone
-//  mounted at any angle still swing fore-and-aft like a limb should.
+//  Every joint is posed in its own parent frame, but its axes are solved
+//  from the BODY frame at bind time. A leg hanging straight down and a leg
+//  sticking out sideways need completely different local rotation axes to
+//  produce the same "step forward", and this is where that is worked out.
 // ============================================================
 
 const DEG = Math.PI / 180;
@@ -21,7 +22,12 @@ const _q = new THREE.Quaternion();
 const _q2 = new THREE.Quaternion();
 const _v = new THREE.Vector3();
 const _axis = new THREE.Vector3();
+const _axis2 = new THREE.Vector3();
+const _t2 = new THREE.Vector2();
 const UP = new THREE.Vector3(0, 1, 0);
+const BODY_X = new THREE.Vector3(1, 0, 0);
+const BODY_Y = new THREE.Vector3(0, 1, 0);
+const BODY_Z = new THREE.Vector3(0, 0, 1);
 
 /** Limit a rotation to `maxDeg` away from rest. */
 function limitQuat(q, maxDeg) {
@@ -42,53 +48,97 @@ export class Animator {
     this.bodyBob = 0;
     this.bodyLean = new THREE.Vector2(); // x = pitch, y = roll
     this.aimBlend = 0;
+    /**
+     * Direction of travel in the body's own horizontal plane, as (x, z).
+     * Legs step along THIS, not along the nose — strafing should put the feet
+     * out sideways, the way inertia actually carries you.
+     */
+    this.travel = new THREE.Vector2(0, 1);
+    this.travelBlend = 0;
     this._bind();
   }
 
   /**
    * Resolve, once, the body-frame axes each joint should rotate about.
-   * Doing this at bind time means the per-frame path stays trigonometry only.
+   *
+   * Rotating a bone about axis A moves its tip along (A x S), where S is the
+   * shaft direction. So to step the foot forward we want A x S along body Z,
+   * which gives A = Z x S; to lift the foot we want A x S along body Y.
    */
   _bind() {
     const rig = this.rig;
     rig.root.updateMatrixWorld(true);
-    const rootQ = rig.root.getWorldQuaternion(new THREE.Quaternion()).invert();
+    const rootQInv = rig.root.getWorldQuaternion(new THREE.Quaternion()).invert();
 
     for (const node of rig.joints) {
-      // The joint rotates inside the bone-root frame.
-      const parentQ = node.group.getWorldQuaternion(new THREE.Quaternion());
-      const toBone = parentQ.clone().invert();
+      // Orientation of the bone root, expressed in the body frame.
+      const boneQ = node.group.getWorldQuaternion(new THREE.Quaternion()).premultiply(rootQInv);
+      const toBone = boneQ.clone().invert();
+      node.boneWorldQ = boneQ;
 
-      node.axisSwing = new THREE.Vector3(1, 0, 0).applyQuaternion(rootQ).applyQuaternion(toBone).normalize(); // body right
-      node.axisSpread = new THREE.Vector3(0, 0, 1).applyQuaternion(rootQ).applyQuaternion(toBone).normalize(); // body forward
-      node.axisTwist = new THREE.Vector3(0, 1, 0).applyQuaternion(rootQ).applyQuaternion(toBone).normalize();  // body up
+      // Shaft direction in body space.
+      const shaft = new THREE.Vector3(0, 1, 0).applyQuaternion(boneQ).normalize();
+      node.shaft = shaft;
 
-      // A bone mounted straight out to the side would have its swing axis
-      // running down the shaft, which is a twist, not a swing. Fall back to
-      // the perpendicular axis so sideways limbs still articulate.
-      if (Math.abs(node.axisSwing.y) > 0.9) {
-        const tmp = node.axisSwing.clone();
-        node.axisSwing.copy(node.axisSpread);
-        node.axisSpread.copy(tmp);
-      }
-      node.boneWorldQ = parentQ;      // rest orientation of the bone root, body space
+      const stride = new THREE.Vector3().crossVectors(BODY_Z, shaft);
+      if (stride.lengthSq() < 1e-6) stride.copy(BODY_X);
+      stride.normalize();
+
+      // A leg hanging straight down genuinely CANNOT raise its own tip by
+      // rotating the hip — that is what the knee is for. Flag it rather than
+      // substituting an axis that would just double the stride.
+      const lift = new THREE.Vector3().crossVectors(BODY_Y, shaft);
+      const liftDegenerate = lift.lengthSq() < 1e-4;
+      if (liftDegenerate) lift.copy(stride);
+      lift.normalize();
+
+      const splay = new THREE.Vector3().crossVectors(BODY_X, shaft);
+      if (splay.lengthSq() < 1e-6) splay.copy(lift);
+      splay.normalize();
+
+      /** Fore/aft step. */
+      node.axisStride = stride.clone().applyQuaternion(toBone).normalize();
+      /** Raise/lower the tip. */
+      node.axisLift = lift.clone().applyQuaternion(toBone).normalize();
+      /** Sideways fan. */
+      node.axisSplay = splay.clone().applyQuaternion(toBone).normalize();
+      /** Twist along the shaft. */
+      node.axisTwist = new THREE.Vector3(0, 1, 0);
+      /** 0 when rotating this joint cannot raise its own tip. */
+      node.liftScale = liftDegenerate ? 0 : 1;
+
       node.target = new THREE.Quaternion();
 
       // Which side of the body is this bone on? Drives mirrored gaits.
       const p = node.group.getWorldPosition(new THREE.Vector3());
-      node.side = Math.sign(p.x) || 1;
+      node.side = Math.sign(Number(p.x.toFixed(4))) || 1;
       node.restPos = p;
     }
 
     // Order each limb chain: [hip, knee, ankle, ...]
     for (const limb of this.rig.limbs) {
       limb.chain.forEach((n, i) => { n.chainIndex = i; n.chainLength = limb.chain.length; });
-      // Alternate the phase so a biped does not pogo on both legs at once.
-      limb.phaseOffset = this.rig.limbs.length <= 1
-        ? 0
-        : (limb.index / this.rig.limbs.length) + (this.rig.limbs.length === 2 ? 0 : 0);
-      if (this.rig.limbs.length === 2) limb.phaseOffset = limb.index * 0.5;
     }
+    this._assignPhases();
+  }
+
+  /**
+   * Gait phase per limb. Two legs alternate; more than two fan out into an
+   * alternating-tripod-ish pattern so neighbours are never in step.
+   */
+  _assignPhases() {
+    const limbs = this.rig.limbs;
+    const n = limbs.length;
+    limbs.forEach((limb, i) => {
+      if (n <= 1) limb.phaseOffset = 0;
+      else if (n === 2) limb.phaseOffset = i * 0.5;
+      else {
+        // left/right alternation on top of a front-to-back sweep
+        const row = Math.floor(i / 2);
+        const side = i % 2;
+        limb.phaseOffset = ((row / Math.max(1, Math.ceil(n / 2))) * 0.5 + side * 0.5) % 1;
+      }
+    });
   }
 
   /**
@@ -114,27 +164,55 @@ export class Animator {
 
     // ---- gait clock: stride rate follows real ground speed
     const legs = Math.max(1, this.rig.limbs.length);
-    const strideLen = lerp(2.4, 1.1, clamp01((legs - 1) / 4)) * (0.7 + this.stats.extent * 0.35);
-    const targetFreq = gait === 'skitter'
-      ? clamp(s.planarSpeed / strideLen, 0, 6.5) * 1.9 + (s.grounded > 0.4 ? 0.9 : 0)
+    const strideLen = lerp(2.4, 1.0, clamp01((legs - 1) / 4)) * (0.7 + this.stats.extent * 0.35);
+    const moving = clamp01(s.planarSpeed / 0.8);
+    const targetFreq = gait === 'multileg'
+      // Multi-leg machines scuttle: a high floor frequency even at a crawl,
+      // otherwise four small legs just look like they are vibrating.
+      ? (1.6 + clamp(s.planarSpeed / strideLen, 0, 6) * 1.6) * moving
       : clamp(s.planarSpeed / strideLen, 0, 4.2);
     this.gaitFreq = damp(this.gaitFreq, targetFreq * s.grounded, 0.12, dt);
     this.gaitPhase = (this.gaitPhase + this.gaitFreq * dt) % 1;
 
     // ---- body carriage
-    const bobAmp = gait === 'hop' ? 0.0 : 0.045 * (1 + this.gaitFreq * 0.28);
-    const bobTarget = Math.sin(this.gaitPhase * TAU * (legs === 2 ? 2 : legs)) * bobAmp * s.grounded;
-    this.bodyBob = damp(this.bodyBob, bobTarget, 0.05, dt);
+    // Bob twice per gait cycle regardless of leg count: one bob per leg makes
+    // a four-legger oscillate faster than the smoothing can follow, which
+    // cancels the very motion it is supposed to sell.
+    const bobAmp = gait === 'hop' ? 0 : gait === 'multileg' ? 0.075 : 0.045;
+    const bobHz = gait === 'hover' ? Math.max(1, legs) : 2;
+    const bobTarget = Math.sin(this.gaitPhase * TAU * bobHz)
+      * bobAmp * (1 + this.gaitFreq * 0.2) * s.grounded;
+    // Track faster when the gait is faster, or the smoothing eats the peaks.
+    const bobHalfLife = clamp(0.22 / Math.max(1, this.gaitFreq * bobHz), 0.02, 0.06);
+    this.bodyBob = damp(this.bodyBob, bobTarget, bobHalfLife, dt);
 
     const localVel = _v.copy(s.velocity).applyQuaternion(_q.copy(s.bodyQ).invert());
     this.bodyLean.x = damp(this.bodyLean.x, clamp(localVel.z * 0.012, -0.20, 0.20), 0.15, dt);
     this.bodyLean.y = damp(this.bodyLean.y, clamp(-localVel.x * 0.010, -0.16, 0.16), 0.15, dt);
 
+    // ---- travel direction
+    // Rotated toward the target rather than lerped: a straight reversal would
+    // otherwise interpolate through the origin, collapse, and snap back to
+    // forward — so walking backwards would never reverse the stride at all.
+    const planar = Math.hypot(localVel.x, localVel.z);
+    if (planar > 0.4) _t2.set(localVel.x / planar, localVel.z / planar);
+    else _t2.set(0, 1);
+    const cross = this.travel.x * _t2.y - this.travel.y * _t2.x;
+    const dot = clamp(this.travel.x * _t2.x + this.travel.y * _t2.y, -1, 1);
+    const theta = Math.atan2(cross, dot) * clamp01(dt * 8);
+    if (theta) {
+      const c = Math.cos(theta);
+      const sn = Math.sin(theta);
+      this.travel.set(this.travel.x * c - this.travel.y * sn, this.travel.x * sn + this.travel.y * c);
+      this.travel.normalize();
+    }
+    this.travelBlend = damp(this.travelBlend, clamp01((planar - 0.4) / 2.5), 0.12, dt);
+
     // ---- limbs
     switch (gait) {
       case 'hop': this._hop(s, dt); break;
       case 'walk': this._walk(s, dt); break;
-      case 'skitter': this._skitter(s, dt); break;
+      case 'multileg': this._multileg(s, dt); break;
       default: this._hover(s, dt); break;
     }
 
@@ -142,6 +220,23 @@ export class Animator {
     this._faces(s, dt);
     this._customs(s, dt);
     this._commit(dt);
+  }
+
+  /**
+   * The axis to swing this joint about so its tip steps along the CURRENT
+   * direction of travel.
+   *
+   * Rotating about A moves the tip along (A x S). We want that along the
+   * travel direction D = cos.Z + sin.X, and the cross product is linear in D,
+   * so the answer is just the same blend of the two bound axes.
+   */
+  _strideAxis(node, out = _axis2) {
+    const k = this.travelBlend;
+    const cos = 1 + (this.travel.y - 1) * k;
+    const sin = this.travel.x * k;
+    out.copy(node.axisStride).multiplyScalar(cos).addScaledVector(node.axisSplay, sin);
+    if (out.lengthSq() < 1e-8) return out.copy(node.axisStride);
+    return out.normalize();
   }
 
   // ---------------------------------------------------------- gaits
@@ -152,7 +247,6 @@ export class Animator {
     if (!limb) return;
 
     const airborne = 1 - s.grounded;
-    // Compress while planted, extend hard the instant we leave the floor.
     const compressTarget = s.grounded > 0.5 ? 0.85 : -0.25 * smoothstep(0.35, 0, s.airborne);
     this.hopCharge = damp(this.hopCharge, compressTarget, s.grounded > 0.5 ? 0.07 : 0.11, dt);
 
@@ -162,15 +256,16 @@ export class Animator {
     limb.chain.forEach((node, i) => {
       const t = i / Math.max(1, limb.chain.length - 1 || 1);
       const bend = this.hopCharge * (48 - i * 12) * DEG * (i % 2 === 0 ? 1 : -1.25);
-      _q.setFromAxisAngle(node.axisSwing, bend + (dir + sway) * (1 - t));
+      _q.setFromAxisAngle(this._strideAxis(node), bend + (dir + sway) * (1 - t));
       node.target.copy(limitQuat(_q, node.part.limit));
     });
   }
 
   /** Two legs: opposed sine stride with a knee that only bends one way. */
   _walk(s, dt) {
-    const amp = lerp(10, 40, clamp01(this.gaitFreq / 2.6)) * DEG;
-    const kneeAmp = lerp(8, 55, clamp01(this.gaitFreq / 2.6)) * DEG;
+    const drive = clamp01(this.gaitFreq / 2.6);
+    const amp = lerp(10, 40, drive) * DEG;
+    const kneeAmp = lerp(8, 55, drive) * DEG;
     const idle = 1 - clamp01(this.gaitFreq * 2.2);
     const air = 1 - s.grounded;
 
@@ -183,44 +278,61 @@ export class Animator {
       limb.chain.forEach((node, i) => {
         let angle;
         if (i === 0) {
-          // hip: fore-aft stride, plus a landing-gear tuck while airborne
           angle = stride * amp * mirror - air * 22 * DEG + idle * 2 * DEG;
         } else if (i === 1) {
-          // knee: bends on the swing half only
           angle = -(lift * kneeAmp + air * 34 * DEG) * mirror;
         } else {
-          // ankle and below: counter-rotate so the foot stays flattish
           angle = (-stride * amp * 0.35 + lift * kneeAmp * 0.4) * mirror;
         }
-        _q.setFromAxisAngle(node.axisSwing, angle);
+        _q.setFromAxisAngle(this._strideAxis(node), angle);
         node.target.copy(limitQuat(_q, node.part.limit));
       });
     }
   }
 
-  /** Three or more: fast, shallow, phase-fanned. Should read as scuttling. */
-  _skitter(s, dt) {
-    const n = this.rig.limbs.length;
-    const amp = lerp(7, 26, clamp01(this.gaitFreq / 4.5)) * DEG;
+  /**
+   * Three or more legs. The previous version was far too subtle to read, so
+   * this drives three separate channels per leg — a wide fore/aft stride, a
+   * clear vertical lift during the swing half, and a static outward splay so
+   * the legs are visible outside the body silhouette in the first place.
+   */
+  _multileg(s, dt) {
+    const drive = clamp01(this.gaitFreq / 4.0);
+    const strideAmp = lerp(16, 38, drive) * DEG;
+    const liftAmp = lerp(10, 26, drive) * DEG;
+    const kneeAmp = lerp(12, 34, drive) * DEG;
     const air = 1 - s.grounded;
+    const idle = 1 - clamp01(this.gaitFreq * 1.6);
 
     for (const limb of this.rig.limbs) {
-      // Fan the phases around the body — alternating tripod when it works out.
-      const p = (this.gaitPhase + limb.index / n + (limb.index % 2) * 0.5) % 1;
+      const p = (this.gaitPhase + limb.phaseOffset) % 1;
       const stride = Math.sin(p * TAU);
-      const lift = Math.max(0, Math.sin(p * TAU + 0.6));
+      // Swing occupies the first half of the cycle; stance drags along the floor.
+      const swing = Math.max(0, Math.sin(p * TAU));
       const mirror = limb.root.part.invert ? -1 : 1;
-      // Splay follows which side of the body the leg is actually on, so a
-      // crawler pushes outward rather than folding all four legs one way.
-      const splay = 24 * DEG * -limb.root.side;
+      const splay = 22 * DEG * -limb.root.side;
 
       limb.chain.forEach((node, i) => {
-        _q.setFromAxisAngle(node.axisSwing, (stride * amp - air * 12 * DEG) * mirror);
         if (i === 0) {
-          _q2.setFromAxisAngle(node.axisSpread, splay * (1 + lift * 0.35));
+          // hip: step along the travel vector, lift clear of the floor on the swing
+          _q.setFromAxisAngle(this._strideAxis(node), stride * strideAmp * mirror);
+          _q2.setFromAxisAngle(
+            node.axisLift,
+            (swing * liftAmp + air * 14 * DEG) * -limb.root.side * node.liftScale,
+          );
+          _q.multiply(_q2);
+          _q2.setFromAxisAngle(node.axisSplay, splay * (1 + idle * 0.3));
           _q.multiply(_q2);
         } else {
-          _q2.setFromAxisAngle(node.axisSwing, -lift * amp * 1.4 * mirror);
+          // knee: tuck during the swing, extend to plant
+          // With a vertical hip the knee is the only thing that can pick the
+          // foot up, so it carries the whole lift.
+          const bend = (0.35 + swing * 0.65) * kneeAmp + air * 18 * DEG;
+          _q.setFromAxisAngle(this._strideAxis(node), -bend * mirror);
+          _q2.setFromAxisAngle(
+            node.axisLift,
+            -swing * liftAmp * 0.5 * -limb.root.side * node.liftScale,
+          );
           _q.multiply(_q2);
         }
         node.target.copy(limitQuat(_q, node.part.limit));
@@ -228,11 +340,11 @@ export class Animator {
     }
   }
 
-  /** No legs at all: everything just trails the acceleration.  */
+  /** No legs at all: everything just trails the acceleration. */
   _hover(s, dt) {
     for (const node of this.rig.joints) {
       if (node.part.boneType !== 'leg') continue;
-      _q.setFromAxisAngle(node.axisSwing, Math.sin(this.time * 1.6 + node.restPos.x) * 5 * DEG);
+      _q.setFromAxisAngle(node.axisStride, Math.sin(this.time * 1.6 + node.restPos.x) * 5 * DEG);
       node.target.copy(limitQuat(_q, node.part.limit));
     }
   }
@@ -252,7 +364,7 @@ export class Animator {
       const swing = -Math.sin(p * TAU) * swingAmp;
       const idleFloat = Math.sin(this.time * 1.3 + node.restPos.x * 2) * 3 * DEG;
 
-      _q.setFromAxisAngle(node.axisSwing, swing + idleFloat + s.thrust * 12 * DEG);
+      _q.setFromAxisAngle(this._strideAxis(node), swing + idleFloat + s.thrust * 12 * DEG);
 
       if (s.aimDir && this.aimBlend > 0.001) {
         this._aimQuat(node, s.aimDir, s.bodyQ, _q2);
@@ -285,7 +397,7 @@ export class Animator {
   _customs(s, dt) {
     for (const node of this.rig.customBones) {
       const c = node.part.custom ?? {};
-      const axis = c.axis === 'y' ? node.axisTwist : c.axis === 'z' ? node.axisSpread : node.axisSwing;
+      const axis = c.axis === 'y' ? node.axisTwist : c.axis === 'z' ? node.axisLift : node.axisStride;
       let drive = 1;
       switch (c.source) {
         case 'speed': drive = clamp01(s.planarSpeed / 18); break;
@@ -294,7 +406,8 @@ export class Animator {
         case 'aim': drive = this.aimBlend; break;
         default: drive = 1;
       }
-      const angle = Math.sin((this.time * (c.freq ?? 1) + (c.phase ?? 0)) * TAU) * (c.amp ?? 20) * DEG * drive;
+      const angle = Math.sin((this.time * (c.freq ?? 1) + (c.phase ?? 0)) * TAU)
+        * (c.amp ?? 20) * DEG * drive;
       _q.setFromAxisAngle(axis, angle);
       node.target.copy(limitQuat(_q, node.part.limit));
     }
@@ -306,8 +419,8 @@ export class Animator {
    */
   _aimQuat(node, worldDir, bodyQ, out) {
     _axis.copy(worldDir)
-      .applyQuaternion(_q2.copy(bodyQ).invert())   // -> body space
-      .applyQuaternion(_q2.copy(node.boneWorldQ).invert()) // -> bone-root space
+      .applyQuaternion(_q2.copy(bodyQ).invert())            // -> body space
+      .applyQuaternion(_q2.copy(node.boneWorldQ).invert())  // -> bone-root space
       .normalize();
     if (_axis.lengthSq() < 1e-6) return out.identity();
     return out.setFromUnitVectors(UP, _axis);
@@ -318,7 +431,7 @@ export class Animator {
   /** Slew every joint toward its target so nothing ever pops. */
   _commit(dt) {
     for (const node of this.rig.joints) {
-      const k = clamp01(1 - Math.pow(0.0008, dt * (node.part.boneType === 'leg' ? 1.4 : 1.0)));
+      const k = clamp01(1 - Math.pow(0.0008, dt * (node.part.boneType === 'leg' ? 1.6 : 1.0)));
       node.joint.quaternion.slerp(node.target, k);
     }
   }

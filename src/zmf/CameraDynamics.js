@@ -16,6 +16,9 @@ const _boom = new THREE.Vector3();
 const _boomUp = new THREE.Vector3();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
+/** Steepest the camera boom may tilt, as a sine of the angle from horizontal. */
+const BOOM_TILT_CAP = 0.35;
+
 export class CameraDynamics {
   constructor(camera) {
     this.camera = camera;
@@ -108,8 +111,20 @@ export class CameraDynamics {
     // spatial disorientation the whole model exists to avoid.
     _boom.copy(p.forward);
     _boom.y *= 0.42;
-    if (_boom.lengthSq() < 1e-5) _boom.set(0, 0, 1);
+    if (Math.hypot(_boom.x, _boom.z) < 1e-4) _boom.set(0, _boom.y, 1);
     _boom.normalize();
+
+    // Hard cap on how steep the boom may get. Scaling pitch alone is not
+    // enough: at a near-vertical dive even 42% of it still swings the camera
+    // overhead, and a top-down view is exactly what we are avoiding.
+    if (Math.abs(_boom.y) > BOOM_TILT_CAP) {
+      const sign = Math.sign(_boom.y);
+      const h = Math.hypot(_boom.x, _boom.z) || 1;
+      const want = Math.sqrt(1 - BOOM_TILT_CAP * BOOM_TILT_CAP) / h;
+      _boom.x *= want;
+      _boom.z *= want;
+      _boom.y = sign * BOOM_TILT_CAP;
+    }
 
     // Likewise the boom rises along an axis that is mostly world-up, so the
     // horizon stays roughly where the player left it.

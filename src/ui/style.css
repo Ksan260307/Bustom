@@ -116,7 +116,7 @@ html, body {
 
 /* ---------------------------------------------------------- controls */
 
-button, select, input[type="text"] {
+button, select, input[type="text"], input[type="number"] {
   font-family: inherit;
   font-size: 11px;
   color: var(--fg);
@@ -155,6 +155,7 @@ button.ghost { background: none; border-color: transparent; color: var(--dim); }
 button.ghost:hover { color: var(--fg); background: rgba(255, 255, 255, 0.06); }
 
 input[type="text"] { cursor: text; min-width: 130px; }
+input[type="number"] { cursor: text; }
 input[type="range"] { width: 100%; accent-color: var(--accent); }
 
 label.field {
@@ -282,8 +283,8 @@ label.field span.val { font-family: var(--mono); color: var(--fg); }
 
 /* ---------------------------------------------------------- layout slots */
 
-#leftpanel  { top: 74px; left: 14px; width: 194px; max-height: calc(100% - 96px); overflow-y: auto; }
-#rightpanel { top: 74px; right: 14px; width: 216px; max-height: calc(100% - 96px); overflow-y: auto; }
+#leftpanel  { top: 74px; left: 14px; width: 208px; max-height: calc(100% - 96px); overflow-y: auto; }
+#rightpanel { top: 74px; right: 14px; width: 226px; max-height: calc(100% - 96px); overflow-y: auto; }
 
 #leftpanel::-webkit-scrollbar, #rightpanel::-webkit-scrollbar { width: 6px; }
 #leftpanel::-webkit-scrollbar-thumb, #rightpanel::-webkit-scrollbar-thumb {
@@ -335,31 +336,6 @@ label.field span.val { font-family: var(--mono); color: var(--fg); }
   font-size: 11px;
 }
 
-#pointerhint {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(4, 7, 12, 0.68);
-  backdrop-filter: blur(3px);
-  cursor: pointer;
-  font-size: 14px;
-  letter-spacing: 0.08em;
-  color: var(--fg);
-  flex-direction: column;
-  gap: 10px;
-}
-
-#pointerhint .big {
-  font-family: var(--mono);
-  font-size: 20px;
-  letter-spacing: 0.2em;
-  color: var(--accent);
-}
-
-#pointerhint .sub { font-size: 11px; color: var(--dim); }
-
 .hidden { display: none !important; }
 
 .inspector-empty {
@@ -398,3 +374,126 @@ label.field span.val { font-family: var(--mono); color: var(--fg); }
 }
 
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ---------------------------------------------------------- additions */
+
+.panel h3.inline {
+  border: 0;
+  padding: 10px 0 2px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.panel h3.inline:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+
+.sliderbox { margin-bottom: 2px; }
+
+button.wide { width: 100%; margin-top: 6px; }
+
+.note {
+  font-size: 9.5px;
+  line-height: 1.5;
+  color: var(--dim);
+  margin-top: 5px;
+}
+
+/* ---------------------------------------------------------- colour wheel */
+
+.collapsed { display: none; }
+
+.wheelbox { margin-top: 8px; }
+
+canvas.wheel {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  cursor: crosshair;
+  touch-action: none;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.5));
+}
+
+.wheel-value { margin: 8px 0 6px; }
+
+.wheel-row { display: flex; align-items: center; gap: 7px; }
+
+.wheel-preview {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+input.wheel-hex {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  text-transform: lowercase;
+  padding: 5px 7px;
+}
+
+/* ---------------------------------------------------------- pause */
+
+#pause {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 7, 12, 0.62);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.pausebox {
+  width: 268px;
+  padding: 22px 22px 20px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+  text-align: center;
+}
+
+.pausetitle {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.26em;
+  color: var(--accent);
+  text-shadow: 0 0 18px rgba(79, 210, 255, 0.45);
+}
+
+.pausesub {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--dim);
+  margin: 6px 0 16px;
+}
+
+.pausebox button { padding: 9px 12px; }
+
+/* ---------------------------------------------------------- vector fields */
+
+.vecbox { margin-bottom: 5px; }
+
+.vecrow {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.vecrow input {
+  width: 100%;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 5px 4px;
+  text-align: right;
+}
+
+/* Native spinners eat the little width these fields have. */
+.vecrow input::-webkit-outer-spin-button,
+.vecrow input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.vecrow input { -moz-appearance: textfield; appearance: textfield; }

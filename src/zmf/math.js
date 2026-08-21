@@ -11,15 +11,25 @@ export const mix = lerp;
 /** Logistic curve centred on 0. `k` is the steepness. */
 export const sigmoid = (x, k = 1) => 1 / (1 + Math.exp(-x * k));
 
-/** Sigmoid remapped so that s(edge0)=~0 and s(edge1)=~1, with soft shoulders. */
+/**
+ * Sigmoid remapped so that s(edge0)=~0 and s(edge1)=~1, with soft shoulders.
+ * edge1 may be below edge0 for a descending ramp.
+ */
 export function softStep(x, edge0, edge1, steepness = 6) {
-  const t = (x - (edge0 + edge1) * 0.5) / Math.max(1e-6, (edge1 - edge0) * 0.5);
-  return sigmoid(t * steepness);
+  const half = (edge1 - edge0) * 0.5;
+  if (Math.abs(half) < 1e-9) return x >= edge1 ? 1 : 0;
+  return sigmoid(((x - (edge0 + edge1) * 0.5) / half) * steepness);
 }
 
-/** Classic smoothstep, used where we want hard 0/1 clamping at the ends. */
+/**
+ * Classic smoothstep, used where we want hard 0/1 clamping at the ends.
+ * edge1 may be below edge0: smoothstep(0.28, 0.02, x) is a descending ramp
+ * that reaches 1 as x falls, which is how "closeness to empty" is expressed.
+ */
 export function smoothstep(edge0, edge1, x) {
-  const t = clamp01((x - edge0) / Math.max(1e-6, edge1 - edge0));
+  const d = edge1 - edge0;
+  if (Math.abs(d) < 1e-9) return x >= edge1 ? 1 : 0;
+  const t = clamp01((x - edge0) / d);
   return t * t * (3 - 2 * t);
 }
 
@@ -41,9 +51,17 @@ export function approach(current, target, rate, dt) {
   return current + Math.sign(d) * step;
 }
 
-/** Asymmetric rate limiter: separate rise and fall speeds. */
+/**
+ * Asymmetric rate limiter: separate rise and fall speeds.
+ *
+ * A reversal counts as rising (you are commanding thrust the other way), but
+ * releasing to zero does NOT — otherwise every stick release would use the
+ * spool-up rate and the asymmetric braking the model depends on would never
+ * happen.
+ */
 export function slew(current, target, riseRate, fallRate, dt) {
-  const rising = Math.abs(target) > Math.abs(current) || Math.sign(target) !== Math.sign(current);
+  const reversing = current !== 0 && target !== 0 && Math.sign(target) !== Math.sign(current);
+  const rising = reversing || Math.abs(target) > Math.abs(current);
   return approach(current, target, rising ? riseRate : fallRate, dt);
 }
 

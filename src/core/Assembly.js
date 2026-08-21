@@ -1,35 +1,80 @@
-import { BONE, BONE_GAUGE, FACE_OPPOSITE } from './constants.js';
-import { createVoxels, bevel, encodeVoxels, decodeVoxels, voxelCount } from './Voxel.js';
+import * as THREE from 'three';
+import {
+  BONE, BONE_GAUGE, FACE_NORMAL, FACE_AXIS, DEFAULT_VOX, snapSize,
+  BONE_LENGTH_MIN, BONE_LENGTH_MAX, BONE_RADIUS_MIN, BONE_RADIUS_MAX,
+} from './constants.js';
+import { VoxelBlock } from './VoxelBlock.js';
+import { Palette } from './Palette.js';
 
 // ============================================================
 //  Assembly : the pure-data description of a robot.
 //
 //  A robot is a tree of parts rooted at exactly one CORE block.
+//  A part's PARENT decides which rigid segment it rides with; its
+//  MOUNT is a free position + rotation inside that parent's frame.
 //
-//    core ──face──> block ──face──> block
-//         └─face──> bone  ──slot──> block ──face──> block
-//                        └─tip───> bone (chained joint)
+//  There are no sockets. A part can sit flush against its parent, or
+//  float half a metre off it — which is what makes detached bits,
+//  floating pods and asymmetric silhouettes possible.
 //
-//  A bone is the only articulated element. Its near half is rigid
-//  with the parent segment; its centre is the joint; its far half
-//  (and everything mounted beyond) forms a child segment.
+//  Bones are still the only articulated element: the near half is rigid
+//  with the parent segment, the centre is the joint, and the far half
+//  (plus anything mounted past the midpoint) forms a child segment.
 // ============================================================
 
 let _uid = 0;
 const nextId = (prefix) => `${prefix}${(++_uid).toString(36)}`;
 
+/** Test seam: keeps generated ids reproducible. */
+export function _resetIds(v = 0) { _uid = v; }
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+const _q = new THREE.Quaternion();
+const _v = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
+
 /**
- * mount shapes
- *   on a block/core parent : { face: 0..5, roll: 0..3 }
- *   on a bone parent       : { slot: 0..length-1, roll: 0..3 }   threaded on the shaft
- *                          : { slot: 'tip', face: 0..5, roll }   chained off the far end
+ * mount = { pos: [x, y, z], rot: [x, y, z, w] }
+ * Both are expressed in the parent's own frame. For a bone parent that
+ * frame starts at the mount face with +Y running down the shaft, so
+ * `pos[1]` is simply "how far along the bone".
  */
+export const defaultMount = (m = {}) => ({ pos: [0, 0, 0], rot: [0, 0, 0, 1], ...m });
+
+/** Quaternion that points a bone's +Y shaft along a face normal. */
+export function alignYToFace(face, roll = 0) {
+  _v.fromArray(FACE_NORMAL[face]);
+  if (_v.y < -0.9999) _q.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
+  else _q.setFromUnitVectors(UP, _v);
+  if (roll) _q.multiply(new THREE.Quaternion().setFromAxisAngle(UP, (roll * Math.PI) / 2));
+  return _q.toArray();
+}
+
+/**
+ * Where a child would sit if you snapped it flush against one face of a
+ * block. Sockets are gone, but this is still the sensible default when the
+ * builder clicks on a surface, and it keeps the presets readable.
+ */
+export function faceAnchor(parentPart, face, childSize = [0, 0, 0]) {
+  const axis = FACE_AXIS[face];
+  const n = FACE_NORMAL[face];
+  const half = (parentPart.size?.[axis] ?? 1) / 2;
+  const d = half + (childSize[axis] ?? 0) / 2;
+  return [n[0] * d, n[1] * d, n[2] * d];
+}
+
+/** Where a child sits when threaded onto a bone, `t` units along the shaft. */
+export const boneAnchor = (t) => [0, t, 0];
 
 export class Assembly {
   constructor(name = 'NEW ROBO') {
     this.name = name;
     this.parts = new Map();
     this.rootId = null;
+    this.palette = new Palette();
+    /** Sculpt resolution shared by every block in the build. */
+    this.voxRes = DEFAULT_VOX;
   }
 
   // ---------------------------------------------------------- creation
@@ -47,7 +92,8 @@ export class Assembly {
       parent: null,
       mount: null,
       children: [],
-      vox: bevel(createVoxels(0), 2), // silver, chamfered
+      size: [1, 1, 1],
+      vox: new VoxelBlock(this.voxRes, 0).bevel(0.22), // silver, chamfered
       label: 'CORE',
     };
     this.parts.set(core.id, core);
@@ -60,16 +106,17 @@ export class Assembly {
   get size() { return this.parts.size; }
   list() { return [...this.parts.values()]; }
 
-  addBlock(parentId, mount, colorIndex = 2) {
+  addBlock(parentId, mount, colorIndex = 2, opts = {}) {
     const parent = this.parts.get(parentId);
     if (!parent) return null;
     const part = {
       id: nextId('b'),
       kind: 'block',
       parent: parentId,
-      mount,
+      mount: defaultMount(mount),
       children: [],
-      vox: createVoxels(colorIndex),
+      size: (opts.size ?? [1, 1, 1]).map(snapSize),
+      vox: new VoxelBlock(this.voxRes, colorIndex),
       label: 'BLOCK',
     };
     this.parts.set(part.id, part);
@@ -80,15 +127,16 @@ export class Assembly {
   addBone(parentId, mount, boneType = BONE.LEG, opts = {}) {
     const parent = this.parts.get(parentId);
     if (!parent) return null;
+    const gauge = BONE_GAUGE[opts.gauge] ?? BONE_GAUGE.thick;
     const part = {
       id: nextId('n'),
       kind: 'bone',
       parent: parentId,
-      mount,
+      mount: defaultMount(mount),
       children: [],
       boneType,
-      gauge: opts.gauge ?? 'thick',
-      length: Math.max(2, Math.min(8, opts.length ?? 3)),
+      radius: clamp(opts.radius ?? gauge.radius, BONE_RADIUS_MIN, BONE_RADIUS_MAX),
+      length: clamp(opts.length ?? 3, BONE_LENGTH_MIN, BONE_LENGTH_MAX),
       limit: opts.limit ?? 70,          // joint travel, degrees
       invert: opts.invert ?? false,     // mirror the animator's swing
       custom: opts.custom ?? { axis: 'x', amp: 30, freq: 1.0, phase: 0, source: 'time' },
@@ -99,21 +147,124 @@ export class Assembly {
     return part;
   }
 
+  /** Convenience for presets and for click-to-place: flush against a face. */
+  addBlockOnFace(parentId, face, colorIndex = 2, opts = {}) {
+    const parent = this.parts.get(parentId);
+    if (!parent) return null;
+    const size = (opts.size ?? [1, 1, 1]).map(snapSize);
+    return this.addBlock(parentId, { pos: faceAnchor(parent, face, size) }, colorIndex, { ...opts, size });
+  }
+
+  addBoneOnFace(parentId, face, boneType, opts = {}) {
+    const parent = this.parts.get(parentId);
+    if (!parent) return null;
+    return this.addBone(parentId, {
+      pos: faceAnchor(parent, face),
+      rot: alignYToFace(face, opts.roll ?? 0),
+    }, boneType, opts);
+  }
+
+  /** Thread a block onto a bone, `t` units along the shaft. */
+  addBlockOnBone(boneId, t, colorIndex = 2, opts = {}) {
+    return this.addBlock(boneId, { pos: boneAnchor(t) }, colorIndex, opts);
+  }
+
+  /** Chain a bone off the far tip of another bone. */
+  addBoneOnTip(boneId, boneType, opts = {}) {
+    const bone = this.parts.get(boneId);
+    if (!bone || bone.kind !== 'bone') return null;
+    return this.addBone(boneId, {
+      pos: boneAnchor(bone.length),
+      rot: alignYToFace(opts.face ?? 2, opts.roll ?? 0),
+    }, boneType, opts);
+  }
+
   /** Remove a part and everything mounted on it. Never removes the core. */
   remove(id) {
     const part = this.parts.get(id);
     if (!part || part.kind === 'core') return false;
+    for (const d of this.subtree(id)) this.parts.delete(d);
+    const parent = this.parts.get(part.parent);
+    if (parent) parent.children = parent.children.filter((c) => c !== id);
+    return true;
+  }
+
+  // ---------------------------------------------------------- editing
+
+  /** Every id at or below `id`. */
+  subtree(id) {
+    const out = [];
     const stack = [id];
-    const doomed = [];
     while (stack.length) {
       const cur = this.parts.get(stack.pop());
       if (!cur) continue;
-      doomed.push(cur.id);
+      out.push(cur.id);
       stack.push(...cur.children);
     }
-    for (const d of doomed) this.parts.delete(d);
-    const parent = this.parts.get(part.parent);
-    if (parent) parent.children = parent.children.filter((c) => c !== id);
+    return out;
+  }
+
+  /** Can `id` legally hang off `parentId`? */
+  canReparent(id, parentId) {
+    const part = this.parts.get(id);
+    if (!part || !this.parts.get(parentId)) return false;
+    if (part.kind === 'core') return false;
+    if (id === parentId) return false;
+    return !this.subtree(id).includes(parentId);
+  }
+
+  /**
+   * Change which segment a part rides with, keeping its mount as given.
+   * Free positioning means this is now only about ARTICULATION: what the
+   * part moves with, not where it is.
+   */
+  reparent(id, parentId, mount = null) {
+    if (!this.canReparent(id, parentId)) return false;
+    const part = this.parts.get(id);
+    const old = this.parts.get(part.parent);
+    if (old) old.children = old.children.filter((c) => c !== id);
+    part.parent = parentId;
+    if (mount) part.mount = defaultMount(mount);
+    this.parts.get(parentId).children.push(id);
+    return true;
+  }
+
+  setMount(id, { pos, rot } = {}) {
+    const part = this.parts.get(id);
+    if (!part || !part.mount) return false;
+    if (pos) part.mount.pos = [pos[0], pos[1], pos[2]];
+    if (rot) part.mount.rot = [rot[0], rot[1], rot[2], rot[3]];
+    return true;
+  }
+
+  /** Shift a part by a delta in its own parent's frame. */
+  translate(id, delta) {
+    const part = this.parts.get(id);
+    if (!part || !part.mount) return false;
+    part.mount.pos = part.mount.pos.map((v, i) => v + delta[i]);
+    return true;
+  }
+
+  setSize(id, size) {
+    const part = this.parts.get(id);
+    if (!part || part.kind === 'bone') return false;
+    part.size = size.map(snapSize);
+    return true;
+  }
+
+  setBoneShape(id, { length, radius } = {}) {
+    const part = this.parts.get(id);
+    if (!part || part.kind !== 'bone') return false;
+    if (length !== undefined) part.length = clamp(length, BONE_LENGTH_MIN, BONE_LENGTH_MAX);
+    if (radius !== undefined) part.radius = clamp(radius, BONE_RADIUS_MIN, BONE_RADIUS_MAX);
+    return true;
+  }
+
+  /** Change sculpt resolution for the whole build, resampling every block. */
+  setVoxResolution(n) {
+    if (this.voxRes === n) return false;
+    this.voxRes = n;
+    this.walk((p) => { if (p.kind !== 'bone') p.vox.setResolution(n, true); });
     return true;
   }
 
@@ -132,27 +283,7 @@ export class Assembly {
     const part = this.parts.get(id);
     if (!part) return;
     fn(part, depth);
-    for (const c of part.children) this.walk(fn, c, depth + 1);
-  }
-
-  /** Is this block face already taken by a child? */
-  isFaceOccupied(partId, face) {
-    const part = this.parts.get(partId);
-    if (!part) return true;
-    // A block also blocks the face it is mounted through.
-    if (part.mount && part.mount.face !== undefined && part.mount.slot === undefined) {
-      if (FACE_OPPOSITE[part.mount.face] === face) return true;
-    }
-    return part.children.some((c) => {
-      const ch = this.parts.get(c);
-      return ch.mount && ch.mount.slot === undefined && ch.mount.face === face;
-    });
-  }
-
-  isSlotOccupied(boneId, slot) {
-    const bone = this.parts.get(boneId);
-    if (!bone) return true;
-    return bone.children.some((c) => this.parts.get(c).mount?.slot === slot);
+    for (const c of [...part.children]) this.walk(fn, c, depth + 1);
   }
 
   /** Bones grouped by attribute, in stable tree order. */
@@ -160,6 +291,23 @@ export class Assembly {
     const out = [];
     this.walk((p) => { if (p.kind === 'bone' && p.boneType === type) out.push(p); });
     return out;
+  }
+
+  /** Palette indices referenced anywhere in the build. */
+  usedColors() {
+    const all = new Set();
+    this.walk((p) => {
+      if (p.kind === 'bone') return;
+      for (const c of p.vox.usedColors()) all.add(c);
+    });
+    return all;
+  }
+
+  /** Drop unreferenced custom colours and rewrite every voxel index. */
+  prunePalette() {
+    const remap = this.palette.prune(this.usedColors());
+    this.walk((p) => { if (p.kind !== 'bone') p.vox.remapColors(remap); });
+    return remap;
   }
 
   // ---------------------------------------------------------- serialisation
@@ -170,25 +318,50 @@ export class Assembly {
       const o = { id: p.id, kind: p.kind, parent: p.parent, mount: p.mount };
       if (p.kind === 'bone') {
         Object.assign(o, {
-          boneType: p.boneType, gauge: p.gauge, length: p.length,
+          boneType: p.boneType, radius: p.radius, length: p.length,
           limit: p.limit, invert: p.invert, custom: p.custom,
         });
       } else {
-        o.vox = encodeVoxels(p.vox);
+        o.size = p.size;
+        o.vox = p.vox.encode();
       }
       parts.push(o);
     });
-    return { format: 'brostom.assembly', version: 1, name: this.name, root: this.rootId, parts };
+    return {
+      format: 'brostom.assembly',
+      version: 3,
+      name: this.name,
+      root: this.rootId,
+      voxRes: this.voxRes,
+      palette: this.palette.toJSON(),
+      parts,
+    };
   }
 
   static fromJSON(data) {
     const a = new Assembly(data.name ?? 'ROBO');
     a.parts.clear();
     a.rootId = data.root;
+    a.voxRes = data.voxRes ?? DEFAULT_VOX;
+    a.palette = Palette.fromJSON(data.palette);
+
+    const raw = new Map();
+    for (const o of data.parts) raw.set(o.id, o);
+
     for (const o of data.parts) {
       const part = { ...o, children: [] };
-      if (o.kind === 'bone') delete part.vox;
-      else part.vox = decodeVoxels(o.vox);
+      if (o.kind === 'bone') {
+        delete part.vox;
+        // v1 builds carried a named gauge instead of a free radius
+        if (part.radius === undefined) {
+          part.radius = (BONE_GAUGE[o.gauge] ?? BONE_GAUGE.thick).radius;
+        }
+        delete part.gauge;
+      } else {
+        part.size = (o.size ?? [1, 1, 1]).map(snapSize);
+        part.vox = VoxelBlock.decode(a.voxRes, o.vox);
+      }
+      part.mount = o.mount ? upgradeMount(o, raw) : null;
       a.parts.set(part.id, part);
       // keep the uid counter ahead of any loaded id
       const n = parseInt(String(o.id).slice(1), 36);
@@ -203,11 +376,47 @@ export class Assembly {
   clone() { return Assembly.fromJSON(JSON.parse(JSON.stringify(this.toJSON()))); }
 }
 
+/**
+ * Convert a v1/v2 socket mount (face + slot + roll + offset) into the free
+ * position/rotation the current format uses. Everything a socket could
+ * express is a special case of a free transform, so nothing is lost.
+ */
+function upgradeMount(o, raw) {
+  const m = o.mount;
+  if (!m) return null;
+  if (m.pos) return defaultMount(m);              // already v3
+
+  const parent = raw.get(o.parent);
+  const offset = m.offset ?? [0, 0, 0];
+  const isBone = o.kind === 'bone';
+
+  if (parent?.kind === 'bone') {
+    const L = parent.length ?? 3;
+    let t;
+    if (m.slot === 'tip') t = L;
+    else {
+      const slots = Math.max(1, Math.round(L));
+      t = ((m.slot + 0.5) * L) / slots;
+    }
+    const rot = m.slot === 'tip'
+      ? alignYToFace(m.face ?? 2, m.roll ?? 0)
+      : (m.roll ? new THREE.Quaternion().setFromAxisAngle(UP, (m.roll * Math.PI) / 2).toArray() : [0, 0, 0, 1]);
+    return defaultMount({ pos: [offset[0], t + offset[1], offset[2]], rot });
+  }
+
+  const face = m.face ?? 2;
+  const parentSize = parent?.size ?? [1, 1, 1];
+  const childSize = isBone ? [0, 0, 0] : (o.size ?? [1, 1, 1]);
+  const pos = faceAnchor({ size: parentSize }, face, childSize);
+  return defaultMount({
+    pos: [pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]],
+    rot: isBone ? alignYToFace(face, m.roll ?? 0) : [0, 0, 0, 1],
+  });
+}
+
 // ============================================================
 //  Derived combat / motion statistics
 // ============================================================
-
-const VOX_TOTAL = 8 * 8 * 8;
 
 /**
  * Everything the ZMF body and the animators need to know about a build.
@@ -216,18 +425,25 @@ const VOX_TOTAL = 8 * 8 * 8;
  */
 export function computeStats(assembly, rig = null) {
   let blockCount = 0;
-  let voxelSolid = 0;
+  let volume = 0;
+  let solidVolume = 0;
   let boneMass = 0;
+  let thrust = 30;
   const bones = { leg: 0, arm: 0, face: 0, custom: 0 };
 
   assembly.walk((p) => {
     if (p.kind === 'bone') {
-      const meta = BONE_GAUGE[p.gauge] ?? BONE_GAUGE.thick;
-      boneMass += p.length * 0.28 * meta.massScale;
+      // Thicker and longer bones weigh more, quadratically in radius.
+      boneMass += p.length * 0.28 * Math.pow(p.radius / BONE_GAUGE.thick.radius, 1.6);
       bones[p.boneType] = (bones[p.boneType] ?? 0) + 1;
     } else {
       blockCount++;
-      voxelSolid += voxelCount(p.vox);
+      const vol = p.size[0] * p.size[1] * p.size[2];
+      volume += vol;
+      solidVolume += vol * (p.vox.solid / p.vox.total);
+      // Thrust scales with surface area, mass with volume: scaling a part up
+      // makes it heavier faster than it makes it stronger.
+      thrust += 34 * Math.pow(vol, 2 / 3);
     }
   });
 
@@ -235,31 +451,27 @@ export function computeStats(assembly, rig = null) {
   // one leg. The gait therefore counts limbs, which is what "1 leg / 2 legs /
   // 3+ legs" means to anyone actually building a robot.
   const limbs = countLimbs(assembly);
+  thrust += limbs * 8;
 
-  // A full 1x1x1 block weighs 1.0; carving it out makes it genuinely lighter.
-  const blockMass = voxelSolid / VOX_TOTAL;
-  const mass = Math.max(0.8, blockMass + boneMass);
+  // A solid 1x1x1 block weighs 1.0; carving it out makes it genuinely lighter.
+  const mass = Math.max(0.8, solidVolume + boneMass);
 
-  // Density: how much of the occupied lattice is actually solid. Hollowed,
+  // Density: how much of the occupied volume is actually solid. Hollowed,
   // skeletal builds are nimble; packed bricks are ponderous.
-  const density = blockCount ? voxelSolid / (blockCount * VOX_TOTAL) : 1;
-
-  // Thrust comes from BLOCKS — each one carries engine volume — while mass
-  // comes from solid voxels. That is the lever the sculpt tools pull on:
-  // hollow a block out and it keeps its thrust but sheds its weight.
-  const thrust = 30 + blockCount * 34 + limbs * 8;
+  const density = volume ? solidVolume / volume : 1;
   const thrustToMass = thrust / mass;
 
   // Radius of gyration from the rig, if we have one (falls back to a guess).
-  let extent = 1.2;
+  let extent;
   if (rig) extent = Math.max(0.8, rig.boundingRadius);
-  else extent = 0.8 + Math.cbrt(blockCount) * 0.55;
+  else extent = 0.8 + Math.cbrt(Math.max(1, volume)) * 0.55;
 
   const inertia = mass * extent * extent * 0.42;
 
   return {
     blockCount,
-    voxelSolid,
+    volume,
+    solidVolume,
     mass,
     density,
     extent,
@@ -282,7 +494,7 @@ export function gaitFor(legs) {
   if (legs <= 0) return 'hover';
   if (legs === 1) return 'hop';
   if (legs === 2) return 'walk';
-  return 'skitter';
+  return 'multileg';
 }
 
 /** Leg bones that have no leg bone above them: one per actual leg. */
@@ -312,27 +524,24 @@ export function presetBiped() {
   const a = new Assembly('STRIDER');
   const core = a.addCore();
 
-  // --- torso
-  const chest = a.addBlock(core.id, { face: 2, roll: 0 }, 1);   // +Y
-  const waist = a.addBlock(core.id, { face: 3, roll: 0 }, 2);   // -Y
+  const chest = a.addBlockOnFace(core.id, 2, 1, { size: [1.5, 1, 1] });
+  const waist = a.addBlockOnFace(core.id, 3, 2, { size: [1.25, 0.75, 1] });
 
-  const head = a.addBone(chest.id, { face: 2, roll: 0 }, BONE.FACE, { length: 2, gauge: 'thin' });
-  a.addBlock(head.id, { slot: 1, roll: 0 }, 4);
+  const head = a.addBoneOnFace(chest.id, 2, BONE.FACE, { length: 1.2, gauge: 'thin' });
+  a.addBlockOnBone(head.id, 0.6, 4, { size: [0.75, 0.75, 0.75] });
 
-  // --- shoulders + arms
   for (const face of [0, 1]) {
-    const shoulder = a.addBlock(chest.id, { face, roll: 0 }, 1);
-    const arm = a.addBone(shoulder.id, { face: 3, roll: 0 }, BONE.ARM, { length: 3, gauge: 'thin' });
-    a.addBlock(arm.id, { slot: 2, roll: 0 }, 5);
+    const shoulder = a.addBlockOnFace(chest.id, face, 1, { size: [0.5, 0.75, 0.75] });
+    const arm = a.addBoneOnFace(shoulder.id, 3, BONE.ARM, { length: 2.5, gauge: 'thin' });
+    a.addBlockOnBone(arm.id, 2, 5, { size: [0.75, 0.75, 0.75] });
   }
 
-  // --- hips + legs (thigh, knee block, shin, foot block)
   for (const face of [0, 1]) {
-    const hip = a.addBlock(waist.id, { face, roll: 0 }, 2);
-    const thigh = a.addBone(hip.id, { face: 3, roll: 0 }, BONE.LEG, { length: 2 });
-    a.addBlock(thigh.id, { slot: 1, roll: 0 }, 1);
-    const shin = a.addBone(thigh.id, { slot: 'tip', face: 2, roll: 0 }, BONE.LEG, { length: 2, gauge: 'thin' });
-    a.addBlock(shin.id, { slot: 1, roll: 0 }, 2);
+    const hip = a.addBlockOnFace(waist.id, face, 2, { size: [0.5, 0.75, 0.75] });
+    const thigh = a.addBoneOnFace(hip.id, 3, BONE.LEG, { length: 2, gauge: 'mid' });
+    a.addBlockOnBone(thigh.id, 1.5, 1, { size: [0.75, 0.75, 0.75] });
+    const shin = a.addBoneOnTip(thigh.id, BONE.LEG, { length: 2, gauge: 'thin' });
+    a.addBlockOnBone(shin.id, 1.5, 2, { size: [0.75, 0.5, 1] });
   }
 
   return a;
@@ -342,48 +551,83 @@ export function presetHopper() {
   const a = new Assembly('POGO');
   const core = a.addCore();
 
-  const leg = a.addBone(core.id, { face: 3, roll: 0 }, BONE.LEG, { length: 3 });
-  a.addBlock(leg.id, { slot: 2, roll: 0 }, 6);
+  const leg = a.addBoneOnFace(core.id, 3, BONE.LEG, { length: 3, gauge: 'thick' });
+  a.addBlockOnBone(leg.id, 2.5, 6, { size: [1, 0.5, 1.25] });
 
-  const eye = a.addBone(core.id, { face: 4, roll: 0 }, BONE.FACE, { length: 2, gauge: 'thin' });
-  a.addBlock(eye.id, { slot: 1, roll: 0 }, 15);
+  const eye = a.addBoneOnFace(core.id, 4, BONE.FACE, { length: 1.2, gauge: 'thin' });
+  a.addBlockOnBone(eye.id, 0.6, 15, { size: [0.75, 0.5, 0.5] });
 
-  const hood = a.addBlock(core.id, { face: 2, roll: 0 }, 5);
+  const hood = a.addBlockOnFace(core.id, 2, 5, { size: [1.25, 0.5, 1] });
   for (const face of [0, 1]) {
-    const pod = a.addBlock(hood.id, { face, roll: 0 }, 2);
-    const arm = a.addBone(pod.id, { face: 3, roll: 0 }, BONE.ARM, { length: 2, gauge: 'thin' });
-    a.addBlock(arm.id, { slot: 1, roll: 0 }, 5);
+    const pod = a.addBlockOnFace(hood.id, face, 2, { size: [0.5, 0.5, 0.5] });
+    const arm = a.addBoneOnFace(pod.id, 3, BONE.ARM, { length: 1.5, gauge: 'thin' });
+    a.addBlockOnBone(arm.id, 0.75, 5, { size: [0.5, 0.5, 0.5] });
+  }
+
+  // Two free-floating bits, riding the core segment with nothing touching them.
+  for (const side of [-1, 1]) {
+    a.addBlock(core.id, { pos: [side * 1.9, 1.5, -0.4] }, 15, { size: [0.5, 0.5, 0.75] });
   }
   return a;
 }
 
-export function presetSkitter() {
+/**
+ * Four legs, hung straight down off outriggers. A bone mount rotation is read
+ * in its parent's frame, so a knee chained off a sideways hip would fold back
+ * into the body; the sideways stance comes from the animator's splay instead.
+ */
+export function presetMultileg() {
   const a = new Assembly('CRAWLER');
   const core = a.addCore();
-  const spine = a.addBlock(core.id, { face: 5, roll: 0 }, 1);   // -Z, the abdomen
+  const spine = a.addBlockOnFace(core.id, 5, 1, { size: [1.25, 0.75, 1.25] });
 
-  const head = a.addBone(core.id, { face: 4, roll: 0 }, BONE.FACE, { length: 2, gauge: 'thin' });
-  a.addBlock(head.id, { slot: 1, roll: 0 }, 12);
+  const head = a.addBoneOnFace(core.id, 4, BONE.FACE, { length: 1.2, gauge: 'thin' });
+  a.addBlockOnBone(head.id, 0.6, 12, { size: [0.75, 0.5, 0.75] });
 
-  // four legs, hung off outriggers so they actually point at the floor
   for (const host of [core, spine]) {
     for (const face of [0, 1]) {
-      const outrigger = a.addBlock(host.id, { face, roll: 0 }, 2);
-      const leg = a.addBone(outrigger.id, { face: 3, roll: 0 }, BONE.LEG, { length: 2, gauge: 'thin' });
-      a.addBlock(leg.id, { slot: 1, roll: 0 }, 8);
+      const outrigger = a.addBlockOnFace(host.id, face, 2, { size: [0.75, 0.5, 0.75] });
+      const hip = a.addBoneOnFace(outrigger.id, 3, BONE.LEG, {
+        length: 1.25, gauge: 'mid', limit: 80, invert: face === 1,
+      });
+      const knee = a.addBoneOnTip(hip.id, BONE.LEG, {
+        length: 1.5, gauge: 'thin', limit: 90, invert: face === 1,
+      });
+      a.addBlockOnBone(knee.id, 1.1, 8, { size: [0.5, 0.5, 0.75] });
     }
   }
 
-  const tail = a.addBone(spine.id, { face: 5, roll: 0 }, BONE.CUSTOM, {
-    length: 3, gauge: 'thin', custom: { axis: 'x', amp: 24, freq: 1.6, phase: 0, source: 'speed' },
+  const tail = a.addBoneOnFace(spine.id, 5, BONE.CUSTOM, {
+    length: 2.5, gauge: 'thin', custom: { axis: 'x', amp: 24, freq: 1.6, phase: 0, source: 'speed' },
   });
-  a.addBlock(tail.id, { slot: 2, roll: 0 }, 15);
+  a.addBlockOnBone(tail.id, 1.8, 15, { size: [0.5, 0.5, 0.75] });
+  return a;
+}
+
+/** A core surrounded by detached bits: the thing free placement is for. */
+export function presetBits() {
+  const a = new Assembly('FUNNEL');
+  const core = a.addCore();
+  a.addBlockOnFace(core.id, 4, 9, { size: [0.75, 0.5, 0.5] });
+
+  const ring = 6;
+  for (let i = 0; i < ring; i++) {
+    const t = (i / ring) * Math.PI * 2;
+    a.addBlock(core.id, {
+      pos: [Math.cos(t) * 1.8, 0.35 + Math.sin(t * 2) * 0.3, Math.sin(t) * 1.8],
+      rot: new THREE.Quaternion().setFromAxisAngle(UP, -t).toArray(),
+    }, 15, { size: [0.5, 0.25, 0.75] });
+  }
+
+  const leg = a.addBoneOnFace(core.id, 3, BONE.LEG, { length: 2, gauge: 'mid' });
+  a.addBlockOnBone(leg.id, 1.5, 2, { size: [1, 0.5, 1] });
   return a;
 }
 
 export const PRESETS = {
   biped: { label: '2脚 STRIDER', build: presetBiped },
   hopper: { label: '1脚 POGO', build: presetHopper },
-  skitter: { label: '4脚 CRAWLER', build: presetSkitter },
+  multileg: { label: '4脚 CRAWLER', build: presetMultileg },
+  bits: { label: '浮遊ビット FUNNEL', build: presetBits },
   core: { label: 'コアのみ', build: () => Assembly.createDefault() },
 };

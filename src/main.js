@@ -1,7 +1,5 @@
 import * as THREE from 'three';
-import { Assembly, PRESETS, computeStats } from './core/Assembly.js';
-import { createVoxels, bevel, paintBrush } from './core/Voxel.js';
-import { VOX } from './core/constants.js';
+import { Assembly, PRESETS } from './core/Assembly.js';
 import { EditorScene, TOOL } from './editor/EditorScene.js';
 import { FieldScene } from './game/FieldScene.js';
 import { EditorUI } from './ui/EditorUI.js';
@@ -16,22 +14,22 @@ import { KineticFeedback } from './zmf/KineticFeedback.js';
 const SAVE_KEY = 'brostom.assembly.v1';
 
 const TOOL_KEYS = {
+  KeyV: TOOL.SELECT,
   KeyB: TOOL.BLOCK,
   KeyL: TOOL.BONE_LEG,
   KeyA: TOOL.BONE_ARM,
   KeyF: TOOL.BONE_FACE,
   KeyC: TOOL.BONE_CUSTOM,
-  KeyV: TOOL.SELECT,
   KeyX: TOOL.CARVE,
   KeyZ: TOOL.ADD,
   KeyP: TOOL.PAINT,
 };
 
-class App {
-  constructor() {
-    this.canvas = document.getElementById('gl');
-    this.hudCanvas = document.getElementById('hud');
-    this.overlay = document.getElementById('overlay');
+export class App {
+  constructor({ canvas, hudCanvas, overlay } = {}) {
+    this.canvas = canvas ?? document.getElementById('gl');
+    this.hudCanvas = hudCanvas ?? document.getElementById('hud');
+    this.overlay = overlay ?? document.getElementById('overlay');
 
     this.renderer = new THREE.WebGLRenderer({
       canvas: this.canvas, antialias: true, powerPreference: 'high-performance',
@@ -50,7 +48,7 @@ class App {
 
     this.editor = new EditorScene({ renderer: this.renderer, canvas: this.canvas });
     this.editor.onChange = (stats) => this.ui?.renderStats(stats);
-    this.editor.onSelect = (part) => this.ui?.renderInspector(part);
+    this.editor.onSelect = (parts) => this.ui?.renderInspector(parts);
     this.editor.setAssembly(this.assembly);
 
     this.field = new FieldScene({
@@ -68,7 +66,8 @@ class App {
     this.setMode('edit');
 
     this._bindGlobalKeys();
-    window.addEventListener('resize', () => this.resize());
+    this._onResize = () => this.resize();
+    window.addEventListener('resize', this._onResize);
     this.resize();
 
     this.clock = new THREE.Clock();
@@ -88,7 +87,9 @@ class App {
   }
 
   save() {
+    this.assembly.prunePalette();
     localStorage.setItem(SAVE_KEY, JSON.stringify(this.assembly.toJSON()));
+    this.ui.renderPalette();
     this.ui.toastMsg(`「${this.assembly.name}」を保存しました`);
   }
 
@@ -100,7 +101,7 @@ class App {
   }
 
   exportJson() {
-    const blob = new Blob([JSON.stringify(this.assembly.toJSON(), null, 1)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify(this.assembly.toJSON())], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `${this.assembly.name.replace(/\s+/g, '_') || 'robo'}.brostom.json`;
@@ -116,8 +117,7 @@ class App {
       const file = inp.files?.[0];
       if (!file) return;
       try {
-        const data = JSON.parse(await file.text());
-        this._adopt(Assembly.fromJSON(data));
+        this._adopt(Assembly.fromJSON(JSON.parse(await file.text())));
         this.ui.toastMsg(`${file.name} を読み込みました`);
       } catch (e) {
         this.ui.toastMsg('読み込みに失敗しました');
@@ -138,6 +138,8 @@ class App {
     this.assembly = assembly;
     this.editor.setAssembly(assembly);
     this.ui.syncName(assembly.name);
+    this.ui.syncResolution(assembly.voxRes);
+    this.ui.renderPalette();
     this.ui.renderStats(this.editor.stats);
   }
 
@@ -148,16 +150,45 @@ class App {
     this.ui.syncTool(tool);
   }
 
+  setGizmoMode(mode) {
+    this.editor.setGizmoMode(mode);
+    this.ui.syncGizmoMode(this.editor.gizmoMode);
+  }
+
   setColor(i) {
     this.editor.colorIndex = i;
     this.ui.syncColor(i);
   }
 
+  /** Called continuously while the colour wheel is dragged. */
+  setCustomColor(hex) {
+    const idx = this.assembly.palette.ensure(hex);
+    if (idx < 0) { this.ui.toastMsg('カラーが上限に達しました'); return; }
+    this.editor.colorIndex = idx;
+    this.ui.renderPalette();
+  }
+
+  setVoxResolution(n) {
+    if (!this.assembly.setVoxResolution(n)) return;
+    this.editor.rebuild();
+    this.ui.syncResolution(n);
+    this.ui.renderInspector(this.editor.selectedParts());
+    this.ui.toastMsg(`加工の細かさを 1/${n} にしました`);
+  }
+
   applyBoneOptionToSelection(key, value) {
     const part = this.editor.selected ? this.assembly.get(this.editor.selected) : null;
     if (!part || part.kind !== 'bone') return;
-    part[key] = value;
-    if (key === 'length' || key === 'gauge') this.editor.rebuild();
+    if (key === 'length' || key === 'radius') this.editor.setBoneShapeSelected({ [key]: value });
+    else part[key] = value;
+  }
+
+  uniformSize(v) {
+    if (!this.editor.selected) return;
+    const part = this.assembly.get(this.editor.selected);
+    if (!part || part.kind === 'bone') return;
+    this.editor.resizeSelected([v, v, v]);
+    this.ui.renderInspector(this.editor.selectedParts());
   }
 
   _selectedBlock() {
@@ -168,29 +199,28 @@ class App {
   fillSelected() {
     const part = this._selectedBlock();
     if (!part) return;
-    part.vox.set(createVoxels(this.editor.colorIndex));
+    part.vox.fill(this.editor.colorIndex);
     this._afterVoxelEdit(part);
   }
 
   bevelSelected() {
     const part = this._selectedBlock();
     if (!part) return;
-    bevel(part.vox, 2);
+    part.vox.bevel(0.22);
     this._afterVoxelEdit(part);
   }
 
   repaintSelected() {
     const part = this._selectedBlock();
     if (!part) return;
-    paintBrush(part.vox, VOX / 2, VOX / 2, VOX / 2, VOX * 2, this.editor.colorIndex);
+    part.vox.repaint(this.editor.colorIndex);
     this._afterVoxelEdit(part);
   }
 
   _afterVoxelEdit(part) {
     this.editor.rig.refreshBlock(part.id);
-    this.editor.stats = computeStats(this.assembly, this.editor.rig);
-    this.ui.renderStats(this.editor.stats);
-    this.ui.renderInspector(part);
+    this.editor.refreshStats();
+    this.ui.renderInspector(this.editor.selectedParts());
   }
 
   // ---------------------------------------------------------- modes
@@ -203,56 +233,91 @@ class App {
       this.field.exit();
       this.editor.enter();
       this.hudCanvas.classList.add('hidden');
-      this.ui.setPointerHint(false);
     } else {
       this.editor.exit();
       this.hudCanvas.classList.remove('hidden');
-      this.feedback.init();
       this.field.load(this.assembly);
       this.field.enter();
-      this.ui.setPointerHint(true);
+      // Straight into the action — the pause menu is for Esc, not for entry.
+      this.resumeField();
     }
     this.ui.syncMode(mode);
     this.resize();
   }
 
-  capturePointer() {
+  pauseField() {
+    if (this.mode !== 'field') return;
+    this.field.setPaused(true);
+    this.input.exitPointerLock();
+    this.feedback.suspend();
+    this.ui.setPaused(true);
+  }
+
+  resumeField() {
+    if (this.mode !== 'field') return;
+    this.field.setPaused(false);
+    this.ui.setPaused(false);
     this.input.requestPointerLock();
     this.feedback.init();
     this.feedback.resume();
-    this.ui.setPointerHint(false);
+  }
+
+  restartField() {
+    if (this.mode !== 'field') return;
+    this.field.respawn();
+    this.resumeField();
   }
 
   // ---------------------------------------------------------- input
 
   _bindGlobalKeys() {
-    window.addEventListener('keydown', (e) => {
+    this._onKey = (e) => {
       if (e.target && /input|textarea|select/i.test(e.target.tagName)) return;
 
       if (e.code === 'Escape') {
-        if (this.mode === 'field') this.ui.setPointerHint(true);
+        if (this.mode === 'field') {
+          if (this.field.paused) this.resumeField();
+          else this.pauseField();
+        } else {
+          this.editor.clearSelection();
+        }
         return;
       }
-      if (e.code === 'F5' || e.metaKey || e.ctrlKey) return;
+
+      // Ctrl shortcuts, before the plain-key tool bindings swallow the letter.
+      if (e.ctrlKey || e.metaKey) {
+        if (this.mode !== 'edit') return;
+        if (e.code === 'KeyA') { e.preventDefault(); this.editor.selectAll(); }
+        if (e.code === 'KeyD') { e.preventDefault(); this.editor.duplicateSelected(); }
+        return;
+      }
+      if (e.code === 'F5') return;
 
       if (this.mode === 'edit') {
         const tool = TOOL_KEYS[e.code];
         if (tool) { e.preventDefault(); this.setTool(tool); }
+        if (e.code === 'KeyT') { e.preventDefault(); this.setGizmoMode('translate'); }
+        if (e.code === 'KeyR') { e.preventDefault(); this.setGizmoMode('rotate'); }
         if (e.code === 'Enter') { e.preventDefault(); this.setMode('field'); }
         if (e.code === 'KeyS' && e.shiftKey) { e.preventDefault(); this.save(); }
       }
-    });
+    };
+    window.addEventListener('keydown', this._onKey);
 
-    document.addEventListener('pointerlockchange', () => {
-      if (this.mode === 'field') this.ui.setPointerHint(!document.pointerLockElement);
-    });
+    // Losing the pointer lock in any other way should also stop the action.
+    this._onLock = () => {
+      if (this.mode === 'field' && !document.pointerLockElement && !this.field.paused) {
+        this.pauseField();
+      }
+    };
+    document.addEventListener('pointerlockchange', this._onLock);
   }
 
   // ---------------------------------------------------------- frame
 
   resize() {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
+    const w = Math.max(1, window.innerWidth);
+    const h = Math.max(1, window.innerHeight);
     this.renderer.setSize(w, h, false);
     this.editor.resize(w, h);
     this.field.resize(w, h);
@@ -271,8 +336,20 @@ class App {
       this.input.endFrame();
     }
   }
+
+  dispose() {
+    this.renderer.setAnimationLoop(null);
+    window.removeEventListener('resize', this._onResize);
+    window.removeEventListener('keydown', this._onKey);
+    document.removeEventListener('pointerlockchange', this._onLock);
+    this.editor.dispose();
+    this.input.dispose();
+    this.renderer.dispose();
+  }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
-  window.__brostom = new App();
-});
+if (typeof window !== 'undefined' && !window.__BROSTOM_NO_AUTOBOOT) {
+  window.addEventListener('DOMContentLoaded', () => {
+    window.__brostom = new App();
+  });
+}
