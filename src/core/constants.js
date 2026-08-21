@@ -91,7 +91,7 @@ export const LOCK_COLOR = '#4fd2ff';
 /** Gait keys, and how they read in the UI. */
 export const GAIT_LABEL = {
   hover: 'ホバー',
-  hop: 'ぴょんぴょん',
+  hop: '単脚',
   walk: '二足歩行',
   multileg: '多脚',
 };

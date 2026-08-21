@@ -85,6 +85,31 @@ export class Assembly {
     return a;
   }
 
+  /**
+   * A standalone part document. Same format as a robot, but rooted at an
+   * ordinary block rather than a core — so it can be authored on its own and
+   * later grafted into a machine as a real, deletable part.
+   */
+  static createPart(name = 'NEW PART', colorIndex = 2) {
+    const a = new Assembly(name);
+    const root = {
+      id: nextId('p'),
+      kind: 'block',
+      parent: null,
+      mount: null,
+      children: [],
+      size: [1, 1, 1],
+      vox: new VoxelBlock(a.voxRes, colorIndex),
+      label: 'PART',
+    };
+    a.parts.set(root.id, root);
+    a.rootId = root.id;
+    return a;
+  }
+
+  /** Is this a part document rather than a machine? */
+  get isPart() { return this.core?.kind !== 'core'; }
+
   addCore() {
     const core = {
       id: nextId('c'),
@@ -179,10 +204,10 @@ export class Assembly {
     }, boneType, opts);
   }
 
-  /** Remove a part and everything mounted on it. Never removes the core. */
+  /** Remove a part and everything mounted on it. Never removes the root. */
   remove(id) {
     const part = this.parts.get(id);
-    if (!part || part.kind === 'core') return false;
+    if (!part || id === this.rootId) return false;
     for (const d of this.subtree(id)) this.parts.delete(d);
     const parent = this.parts.get(part.parent);
     if (parent) parent.children = parent.children.filter((c) => c !== id);
@@ -266,6 +291,113 @@ export class Assembly {
     this.voxRes = n;
     this.walk((p) => { if (p.kind !== 'bone') p.vox.setResolution(n, true); });
     return true;
+  }
+
+  // ---------------------------------------------------------- extract / graft
+
+  /**
+   * Lift a subtree out into a standalone part document, carrying only the
+   * colours it actually uses. This is the single mechanism behind copy,
+   * duplicate and "save as a part".
+   */
+  extract(id) {
+    const src = this.parts.get(id);
+    if (!src) return null;
+
+    const out = new Assembly(this.name);
+    out.voxRes = this.voxRes;
+    out.parts.clear();
+
+    const colorMap = new Map();
+    const mapColor = (i) => {
+      if (!colorMap.has(i)) colorMap.set(i, Math.max(0, out.palette.ensure(this.palette.get(i))));
+      return colorMap.get(i);
+    };
+
+    const idMap = new Map();
+    this.walk((p) => {
+      const isRoot = p.id === id;
+      const copy = {
+        id: p.id,
+        kind: isRoot ? (p.kind === 'core' ? 'block' : p.kind) : p.kind,
+        parent: isRoot ? null : idMap.get(p.parent) ?? p.parent,
+        mount: isRoot ? null : defaultMount({ pos: [...p.mount.pos], rot: [...p.mount.rot] }),
+        children: [],
+        label: p.label,
+      };
+      if (p.kind === 'bone') {
+        Object.assign(copy, {
+          boneType: p.boneType, radius: p.radius, length: p.length,
+          limit: p.limit, invert: p.invert, custom: { ...p.custom },
+        });
+      } else {
+        copy.size = [...p.size];
+        copy.vox = p.vox.clone();
+        const remap = new Map();
+        for (const c of copy.vox.usedColors()) remap.set(c, mapColor(c));
+        copy.vox.remapColors(remap);
+      }
+      out.parts.set(copy.id, copy);
+      idMap.set(p.id, copy.id);
+      if (isRoot) out.rootId = copy.id;
+    }, id);
+
+    for (const p of out.parts.values()) {
+      if (p.parent && out.parts.has(p.parent)) out.parts.get(p.parent).children.push(p.id);
+    }
+    return out;
+  }
+
+  /**
+   * Insert a whole part document under `parentId`, at `mount`.
+   * Ids are regenerated, and the source palette is merged into this one so
+   * the colours the author picked survive the trip.
+   * @returns the newly created root part, or null
+   */
+  graft(source, parentId, mount) {
+    if (!source || !this.parts.get(parentId)) return null;
+
+    const colorMap = new Map();
+    const mapColor = (i) => {
+      if (!colorMap.has(i)) {
+        const idx = this.palette.ensure(source.palette.get(i));
+        colorMap.set(i, idx < 0 ? 0 : idx);
+      }
+      return colorMap.get(i);
+    };
+
+    const idMap = new Map();
+    let rootCopy = null;
+
+    source.walk((p) => {
+      const isRoot = p.id === source.rootId;
+      const destParent = isRoot ? parentId : idMap.get(p.parent);
+      if (!destParent) return;
+      const m = isRoot
+        ? defaultMount(mount)
+        : defaultMount({ pos: [...p.mount.pos], rot: [...p.mount.rot] });
+
+      let copy;
+      if (p.kind === 'bone') {
+        copy = this.addBone(destParent, m, p.boneType, {
+          length: p.length, radius: p.radius, limit: p.limit,
+          invert: p.invert, custom: { ...p.custom },
+        });
+      } else {
+        copy = this.addBlock(destParent, m, 0, { size: [...p.size] });
+        copy.vox = p.vox.clone();
+        // The destination document owns the resolution.
+        if (copy.vox.n !== this.voxRes) copy.vox.setResolution(this.voxRes, true);
+        const remap = new Map();
+        for (const c of copy.vox.usedColors()) remap.set(c, mapColor(c));
+        copy.vox.remapColors(remap);
+      }
+      if (!copy) return;
+      idMap.set(p.id, copy.id);
+      if (isRoot) rootCopy = copy;
+    });
+
+    return rootCopy;
   }
 
   // ---------------------------------------------------------- queries

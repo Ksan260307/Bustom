@@ -751,6 +751,134 @@ describe('CameraDynamics', () => {
     expect(c.gaze.x).toBeGreaterThan(gazeX);
   });
 
+  it('swings the boom round the machine on demand', () => {
+    const c = new CameraDynamics(cam());
+    c.fitTo(STATS);
+    for (let i = 0; i < 120; i++) c.update(p(), 1 / 60);
+    expect(c.position.z, 'starts behind').toBeLessThan(0);
+
+    c.orbitBy(Math.PI, 0);
+    for (let i = 0; i < 200; i++) c.update(p({ orbiting: true }), 1 / 60);
+    expect(c.position.z, 'ends in front').toBeGreaterThan(0);
+    // still the same distance out, just from the other side
+    expect(Math.hypot(c.position.x, c.position.z)).toBeGreaterThan(2);
+  });
+
+  it('mouse-up lifts the camera and looks down, like the editor orbit', () => {
+    const c = new CameraDynamics(cam());
+    c.fitTo(STATS);
+    for (let i = 0; i < 120; i++) c.update(p(), 1 / 60);
+    const level = c.position.y;
+    c.orbitBy(0, 1.0);
+    for (let i = 0; i < 200; i++) c.update(p({ orbiting: true }), 1 / 60);
+    expect(c.position.y).toBeGreaterThan(level);
+  });
+
+  it('clamps the swing so it never goes over the top', () => {
+    const c = new CameraDynamics(cam());
+    c.fitTo(STATS);
+    c.orbitBy(99, 99);
+    expect(c.orbit.yaw).toBeLessThanOrEqual(c.config.orbitYawLimit + 1e-9);
+    expect(c.orbit.pitch).toBeLessThanOrEqual(c.config.orbitPitchLimit + 1e-9);
+    for (let i = 0; i < 200; i++) c.update(p({ orbiting: true }), 1 / 60);
+    // never directly overhead: the horizontal offset survives
+    expect(Math.hypot(c.position.x, c.position.z)).toBeGreaterThan(0.5);
+  });
+
+  it('holds the swing at a standstill and eases it back when travelling', () => {
+    const c = new CameraDynamics(cam());
+    c.fitTo(STATS);
+    c.orbitBy(1.4, 0);
+    for (let i = 0; i < 200; i++) c.update(p(), 1 / 60);
+    expect(c.orbit.yaw, 'parked: it stays where you left it').toBeCloseTo(1.4, 3);
+
+    for (let i = 0; i < 200; i++) c.update(p({ velocity: V(0, 0, 30) }), 1 / 60);
+    expect(c.orbit.yaw, 'moving: it comes back behind').toBeLessThan(0.3);
+  });
+
+  it('keeps the machine framed while swung round', () => {
+    const c = new CameraDynamics(cam());
+    c.fitTo(STATS);
+    c.orbitBy(Math.PI, 0);
+    // A lead point 5m ahead would sit off-screen from in front; the gaze has
+    // to fall back onto the machine itself.
+    for (let i = 0; i < 200; i++) {
+      c.update(p({ orbiting: true, velocity: V(0, 0, 20) }), 1 / 60);
+    }
+    expect(Math.abs(c.gaze.z)).toBeLessThan(c.config.leadDistance);
+  });
+
+  it('zooms multiplicatively, and clamps at both ends', () => {
+    const c = new CameraDynamics(cam());
+    c.fitTo(STATS);
+    for (let i = 0; i < 120; i++) c.update(p(), 1 / 60);
+    const near0 = c.position.length();
+
+    c.zoomBy(0.5);
+    expect(c.zoom).toBeCloseTo(Math.exp(0.5), 6);
+    for (let i = 0; i < 200; i++) c.update(p(), 1 / 60);
+    expect(c.position.length()).toBeGreaterThan(near0);
+
+    c.zoomBy(99);
+    expect(c.zoom).toBe(c.config.zoomMax);
+    c.zoomBy(-99);
+    expect(c.zoom).toBe(c.config.zoomMin);
+  });
+
+  it('a shorter boom really does put the camera closer', () => {
+    const near = new CameraDynamics(cam());
+    const far = new CameraDynamics(cam());
+    near.fitTo(STATS); far.fitTo(STATS);
+    near.zoom = 0.5; far.zoom = 2;
+    for (let i = 0; i < 200; i++) { near.update(p(), 1 / 60); far.update(p(), 1 / 60); }
+    expect(near.position.length()).toBeLessThan(far.position.length());
+  });
+
+  it('recenter puts the boom back behind the machine', () => {
+    const c = new CameraDynamics(cam());
+    c.fitTo(STATS);
+    c.orbitBy(2, 0.8);
+    c.recenter();
+    expect(c.orbit.yaw).toBe(0);
+    expect(c.orbit.pitch).toBe(0);
+
+    c.snap(V(), V(0, 0, 1));
+    expect(c.position.z).toBeLessThan(0);
+  });
+
+  it('snap leaves the swing alone; recentring is the caller policy', () => {
+    const c = new CameraDynamics(cam());
+    c.fitTo(STATS);
+    c.orbitBy(1.1, 0);
+    c.snap(V(), V(0, 0, 1));
+    expect(c.orbit.yaw).toBeCloseTo(1.1, 6);
+    // and the lazy first-frame framing does not wipe it either
+    c.update(p({ orbiting: true }), 1 / 60);
+    expect(c.orbit.yaw).toBeCloseTo(1.1, 6);
+  });
+
+  it('zoom carries through a snap, because it is a player preference', () => {
+    const c = new CameraDynamics(cam());
+    c.fitTo(STATS);
+    c.zoom = 2;
+    c.snap(V(), V(0, 0, 1));
+    expect(c.zoom).toBe(2);
+    expect(Math.abs(c.position.z)).toBeCloseTo(c.config.distance * 2, 4);
+  });
+
+  it('keeps the machine in frame when locked onto something overhead', () => {
+    const c = new CameraDynamics(cam());
+    c.fitTo(STATS);
+    const overhead = p({ aimPoint: V(0, 40, 10), assistAuthority: 1, grounded: 1 });
+    for (let i = 0; i < 200; i++) c.update(overhead, 1 / 60);
+    expect(c.gaze.y).toBeLessThanOrEqual(c.config.distance * 0.9 + 0.01);
+
+    // airborne, the gaze is free to follow the target upward
+    const flying = p({ aimPoint: V(0, 40, 10), assistAuthority: 1, grounded: 0 });
+    for (let i = 0; i < 200; i++) c.update(flying, 1 / 60);
+    expect(c.gaze.y).toBeGreaterThan(c.config.distance * 0.9);
+  });
+
   it('frames the midpoint when a lock is engaged', () => {
     const c = new CameraDynamics(cam());
     c.fitTo(STATS);

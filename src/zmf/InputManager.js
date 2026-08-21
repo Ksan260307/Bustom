@@ -11,6 +11,12 @@ import { deadzone, expoCurve, clamp } from './math.js';
 const PX_TO_RATE = 0.0011;
 /** Angular rate treated as full stick deflection, rad/s. */
 const RATE_REF = 6.0;
+/**
+ * Radians the CAMERA boom swings per pixel of mouse travel. Unlike the aim
+ * stick this is a direct angle, not a rate fed through expo: a camera that
+ * does not track your hand 1:1 feels broken, however good the curve is.
+ */
+const PX_TO_ORBIT = 0.0034;
 
 const BINDINGS = {
   forward: ['KeyW', 'ArrowUp'],
@@ -28,6 +34,8 @@ const BINDINGS = {
   layerC: ['Digit3'],
   reset: ['KeyR'],
   cycleTarget: ['Tab'],
+  /** Held: the mouse swings the CAMERA instead of the machine. */
+  camera: ['Mouse2', 'AltLeft', 'AltRight'],
 };
 
 export class InputManager {
@@ -50,9 +58,10 @@ export class InputManager {
       deadzone: 0.06,
       invertY: false,
       /**
-       * A = left, D = right. Set true to swap the two.
+       * Strafe mapping. true = A steers right, D steers left (the requested
+       * layout); set false for the conventional A=left / D=right.
        */
-      invertStrafe: false,
+      invertStrafe: true,
       /** Filled in from the build's stats: heavier machines get slower look. */
       massSensitivityScale: 1.0,
     };
@@ -60,6 +69,10 @@ export class InputManager {
     this.move = new THREE.Vector3();      // local: x=right, y=up, z=forward
     this.moveRaw = new THREE.Vector3();
     this.look = { yaw: 0, pitch: 0 };
+    /** Radians to swing the camera boom THIS frame, while orbiting. */
+    this.cameraLook = { yaw: 0, pitch: 0 };
+    /** Wheel travel for this frame, consumed by the camera as zoom. */
+    this.zoomDelta = 0;
     this.intensity = 0;                   // |move|, used for soft-override
     this._lastTap = new Map();
     this.dash = null;                     // { dir: Vector3, t } on double-tap
@@ -72,6 +85,9 @@ export class InputManager {
       if (!this.enabled) return;
       if (e.repeat) return;
       if (e.code === 'Tab') e.preventDefault();
+      // Alt is the keyboard stand-in for the right button; letting it through
+      // hands focus to the browser's menu bar mid-fight.
+      if (e.code === 'AltLeft' || e.code === 'AltRight') e.preventDefault();
       this.keys.add(e.code);
       this.pressed.add(e.code);
       this._pushBuffer(e.code);
@@ -97,6 +113,8 @@ export class InputManager {
       this.released.add(`Mouse${e.button}`);
     };
     this._onWheel = (e) => { if (this.enabled) this.mouse.wheel += e.deltaY; };
+    // Right-drag is the orbit gesture, so it must not raise a context menu.
+    this._onContextMenu = (e) => { if (this.enabled && this.pointerLocked) e.preventDefault(); };
     this._onLockChange = () => {
       this.pointerLocked = document.pointerLockElement === this.dom;
     };
@@ -108,6 +126,7 @@ export class InputManager {
     window.addEventListener('mousedown', this._onMouseDown);
     window.addEventListener('mouseup', this._onMouseUp);
     window.addEventListener('wheel', this._onWheel, { passive: true });
+    window.addEventListener('contextmenu', this._onContextMenu);
     window.addEventListener('blur', this._onBlur);
     document.addEventListener('pointerlockchange', this._onLockChange);
   }
@@ -119,13 +138,20 @@ export class InputManager {
     window.removeEventListener('mousedown', this._onMouseDown);
     window.removeEventListener('mouseup', this._onMouseUp);
     window.removeEventListener('wheel', this._onWheel);
+    window.removeEventListener('contextmenu', this._onContextMenu);
     window.removeEventListener('blur', this._onBlur);
     document.removeEventListener('pointerlockchange', this._onLockChange);
   }
 
   setEnabled(on) {
     this.enabled = on;
-    if (!on) { this.keys.clear(); this.move.set(0, 0, 0); this.mouse.dx = this.mouse.dy = 0; }
+    if (!on) {
+      this.keys.clear();
+      this.move.set(0, 0, 0);
+      this.mouse.dx = this.mouse.dy = this.mouse.wheel = 0;
+      this.cameraLook.yaw = this.cameraLook.pitch = 0;
+      this.zoomDelta = 0;
+    }
   }
 
   requestPointerLock() {
@@ -207,10 +233,29 @@ export class InputManager {
     const nx = clamp(rawYaw / RATE_REF, -1, 1);
     const ny = clamp(rawPitch / RATE_REF, -1, 1);
 
-    this.look.yaw = expoCurve(deadzone(nx, this.profile.deadzone), this.profile.expo) * RATE_REF;
-    this.look.pitch = expoCurve(deadzone(ny, this.profile.deadzone), this.profile.expo) * RATE_REF;
-    /** 0..1 normalised aim deflection — this is what soft-override reads. */
-    this.lookMagnitude = Math.min(1, Math.hypot(nx, ny));
+    const yawRate = expoCurve(deadzone(nx, this.profile.deadzone), this.profile.expo) * RATE_REF;
+    const pitchRate = expoCurve(deadzone(ny, this.profile.deadzone), this.profile.expo) * RATE_REF;
+
+    // While the camera modifier is held the stick drives the boom, not the
+    // machine — and, crucially, it does NOT count as aim deflection, so
+    // looking around never soft-overrides the lock you are holding.
+    if (this.isDown('camera')) {
+      const g = PX_TO_ORBIT * this.profile.lookSensitivity;
+      this.cameraLook.yaw = -this.mouse.dx * g;
+      this.cameraLook.pitch = -this.mouse.dy * g * (this.profile.invertY ? -1 : 1);
+      this.look.yaw = 0;
+      this.look.pitch = 0;
+      this.lookMagnitude = 0;
+    } else {
+      this.cameraLook.yaw = 0;
+      this.cameraLook.pitch = 0;
+      this.look.yaw = yawRate;
+      this.look.pitch = pitchRate;
+      /** 0..1 normalised aim deflection — this is what soft-override reads. */
+      this.lookMagnitude = Math.min(1, Math.hypot(nx, ny));
+    }
+
+    this.zoomDelta = this.mouse.wheel;
 
     this.mouse.dx = 0;
     this.mouse.dy = 0;

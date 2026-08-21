@@ -26,6 +26,8 @@ const _thrust = new THREE.Vector3();
 const _external = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
 const _flat = new THREE.Vector3();
+const _assist = new THREE.Vector3();
+const _frame = new THREE.Vector3();
 
 export class ZMFBody {
   constructor(stats, world, opts = {}) {
@@ -179,7 +181,9 @@ export class ZMFBody {
 
     // ---------------------------------------------- attitude commit
     this.quaternion.copy(this.angular.quaternion);
-    this.angular.applyCentripetalAssist(this.inertia.velocity, dt, 0.45 + this.stats.agility * 0.4);
+    this.angular.applyCentripetalAssist(
+      this.inertia.velocity, dt, 0.45 + this.stats.agility * 0.4, this.env.grounded > 0.5,
+    );
 
     // speed ceilings, expressed as soft drag rather than a hard clamp
     const cap = THREE.MathUtils.lerp(this.airSpeedCap, this.groundSpeedCap, this.env.grounded)
@@ -205,13 +209,17 @@ export class ZMFBody {
     _tmp.copy(input.move);
     if (boosting) _tmp.z = Math.max(_tmp.z, 0.35) * 1.6;
 
-    // On the ground, steering happens in the horizontal plane: looking up
-    // must not drive the machine into the dirt.
-    if (grounded > 0.5) {
-      _flat.copy(this.angular.forward); _flat.y = 0;
-      if (_flat.lengthSq() < 1e-5) _flat.set(0, 0, 1); else _flat.normalize();
-      // body right = worldUp x forward, for a forward already flattened to the plane
-      const rightX = _flat.z, rightZ = -_flat.x;
+    // On the ground, steering happens in a YAW-ONLY frame. Looking up must
+    // not drive the machine into the dirt — and, just as importantly, looking
+    // up must not lift it off the floor.
+    const onGround = grounded > 0.5;
+    _flat.copy(this.angular.forward); _flat.y = 0;
+    if (_flat.lengthSq() < 1e-5) _flat.set(0, 0, 1); else _flat.normalize();
+    // body right = worldUp x forward, for a forward already flattened
+    const rightX = _flat.z;
+    const rightZ = -_flat.x;
+
+    if (onGround) {
       _worldCmd.set(
         _flat.x * _tmp.z + rightX * _tmp.x,
         0,
@@ -240,10 +248,19 @@ export class ZMFBody {
     this.inertia.spoolTo(_tmp, dt, this.layers.jerk * this.layers.jerkBoost);
 
     // -------- world-space thrust
-    _thrust.copy(this.inertia.spool).applyQuaternion(this.angular.quaternion);
-    if (grounded > 0.5) {
-      // keep ground thrust in-plane, and let legs do the vertical work
-      _thrust.y = Math.max(_thrust.y, this.inertia.spool.y);
+    if (onGround) {
+      // Rotating the spool by the FULL attitude would turn a pitched-up nose
+      // into vertical thrust, so tracking a target above you would quietly
+      // fly the machine off the ground. Use the yaw-only frame instead, and
+      // let the deliberate vertical channel be the only source of lift.
+      const sp = this.inertia.spool;
+      _thrust.set(
+        _flat.x * sp.z + rightX * sp.x,
+        sp.y,
+        _flat.z * sp.z + rightZ * sp.x,
+      );
+    } else {
+      _thrust.copy(this.inertia.spool).applyQuaternion(this.angular.quaternion);
     }
     // Legs push against the floor: more of them means more traction, which
     // is where a walker's ground speed advantage over a hover build comes from.
@@ -252,10 +269,21 @@ export class ZMFBody {
     // -------- external accelerations (bypass the mass term)
     _external.set(0, -this.world.gravity * this.gravityScale * (1 - grounded * 0.9), 0);
     _external.add(this.env.repulsion);
-    // Assist is an acceleration nudge, never a position override.
-    _external.addScaledVector(this.assist.command, 0.35);
-    // Frame locking: carry a share of the reference frame's motion.
-    if (this.space.blend > 0) _external.addScaledVector(this.space.frameVelocity, 1.4 * this.space.blend);
+    // Assist is an acceleration nudge, never a position override — and on the
+    // ground it is a nudge in the horizontal plane only.
+    _assist.copy(this.assist.command);
+    if (onGround) _assist.y = 0;
+    _external.addScaledVector(_assist, 0.35);
+    // Frame locking: carry a share of the reference frame's motion — but the
+    // VERTICAL share only as far as our weight is off the floor. Standing on
+    // the ground you are riding the ground, not the target; without this a
+    // hopping enemy hands you its climb the moment you close to knife range,
+    // and a ground fight quietly turns into a flight.
+    if (this.space.blend > 0) {
+      _frame.copy(this.space.frameVelocity);
+      _frame.y *= 1 - grounded;
+      _external.addScaledVector(_frame, 1.4 * this.space.blend);
+    }
 
     // -------- §3.1 velocity Verlet with distance-sensitive drag
     this.inertia.integrate(this.position, _thrust, _external, dt, {

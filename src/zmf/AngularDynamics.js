@@ -193,7 +193,26 @@ export class AngularDynamics {
    * momentum is rotated to follow the nose. Without it, fast turns feel like
    * skidding on ice; with too much, inertia disappears entirely.
    */
-  applyCentripetalAssist(velocity, dt, strength = 0.5) {
+  applyCentripetalAssist(velocity, dt, strength = 0.5, planar = false) {
+    if (planar) {
+      // On the ground, rotate only the horizontal part of the momentum. The
+      // nose may be pitched up at a target, and following it in 3D would
+      // convert running speed into climb.
+      const h = Math.hypot(velocity.x, velocity.z);
+      if (h < 1.5) return;
+      _tmp.set(this.forward.x, 0, this.forward.z);
+      if (_tmp.lengthSq() < 1e-6) return;
+      _tmp.normalize();
+      if ((velocity.x * _tmp.x + velocity.z * _tmp.z) / h <= 0) return;
+      const k = clamp01(dt * this.turnRate * strength * 2.2);
+      const nx = (velocity.x / h) * (1 - k) + _tmp.x * k;
+      const nz = (velocity.z / h) * (1 - k) + _tmp.z * k;
+      const nl = Math.hypot(nx, nz) || 1;
+      velocity.x = (nx / nl) * h;
+      velocity.z = (nz / nl) * h;
+      return;
+    }
+
     const speed = velocity.length();
     if (speed < 1.5) return;
     _tmp.copy(velocity).divideScalar(speed);

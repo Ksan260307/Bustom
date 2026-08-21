@@ -29,6 +29,7 @@ function boot() {
   host.append(gl, hud, overlay);
 
   localStorage.removeItem('brostom.assembly.v1');
+  localStorage.removeItem('brostom.parts.v1');
   const a = new App({ canvas: gl, hudCanvas: hud, overlay });
   // Drive frames by hand at a fixed step: rAF is throttled in hidden tabs.
   a.renderer.setAnimationLoop(null);
@@ -52,7 +53,7 @@ function aimCamera(target, offset) {
 }
 
 /** Move the pointer to a world point, then optionally click it. */
-function pointAt(worldPoint, { click = false, shift = false } = {}) {
+function pointAt(worldPoint, { click = false, ctrl = false } = {}) {
   const rect = app.canvas.getBoundingClientRect();
   const ndc = worldPoint.clone().project(app.editor.camera);
   const clientX = rect.left + ((ndc.x * 0.5) + 0.5) * rect.width;
@@ -60,7 +61,7 @@ function pointAt(worldPoint, { click = false, shift = false } = {}) {
   app.canvas.dispatchEvent(new PointerEvent('pointermove', { clientX, clientY, bubbles: true }));
   if (click) {
     app.canvas.dispatchEvent(new PointerEvent('pointerdown', {
-      clientX, clientY, button: 0, shiftKey: shift, bubbles: true,
+      clientX, clientY, button: 0, ctrlKey: ctrl, bubbles: true,
     }));
     window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
   }
@@ -75,6 +76,13 @@ function worldOf(id) {
 function sculptAt(x, y, z) {
   app.editor.hoverVoxel = { x, y, z };
   app.editor._applySculpt();
+}
+
+/** A whole stroke, the way a pointer press starts one — undo step included. */
+function strokeAt(x, y, z) {
+  app.editor.hoverVoxel = { x, y, z };
+  app.editor.beginStroke();
+  app.editor.painting = false;
 }
 
 // ============================================================
@@ -94,10 +102,11 @@ describe('boot', () => {
   });
 
   it('builds the whole editor DOM', () => {
-    for (const id of ['topbar', 'leftpanel', 'rightpanel', 'hint', 'fieldbar', 'pause', 'toast']) {
+    for (const id of ['topbar', 'partbar', 'leftpanel', 'rightpanel', 'hint',
+      'fieldbar', 'pause', 'toast']) {
       expect(document.getElementById(id), id).toBeTruthy();
     }
-    expect(document.querySelectorAll('.toolbtn').length).toBe(9);
+    expect(document.querySelectorAll('.toolbtn').length).toBe(10);
   });
 
   it('shows the standard palette', () => {
@@ -257,7 +266,7 @@ describe('selection', () => {
     expect(app.editor.selection.size).toBe(1);
   });
 
-  it('shift-clicking adds a second part, and clicking it again removes it', () => {
+  it('an additive select adds a second part, and repeating it drops that part', () => {
     app.loadPreset('biped');
     app.setTool(TOOL.SELECT);
     const ids = [...app.assembly.parts.keys()].slice(0, 3);
@@ -265,6 +274,50 @@ describe('selection', () => {
     app.editor.select(ids[1], true);
     expect(app.editor.selection.size).toBe(2);
     app.editor.select(ids[1], true);
+    expect(app.editor.selection.size).toBe(1);
+  });
+
+  it('ctrl-clicking a second part adds it, and a plain click replaces the lot', () => {
+    app.loadPreset('core');
+    app.setTool(TOOL.BLOCK);
+    app.editor.newBlockSize = [1, 1, 1];
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(0, 5, 12));
+    pointAt(core.clone().add(new THREE.Vector3(-2.5, 0, 0)), { click: true });
+    pointAt(core.clone().add(new THREE.Vector3(2.5, 0, 0)), { click: true });
+    const [left, right] = [...app.assembly.parts.values()]
+      .filter((p) => p.mount).sort((a, b) => a.mount.pos[0] - b.mount.pos[0]);
+
+    app.setTool(TOOL.SELECT);
+    pointAt(worldOf(left.id), { click: true });
+    expect(app.editor.selection.size, 'plain click').toBe(1);
+
+    pointAt(worldOf(right.id), { click: true, ctrl: true });
+    expect(app.editor.selection.size, 'ctrl adds').toBe(2);
+
+    pointAt(worldOf(right.id), { click: true, ctrl: true });
+    expect(app.editor.selection.size, 'ctrl again removes it').toBe(1);
+
+    pointAt(worldOf(right.id), { click: true });
+    expect(app.editor.selection.size, 'plain click replaces').toBe(1);
+    expect(app.editor.selected).toBe(right.id);
+  });
+
+  it('a plain shift-click no longer accumulates', () => {
+    app.loadPreset('biped');
+    app.setTool(TOOL.SELECT);
+    const core = worldOf(app.assembly.rootId);
+    const rect = aimCamera(core, new THREE.Vector3(6, 0, 0));
+    const ndc = core.clone().add(new THREE.Vector3(0.49, 0, 0)).project(app.editor.camera);
+    const clientX = rect.left + ((ndc.x * 0.5) + 0.5) * rect.width;
+    const clientY = rect.top + ((-ndc.y * 0.5) + 0.5) * rect.height;
+    app.canvas.dispatchEvent(new PointerEvent('pointermove', { clientX, clientY, bubbles: true }));
+    for (let i = 0; i < 2; i++) {
+      app.canvas.dispatchEvent(new PointerEvent('pointerdown', {
+        clientX, clientY, button: 0, shiftKey: true, bubbles: true,
+      }));
+      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    }
     expect(app.editor.selection.size).toBe(1);
   });
 
@@ -476,6 +529,231 @@ describe('free movement', () => {
     expect(app.assembly.size).toBe(before + 1);
     expect(app.editor.selected).not.toBe(original);
     expect(app.assembly.get(app.editor.selected).vox).not.toBe(app.assembly.get(original).vox);
+  });
+});
+
+describe('connecting blocks', () => {
+  /**
+   * Build the case the feature exists for: a bone with a block on its far
+   * half, and a loose block floating beside it.
+   * @returns {{boneId:string, riderId:string, looseId:string}}
+   */
+  function boneWithRiderAndLooseBlock() {
+    app.loadPreset('core');
+    app.setTool(TOOL.SELECT);
+    const asm = app.assembly;
+    const bone = asm.addBoneOnFace(asm.rootId, 2, 'leg', { length: 4, gauge: 'mid' });
+    const rider = asm.addBlock(bone.id, { pos: [0, 3.2, 0] }, 4, { size: [0.5, 0.5, 0.5] });
+    // beside the rider and at the same height: the bone root sits 0.5 above
+    // the core, so bone-frame 3.2 is core-frame 3.7
+    const loose = asm.addBlock(asm.rootId, { pos: [1.6, 3.7, 0] }, 15, { size: [0.5, 0.5, 0.5] });
+    app.editor.rebuild();
+    return { boneId: bone.id, riderId: rider.id, looseId: loose.id };
+  }
+
+  it('the anchor is whichever part was selected last', () => {
+    app.loadPreset('biped');
+    const ids = [...app.assembly.parts.keys()].slice(0, 3);
+    app.editor.select(ids[0]);
+    app.editor.select(ids[1], true);
+    app.editor.select(ids[2], true);
+    expect(app.editor.anchorId).toBe(ids[2]);
+
+    app.editor.select(ids[0]);
+    app.editor.select(ids[1], true);
+    expect(app.editor.anchorId).toBe(ids[1]);
+  });
+
+  it('connects a loose block to a block that rides a bone', () => {
+    const { boneId, riderId, looseId } = boneWithRiderAndLooseBlock();
+    expect(app.assembly.get(looseId).parent).toBe(app.assembly.rootId);
+
+    // select the loose block, then the rider — the rider becomes the anchor
+    app.editor.select(looseId);
+    app.editor.select(riderId, true);
+    const res = app.editor.connectSelected();
+
+    expect(res.connected).toBe(1);
+    expect(app.assembly.get(looseId).parent).toBe(riderId);
+    // and both now ride the same articulated half of the bone
+    expect(app.editor.rig.nodes.get(looseId).group.parent)
+      .toBe(app.editor.rig.nodes.get(riderId).group);
+    expect(boneId).toBeTruthy();
+  });
+
+  it('the connected block then swings with the bone', () => {
+    const { boneId, riderId, looseId } = boneWithRiderAndLooseBlock();
+    app.editor.select(looseId);
+    app.editor.select(riderId, true);
+    app.editor.connectSelected();
+
+    const before = worldOf(looseId).clone();
+    // bend the joint the way the animator would
+    app.editor.rig.nodes.get(boneId).joint.quaternion
+      .setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.7);
+    app.editor.rig.root.updateMatrixWorld(true);
+
+    expect(worldOf(looseId).distanceTo(before), 'it moved with the joint').toBeGreaterThan(0.5);
+  });
+
+  it('connecting does not move anything', () => {
+    const { riderId, looseId } = boneWithRiderAndLooseBlock();
+    const before = worldOf(looseId).clone();
+    app.editor.select(looseId);
+    app.editor.select(riderId, true);
+    app.editor.connectSelected();
+    expect(worldOf(looseId).distanceTo(before)).toBeCloseTo(0, 4);
+  });
+
+  it('connects several parts at once', () => {
+    app.loadPreset('bits');
+    app.setTool(TOOL.SELECT);
+    const bits = [...app.assembly.parts.values()]
+      .filter((p) => p.mount && Math.hypot(...p.mount.pos) > 1.5)
+      .slice(0, 4);
+    const anchor = [...app.assembly.parts.values()].find((p) => p.kind === 'bone');
+
+    app.editor.select(bits.map((p) => p.id));
+    app.editor.select(anchor.id, true);
+    const res = app.editor.connectSelected();
+
+    expect(res.connected).toBe(bits.length);
+    for (const b of bits) expect(app.assembly.get(b.id).parent, b.id).toBe(anchor.id);
+  });
+
+  it('disconnects several parts at once, back onto the core', () => {
+    app.loadPreset('bits');
+    const bits = [...app.assembly.parts.values()]
+      .filter((p) => p.mount && Math.hypot(...p.mount.pos) > 1.5)
+      .slice(0, 4);
+    const anchor = [...app.assembly.parts.values()].find((p) => p.kind === 'bone');
+    app.editor.select(bits.map((p) => p.id));
+    app.editor.select(anchor.id, true);
+    app.editor.connectSelected();
+
+    const positions = bits.map((b) => worldOf(b.id).clone());
+    app.editor.select(bits.map((b) => b.id));
+    expect(app.editor.disconnectSelected()).toBe(bits.length);
+
+    bits.forEach((b, i) => {
+      expect(app.assembly.get(b.id).parent, b.id).toBe(app.assembly.rootId);
+      expect(worldOf(b.id).distanceTo(positions[i]), 'stayed put').toBeCloseTo(0, 4);
+    });
+  });
+
+  it('refuses to connect a part to its own descendant', () => {
+    app.loadPreset('biped');
+    const arm = [...app.assembly.parts.values()].find((p) => p.boneType === 'arm');
+    const ancestor = app.assembly.ancestry(arm.id).find((p) => p.kind !== 'core');
+    app.editor.select(ancestor.id);
+    app.editor.select(arm.id, true);      // arm is the anchor, and a descendant
+    const res = app.editor.connectSelected();
+    expect(res.connected).toBe(0);
+    expect(res.skipped).toBeGreaterThan(0);
+    expect(app.assembly.get(ancestor.id).parent).not.toBe(arm.id);
+  });
+
+  it('does nothing with fewer than two parts selected', () => {
+    app.loadPreset('biped');
+    app.editor.select(app.assembly.rootId);
+    expect(app.editor.connectSelected().connected).toBe(0);
+    app.editor.clearSelection();
+    expect(app.editor.connectSelected().connected).toBe(0);
+  });
+
+  it('keeps existing structure: only the topmost selected parts re-home', () => {
+    app.loadPreset('biped');
+    const parent = [...app.assembly.parts.values()]
+      .find((p) => p.kind === 'block' && p.children.length);
+    const child = parent.children[0];
+    const anchor = [...app.assembly.parts.values()]
+      .find((p) => p.kind === 'block' && app.assembly.canReparent(parent.id, p.id));
+
+    app.editor.select([parent.id, child]);
+    app.editor.select(anchor.id, true);
+    app.editor.connectSelected();
+
+    expect(app.assembly.get(parent.id).parent).toBe(anchor.id);
+    expect(app.assembly.get(child).parent, 'child stayed under its parent').toBe(parent.id);
+  });
+
+  it('reports which half of a bone a connection landed on', () => {
+    app.loadPreset('core');
+    app.setTool(TOOL.SELECT);
+    const asm = app.assembly;
+    const bone = asm.addBoneOnFace(asm.rootId, 2, 'leg', { length: 4, gauge: 'mid' });
+    // one block near the base, one out past the joint
+    const nearBlock = asm.addBlock(asm.rootId, { pos: [1.2, 1.0, 0] }, 4, { size: [0.5, 0.5, 0.5] });
+    const farBlock = asm.addBlock(asm.rootId, { pos: [1.2, 4.0, 0] }, 4, { size: [0.5, 0.5, 0.5] });
+    app.editor.rebuild();
+
+    app.editor.select([nearBlock.id, farBlock.id]);
+    app.editor.select(bone.id, true);
+    const res = app.editor.connectSelected();
+
+    expect(res.connected).toBe(2);
+    expect(res.rigid, 'one landed on the rigid half').toBe(1);
+    expect(app.editor.boneHalfOf(nearBlock.id)).toBe('near');
+    expect(app.editor.boneHalfOf(farBlock.id)).toBe('far');
+    // and only the far one actually swings
+    const beforeNear = worldOf(nearBlock.id).clone();
+    const beforeFar = worldOf(farBlock.id).clone();
+    app.editor.rig.nodes.get(bone.id).joint.quaternion
+      .setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.6);
+    app.editor.rig.root.updateMatrixWorld(true);
+    expect(worldOf(nearBlock.id).distanceTo(beforeNear)).toBeCloseTo(0, 4);
+    expect(worldOf(farBlock.id).distanceTo(beforeFar)).toBeGreaterThan(0.5);
+  });
+
+  it('boneHalfOf is null for a part hanging off a block', () => {
+    app.loadPreset('biped');
+    const block = [...app.assembly.parts.values()]
+      .find((p) => p.kind === 'block' && app.assembly.get(p.parent)?.kind !== 'bone' && p.parent);
+    expect(app.editor.boneHalfOf(block.id)).toBeNull();
+  });
+
+  it('draws a link line for every connected selection', () => {
+    app.loadPreset('biped');
+    const ids = [...app.assembly.parts.keys()].filter((id) => id !== app.assembly.rootId).slice(0, 3);
+    app.editor.select(ids);
+    expect(app.editor.linkLines.visible).toBe(true);
+    expect(app.editor.linkLines.geometry.drawRange.count).toBe(ids.length * 2);
+
+    app.editor.clearSelection();
+    expect(app.editor.linkLines.visible).toBe(false);
+  });
+
+  it('marks the anchor with its own outline colour', () => {
+    app.loadPreset('biped');
+    const ids = [...app.assembly.parts.keys()].slice(0, 2);
+    app.editor.select(ids);
+    const mats = app.editor._outlinePool.slice(0, 2).map((o) => o.material);
+    expect(mats[1]).toBe(app.editor.anchorMat);
+    expect(mats[0]).toBe(app.editor.outlineMat);
+  });
+
+  it('J and Shift+J drive it from the keyboard', () => {
+    const { riderId, looseId } = boneWithRiderAndLooseBlock();
+    app.setMode('edit');
+    app.editor.select(looseId);
+    app.editor.select(riderId, true);
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyJ', bubbles: true }));
+    expect(app.assembly.get(looseId).parent).toBe(riderId);
+
+    app.editor.select(looseId);
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyJ', shiftKey: true, bubbles: true }));
+    expect(app.assembly.get(looseId).parent).toBe(app.assembly.rootId);
+  });
+
+  it('survives a save and load', () => {
+    const { riderId, looseId } = boneWithRiderAndLooseBlock();
+    app.editor.select(looseId);
+    app.editor.select(riderId, true);
+    app.editor.connectSelected();
+    app.save();
+    app.loadPreset('core');
+    app.load();
+    expect(app.assembly.get(looseId).parent).toBe(riderId);
   });
 });
 
@@ -794,7 +1072,7 @@ describe('field mode', () => {
     expect(document.getElementById('topbar').classList.contains('hidden')).toBe(false);
   });
 
-  it('A strafes left and D strafes right', () => {
+  it('A strafes right and D strafes left, as configured', () => {
     app.setMode('field');
     app.input.setEnabled(true);
     const runKey = (code) => {
@@ -806,8 +1084,8 @@ describe('field mode', () => {
       app.input.keys.clear();
       return app.field.player.position.x;
     };
-    expect(runKey('KeyA'), 'A goes -X').toBeLessThan(-0.5);
-    expect(runKey('KeyD'), 'D goes +X').toBeGreaterThan(0.5);
+    expect(runKey('KeyA'), 'A goes +X').toBeGreaterThan(0.5);
+    expect(runKey('KeyD'), 'D goes -X').toBeLessThan(-0.5);
   });
 
   it('a backward double tap dashes backwards', () => {
@@ -838,6 +1116,35 @@ describe('field mode', () => {
     expect(app.field.lock.robot.hp).toBeLessThan(hp);
   });
 
+  it('closing on a locked target does not lift the machine off the ground', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.respawn();
+
+    app.input.buffer.push({ action: 'lock', t: app.input.time });
+    step(30);
+    expect(app.field.lock, 'locked on').toBeTruthy();
+
+    const start = app.field.player.position.y;
+    let peak = start;
+    let closest = Infinity;
+    app.input.keys.add('KeyW');
+    for (let i = 0; i < 260; i++) {
+      step(1);
+      peak = Math.max(peak, app.field.player.position.y);
+      if (app.field.lock) {
+        closest = Math.min(closest, app.field.player.position.distanceTo(app.field.lock.robot.position));
+      }
+    }
+    app.input.keys.clear();
+
+    expect(closest, 'we really did get close').toBeLessThan(8);
+    expect(peak - start, 'and never left the floor').toBeLessThan(0.5);
+    expect(app.field.player.body.env.grounded).toBeGreaterThan(0.9);
+  });
+
   it('every preset can be flown', () => {
     for (const key of Object.keys(PRESETS)) {
       app.setMode('edit');
@@ -852,6 +1159,131 @@ describe('field mode', () => {
       expect(Number.isFinite(app.field.player.position.y), key).toBe(true);
     }
     app.setMode('edit');
+  });
+});
+
+describe('field camera', () => {
+  const rig = () => app.field.cameraRig;
+  const boom = () => rig().position.clone().sub(app.field.player.position);
+
+  const enterField = () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.input.setEnabled(true);
+    // Pointer lock cannot be granted to a headless test, so say it happened.
+    app.input.pointerLocked = true;
+    app.field.respawn();
+    rig().recenter();
+    rig().zoom = 1;
+    step(40);
+  };
+
+  const drag = (dx, dy, frames = 20) => {
+    for (let i = 0; i < frames; i++) {
+      window.dispatchEvent(new MouseEvent('mousemove', { movementX: dx, movementY: dy, bubbles: true }));
+      step(1);
+    }
+  };
+
+  const wheel = (deltaY, notches) => {
+    for (let i = 0; i < notches; i++) {
+      window.dispatchEvent(new WheelEvent('wheel', { deltaY, bubbles: true }));
+      step(1);
+    }
+  };
+
+  it('sits behind the machine to start with', () => {
+    enterField();
+    const b = boom();
+    expect(b.z, 'behind').toBeLessThan(-2);
+    expect(b.y, 'and a little above').toBeGreaterThan(0);
+  });
+
+  it('right-drag swings the camera round without turning the machine', () => {
+    enterField();
+    const heading = app.field.player.body.forward.clone();
+    const before = boom();
+
+    window.dispatchEvent(new MouseEvent('mousedown', { button: 2, bubbles: true }));
+    drag(-30, 0, 20);
+    const swung = boom();
+    window.dispatchEvent(new MouseEvent('mouseup', { button: 2, bubbles: true }));
+
+    expect(rig().orbit.yaw, 'the boom really swung').toBeGreaterThan(0.5);
+    expect(Math.abs(swung.x), 'and moved round the side').toBeGreaterThan(Math.abs(before.x) + 2);
+    expect(app.field.player.body.forward.dot(heading), 'machine kept its heading')
+      .toBeGreaterThan(0.99);
+  });
+
+  it('the swing does not count as aim, so it cannot shake a lock', () => {
+    enterField();
+    app.input.buffer.push({ action: 'lock', t: app.input.time });
+    step(40);
+    expect(app.field.lock).toBeTruthy();
+
+    window.dispatchEvent(new MouseEvent('mousedown', { button: 2, bubbles: true }));
+    drag(-40, 0, 25);
+    window.dispatchEvent(new MouseEvent('mouseup', { button: 2, bubbles: true }));
+    expect(app.field.lock, 'still locked').toBeTruthy();
+    expect(app.input.lookMagnitude).toBe(0);
+  });
+
+  it('dragging up lifts the camera over the machine', () => {
+    enterField();
+    const level = boom().y;
+    window.dispatchEvent(new MouseEvent('mousedown', { button: 2, bubbles: true }));
+    drag(0, -30, 20);
+    window.dispatchEvent(new MouseEvent('mouseup', { button: 2, bubbles: true }));
+    step(20);
+    expect(boom().y).toBeGreaterThan(level + 1);
+  });
+
+  it('the wheel zooms the boom out and back in', () => {
+    enterField();
+    const base = boom().length();
+
+    wheel(100, 6);
+    step(45);
+    const far = boom().length();
+    expect(rig().zoom).toBeGreaterThan(1.5);
+    expect(far).toBeGreaterThan(base + 2);
+
+    wheel(-100, 12);
+    step(45);
+    expect(rig().zoom).toBeLessThan(1);
+    expect(boom().length()).toBeLessThan(base);
+  });
+
+  it('zoom stops at both ends rather than turning inside out', () => {
+    enterField();
+    wheel(-100, 60);
+    expect(rig().zoom).toBe(rig().config.zoomMin);
+    expect(boom().length()).toBeGreaterThan(0.5);
+    wheel(100, 120);
+    expect(rig().zoom).toBe(rig().config.zoomMax);
+  });
+
+  it('a respawn recentres the swing but keeps the zoom', () => {
+    enterField();
+    rig().orbitBy(1.5, 0.4);
+    rig().zoom = 1.8;
+    app.field.respawn();
+    expect(rig().orbit.yaw).toBe(0);
+    expect(rig().orbit.pitch).toBe(0);
+    expect(rig().zoom, 'zoom is a preference, not a state').toBe(1.8);
+  });
+
+  it('the boom eases back behind the machine once it is travelling', () => {
+    enterField();
+    rig().orbitBy(1.6, 0);
+    step(90);
+    expect(rig().orbit.yaw, 'parked, it holds').toBeGreaterThan(1.4);
+
+    app.input.keys.add('KeyW');
+    step(150);
+    app.input.keys.clear();
+    expect(rig().orbit.yaw, 'under way, it comes back').toBeLessThan(0.6);
   });
 });
 
@@ -911,6 +1343,485 @@ describe('rendering', () => {
     expect(p.x).toBeCloseTo(400, -1);
     expect(p.y).toBeCloseTo(300, -1);
     expect(p.behind).toBe(false);
+  });
+});
+
+describe('undo and redo', () => {
+  const place = (dx) => {
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(0, 5, 12));
+    pointAt(core.clone().add(new THREE.Vector3(dx, 0, 0)), { click: true });
+  };
+
+  it('starts with nothing to undo', () => {
+    app.loadPreset('core');
+    expect(app.history.canUndo).toBe(false);
+    expect(app.undo()).toBe(false);
+    expect(app.ui.undoBtn.disabled).toBe(true);
+  });
+
+  it('takes back a placement and puts it back again', () => {
+    app.loadPreset('core');
+    app.setTool(TOOL.BLOCK);
+    app.editor.newBlockSize = [1, 1, 1];
+    place(2.5);
+    expect(app.assembly.size).toBe(2);
+
+    expect(app.undo()).toBe(true);
+    expect(app.assembly.size).toBe(1);
+    expect(app.editor.rig.nodes.size, 'the rig follows the document').toBe(1);
+
+    expect(app.redo()).toBe(true);
+    expect(app.assembly.size).toBe(2);
+    expect(app.editor.rig.nodes.size).toBe(2);
+  });
+
+  it('brings a deleted subtree back whole, ids and all', () => {
+    app.loadPreset('biped');
+    const arm = [...app.assembly.parts.values()].find((p) => p.boneType === 'arm');
+    const under = app.assembly.subtree(arm.id).length;
+    const before = app.assembly.size;
+
+    app.editor.select(arm.id);
+    app.editor.deleteSelected();
+    expect(app.assembly.size).toBe(before - under);
+
+    app.undo();
+    expect(app.assembly.size).toBe(before);
+    expect(app.assembly.get(arm.id).boneType).toBe('arm');
+  });
+
+  it('reverses sculpting one stroke at a time', () => {
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.setTool(TOOL.CARVE);
+    const solid = app.assembly.core.vox.solid;
+    strokeAt(8, 8, 8);
+    const carved = app.assembly.core.vox.solid;
+    expect(carved).toBeLessThan(solid);
+
+    app.undo();
+    expect(app.assembly.core.vox.solid).toBe(solid);
+    app.redo();
+    expect(app.assembly.core.vox.solid).toBe(carved);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('reverses a resize', () => {
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.editor.resizeSelected([2, 2, 2]);
+    expect(app.assembly.core.size).toEqual([2, 2, 2]);
+    app.undo();
+    expect(app.assembly.core.size).toEqual([1, 1, 1]);
+  });
+
+  it('a fresh change abandons the redo branch', () => {
+    app.loadPreset('core');
+    app.setTool(TOOL.BLOCK);
+    place(2.5);
+    app.undo();
+    expect(app.history.canRedo).toBe(true);
+    place(-2.5);
+    expect(app.history.canRedo).toBe(false);
+    expect(app.ui.redoBtn.disabled).toBe(true);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('says what it would undo', () => {
+    app.loadPreset('core');
+    app.setTool(TOOL.BLOCK);
+    place(2.5);
+    expect(app.history.undoLabel).toBe('配置');
+    expect(app.ui.undoBtn.disabled).toBe(false);
+    expect(app.ui.undoBtn.title).toContain('配置');
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z are wired to the keyboard', () => {
+    app.loadPreset('core');
+    app.setMode('edit');
+    app.setTool(TOOL.BLOCK);
+    place(2.5);
+    const key = (code, mods = {}) => window.dispatchEvent(
+      new KeyboardEvent('keydown', { code, ctrlKey: true, bubbles: true, ...mods }));
+
+    key('KeyZ');
+    expect(app.assembly.size).toBe(1);
+    key('KeyY');
+    expect(app.assembly.size).toBe(2);
+    key('KeyZ');
+    expect(app.assembly.size).toBe(1);
+    key('KeyZ', { shiftKey: true });
+    expect(app.assembly.size).toBe(2);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('leaves the field alone', () => {
+    app.loadPreset('core');
+    app.setTool(TOOL.BLOCK);
+    place(2.5);
+    app.setTool(TOOL.SELECT);
+    app.setMode('field');
+    expect(app.undo()).toBe(false);
+    expect(app.assembly.size).toBe(2);
+    app.setMode('edit');
+    expect(app.undo()).toBe(true);
+  });
+
+  it('keeps the machine and the workbench on separate stacks', () => {
+    app.loadPreset('core');
+    app.setTool(TOOL.BLOCK);
+    place(2.5);
+    app.setTool(TOOL.SELECT);
+    expect(app.history.canUndo).toBe(true);
+
+    app.newPart();
+    app.openPartEditor();
+    expect(app.history.canUndo, 'the workbench starts clean').toBe(false);
+
+    app.setMode('edit');
+    expect(app.history.canUndo, 'the machine kept its own stack').toBe(true);
+    expect(app.history.undoLabel).toBe('配置');
+  });
+});
+
+describe('clipboard', () => {
+  it('copies a subtree and pastes it beside the original', () => {
+    app.loadPreset('biped');
+    app.setMode('edit');
+    const arm = [...app.assembly.parts.values()].find((p) => p.boneType === 'arm');
+    const under = app.assembly.subtree(arm.id).length;
+    const before = app.assembly.size;
+
+    app.editor.select(arm.id);
+    expect(app.copySelected()).toBe(1);
+    expect(app.pasteClipboard()).toBe(1);
+
+    expect(app.assembly.size).toBe(before + under);
+    const made = app.assembly.get(app.editor.selected);
+    expect(made.boneType).toBe('arm');
+    expect(made.id).not.toBe(arm.id);
+    expect(made.mount.pos[0], 'nudged clear of its source')
+      .toBeGreaterThan(arm.mount.pos[0]);
+  });
+
+  it('pastes several parts at once', () => {
+    app.loadPreset('bits');
+    const bits = [...app.assembly.parts.values()].filter((p) => p.mount).slice(0, 3);
+    const before = app.assembly.size;
+    app.editor.select(bits.map((p) => p.id));
+    expect(app.copySelected()).toBe(3);
+    expect(app.pasteClipboard()).toBe(3);
+    expect(app.assembly.size).toBeGreaterThan(before + 2);
+    expect(app.editor.selection.size, 'the copies end up selected').toBe(3);
+  });
+
+  it('cut removes the original but keeps it on the clipboard', () => {
+    app.loadPreset('biped');
+    const arm = [...app.assembly.parts.values()].find((p) => p.boneType === 'arm');
+    app.editor.select(arm.id);
+    app.copySelected({ cut: true });
+    expect(app.assembly.get(arm.id)).toBe(undefined);
+    expect(app.pasteClipboard()).toBe(1);
+    expect([...app.assembly.parts.values()].filter((p) => p.boneType === 'arm'))
+      .toHaveLength(2);
+  });
+
+  it('a paste can be undone in one step', () => {
+    app.loadPreset('bits');
+    const bits = [...app.assembly.parts.values()].filter((p) => p.mount).slice(0, 2);
+    const before = app.assembly.size;
+    app.editor.select(bits.map((p) => p.id));
+    app.copySelected();
+    app.pasteClipboard();
+    expect(app.assembly.size).toBe(before + 2);
+    app.undo();
+    expect(app.assembly.size).toBe(before);
+  });
+
+  it('copying nothing does nothing', () => {
+    app.loadPreset('core');
+    app.editor.clearSelection();
+    expect(app.copySelected()).toBe(0);
+    app.clipboard = [];
+    expect(app.pasteClipboard()).toBe(0);
+  });
+
+  it('copies the core as a plain block rather than a second core', () => {
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.copySelected();
+    app.pasteClipboard();
+    expect(app.assembly.size).toBe(2);
+    expect([...app.assembly.parts.values()].filter((p) => p.kind === 'core'))
+      .toHaveLength(1);
+  });
+
+  it('Ctrl+C, Ctrl+X and Ctrl+V are wired to the keyboard', () => {
+    app.loadPreset('biped');
+    app.setMode('edit');
+    const key = (code) => window.dispatchEvent(
+      new KeyboardEvent('keydown', { code, ctrlKey: true, bubbles: true }));
+
+    const arm = [...app.assembly.parts.values()].find((p) => p.boneType === 'arm');
+    const before = app.assembly.size;
+    app.editor.select(arm.id);
+    key('KeyC');
+    expect(app.clipboard).toHaveLength(1);
+    key('KeyV');
+    expect(app.assembly.size).toBeGreaterThan(before);
+
+    app.editor.select(arm.id);
+    key('KeyX');
+    expect(app.assembly.get(arm.id)).toBe(undefined);
+  });
+
+  it('carries the colours of what was copied', () => {
+    app.loadPreset('core');
+    app.setTool(TOOL.BLOCK);
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(0, 5, 12));
+    pointAt(core.clone().add(new THREE.Vector3(2.5, 0, 0)), { click: true });
+    app.setTool(TOOL.SELECT);
+    const blockId = app.editor.selected;
+
+    app.setCustomColor(0x8844ff);
+    app.editor.select(blockId);
+    app.repaintSelected();
+    const used = [...app.assembly.get(blockId).vox.usedColors()];
+    expect(app.assembly.palette.get(used[0])).toBe(0x8844ff);
+
+    app.editor.select(blockId);
+    app.copySelected();
+    app.pasteClipboard();
+    const copy = app.assembly.get(app.editor.selected);
+    expect(app.assembly.palette.get([...copy.vox.usedColors()][0])).toBe(0x8844ff);
+  });
+});
+
+describe('part workbench', () => {
+  it('opens on a document rooted at a plain block', () => {
+    app.newPart();
+    app.openPartEditor();
+    expect(app.mode).toBe('part');
+    expect(app.editing).toBe('part');
+    expect(app.assembly.isPart).toBe(true);
+    expect(app.assembly.core.kind).toBe('block');
+    expect(app.assembly.size).toBe(1);
+    app.setMode('edit');
+  });
+
+  it('shows the workbench bar and hides the machine topbar', () => {
+    app.openPartEditor();
+    expect(app.ui.partBar.classList.contains('hidden')).toBe(false);
+    expect(app.ui.topbar.classList.contains('hidden')).toBe(true);
+    expect(app.ui.librarySection.classList.contains('hidden'),
+      'no shelf while you are standing on it').toBe(true);
+    app.setMode('edit');
+    expect(app.ui.partBar.classList.contains('hidden')).toBe(true);
+    expect(app.ui.topbar.classList.contains('hidden')).toBe(false);
+    expect(app.ui.librarySection.classList.contains('hidden')).toBe(false);
+  });
+
+  it('edits the part without touching the machine', () => {
+    app.loadPreset('biped');
+    const machine = app.mainAssembly.size;
+    app.newPart();
+    app.openPartEditor();
+
+    app.setTool(TOOL.BLOCK);
+    const root = worldOf(app.assembly.rootId);
+    aimCamera(root, new THREE.Vector3(0, 5, 12));
+    pointAt(root.clone().add(new THREE.Vector3(2.5, 0, 0)), { click: true });
+    app.setTool(TOOL.SELECT);
+    expect(app.partAssembly.size).toBe(2);
+    expect(app.mainAssembly.size, 'the machine is untouched').toBe(machine);
+
+    app.undo();
+    expect(app.partAssembly.size).toBe(1);
+    app.setMode('edit');
+    expect(app.assembly.size).toBe(machine);
+  });
+
+  it('sculpts on the workbench too', () => {
+    app.newPart();
+    app.openPartEditor();
+    app.editor.select(app.assembly.rootId);
+    const solid = app.assembly.core.vox.solid;
+    app.setTool(TOOL.CARVE);
+    strokeAt(4, 4, 4);
+    expect(app.assembly.core.vox.solid).toBeLessThan(solid);
+    app.undo();
+    expect(app.assembly.core.vox.solid).toBe(solid);
+    app.setTool(TOOL.SELECT);
+    app.setMode('edit');
+  });
+
+  it('cannot delete the part root', () => {
+    app.newPart();
+    app.openPartEditor();
+    app.editor.select(app.assembly.rootId);
+    expect(app.editor.deleteSelected()).toBe(false);
+    app.setMode('edit');
+  });
+
+  it('only one editor drives the canvas at a time', () => {
+    app.setMode('edit');
+    expect(app.mainEditor.controls.enabled).toBe(true);
+    expect(app.partEditor.controls.enabled).toBe(false);
+    app.openPartEditor();
+    expect(app.mainEditor.controls.enabled).toBe(false);
+    expect(app.partEditor.controls.enabled).toBe(true);
+    app.setMode('edit');
+  });
+});
+
+describe('part library', () => {
+  const clearShelf = () => { app.library.clear(); app.ui.renderLibrary(); };
+
+  const buildPart = (name) => {
+    app.newPart();
+    app.openPartEditor();
+    app.partAssembly.addBlockOnFace(app.partAssembly.rootId, 2, 5, { size: [0.5, 0.5, 0.5] });
+    app.partEditor.rebuild();
+    const entry = app.savePart(name);
+    app.setMode('edit');
+    return entry;
+  };
+
+  it('saves the open part onto the shelf', () => {
+    clearShelf();
+    const entry = buildPart('POD');
+    expect(entry.name).toBe('POD');
+    expect(app.library.size).toBe(1);
+    expect(app.ui.libraryEl.querySelectorAll('.libitem')).toHaveLength(1);
+    expect(app.ui.libraryEl.textContent).toContain('POD');
+  });
+
+  it('the shelf is written through to storage', () => {
+    clearShelf();
+    buildPart('POD');
+    const raw = localStorage.getItem('brostom.parts.v1');
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw).items).toHaveLength(1);
+  });
+
+  it('re-opening a saved part gives an independent copy', () => {
+    clearShelf();
+    const entry = buildPart('POD');
+    app.openPartEditor(entry.id);
+    expect(app.assembly.size).toBe(2);
+    expect(app.assembly.name).toBe('POD');
+    app.editor.select(app.assembly.core.children[0]);
+    app.editor.deleteSelected();
+    expect(app.assembly.size).toBe(1);
+    app.setMode('edit');
+    expect(app.library.open(entry.id).size, 'the shelf copy is untouched').toBe(2);
+  });
+
+  it('placing a part arms the stamp instead of dropping it blind', () => {
+    clearShelf();
+    const entry = buildPart('POD');
+    app.loadPreset('core');
+    app.placePart(entry.id);
+    expect(app.mode).toBe('edit');
+    expect(app.editor.tool).toBe(TOOL.STAMP);
+    expect(app.editor.stampSource).toBeTruthy();
+    expect(app.assembly.size, 'nothing placed until you click').toBe(1);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('a stamp click grafts the whole part into the machine', () => {
+    clearShelf();
+    const entry = buildPart('POD');
+    app.loadPreset('core');
+    app.placePart(entry.id);
+
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(0, 5, 12));
+    pointAt(core.clone().add(new THREE.Vector3(3, 0, 0)), { click: true });
+
+    expect(app.assembly.size).toBe(3);            // the part root plus its child
+    const root = app.assembly.get(app.editor.selected);
+    expect(root.kind).toBe('block');
+    expect(root.children).toHaveLength(1);
+    expect(app.editor.rig.nodes.size).toBe(3);
+
+    app.undo();
+    expect(app.assembly.size).toBe(1);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('the same part can be stamped twice with no id collision', () => {
+    clearShelf();
+    const entry = buildPart('POD');
+    app.loadPreset('core');
+    app.placePart(entry.id);
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(0, 5, 12));
+    pointAt(core.clone().add(new THREE.Vector3(3, 0, 0)), { click: true });
+    pointAt(core.clone().add(new THREE.Vector3(-3, 0, 0)), { click: true });
+
+    expect(app.assembly.size).toBe(5);
+    const ids = [...app.assembly.parts.keys()];
+    expect(new Set(ids).size).toBe(ids.length);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('registers a machine selection as a reusable part', () => {
+    clearShelf();
+    app.loadPreset('biped');
+    const arm = [...app.assembly.parts.values()].find((p) => p.boneType === 'arm');
+    const under = app.assembly.subtree(arm.id).length;
+    app.editor.select(arm.id);
+
+    const entry = app.saveSelectionAsPart();
+    expect(entry).toBeTruthy();
+    expect(app.library.size).toBe(1);
+    const doc = app.library.open(entry.id);
+    expect(doc.size).toBe(under);
+    expect(doc.core.mount, 'the shelf copy stands alone').toBeNull();
+  });
+
+  it('registering with nothing selected is refused', () => {
+    clearShelf();
+    app.loadPreset('core');
+    app.editor.clearSelection();
+    expect(app.saveSelectionAsPart()).toBeNull();
+    expect(app.library.size).toBe(0);
+  });
+
+  it('renames and deletes shelf entries', () => {
+    clearShelf();
+    const entry = buildPart('POD');
+    app.renamePart(entry.id, 'SHIELD');
+    expect(app.library.list()[0].name).toBe('SHIELD');
+    expect(app.ui.libraryEl.textContent).toContain('SHIELD');
+
+    app.deletePart(entry.id);
+    expect(app.library.size).toBe(0);
+    expect(app.ui.libraryEl.querySelectorAll('.libitem')).toHaveLength(0);
+  });
+
+  it('deleting the armed part disarms the stamp', () => {
+    clearShelf();
+    const entry = buildPart('POD');
+    app.loadPreset('core');
+    app.placePart(entry.id);
+    app.deletePart(entry.id);
+    expect(app.editor.stampSource).toBeNull();
+
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(0, 5, 12));
+    pointAt(core.clone().add(new THREE.Vector3(3, 0, 0)), { click: true });
+    expect(app.assembly.size, 'a disarmed stamp places nothing').toBe(1);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('an empty shelf still offers the register button', () => {
+    clearShelf();
+    expect(app.ui.libraryEl.textContent).toContain('選択パーツを登録');
   });
 });
 

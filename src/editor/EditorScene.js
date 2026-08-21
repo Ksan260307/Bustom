@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { Rig, ridesFarHalf } from '../core/Rig.js';
-import { computeStats, faceAnchor, alignYToFace } from '../core/Assembly.js';
+import { Assembly, computeStats, faceAnchor, alignYToFace } from '../core/Assembly.js';
 import { Animator } from '../anim/Animator.js';
 import { SIZE_STEP } from '../core/constants.js';
 
@@ -32,6 +32,7 @@ const _plane = new THREE.Plane();
 
 export const TOOL = {
   SELECT: 'select',
+  STAMP: 'stamp',
   BLOCK: 'block',
   BONE_LEG: 'leg',
   BONE_ARM: 'arm',
@@ -43,7 +44,9 @@ export const TOOL = {
 };
 
 const SCULPT_TOOLS = new Set([TOOL.CARVE, TOOL.ADD, TOOL.PAINT]);
-const PART_TOOLS = new Set([TOOL.BLOCK, TOOL.BONE_LEG, TOOL.BONE_ARM, TOOL.BONE_FACE, TOOL.BONE_CUSTOM]);
+const PART_TOOLS = new Set([
+  TOOL.BLOCK, TOOL.BONE_LEG, TOOL.BONE_ARM, TOOL.BONE_FACE, TOOL.BONE_CUSTOM, TOOL.STAMP,
+]);
 const BONE_TOOLS = new Set([TOOL.BONE_LEG, TOOL.BONE_ARM, TOOL.BONE_FACE, TOOL.BONE_CUSTOM]);
 
 export { SCULPT_TOOLS, PART_TOOLS, BONE_TOOLS };
@@ -90,6 +93,16 @@ export class EditorScene {
 
     this.onChange = () => {};
     this.onSelect = () => {};
+    /**
+     * Fired immediately before anything mutates the document, with a label
+     * describing what is about to happen. The app turns this into an undo
+     * step — the editor itself stays ignorant of history.
+     */
+    this.onBeforeChange = () => {};
+
+    /** Armed by the part library: the document a STAMP click will graft in. */
+    this.stampSource = null;
+    this.stampSize = [1, 1, 1];
 
     this._buildEnvironment();
     this._buildOverlays();
@@ -163,9 +176,26 @@ export class EditorScene {
     this.outlineMat = new THREE.LineBasicMaterial({
       color: 0xffd166, transparent: true, opacity: 0.95, depthTest: false,
     });
+    // The anchor of a multi-selection is what everything else connects TO,
+    // so it must be tellable apart at a glance.
+    this.anchorMat = new THREE.LineBasicMaterial({
+      color: 0x4fd2ff, transparent: true, opacity: 1, depthTest: false,
+    });
     this.outlineGroup = new THREE.Group();
     this.scene.add(this.outlineGroup);
     this._outlinePool = [];
+
+    // Connection lines: a link is otherwise invisible, and "what moves with
+    // what" is the whole point of connecting parts.
+    this.linkPositions = new Float32Array(256 * 6);
+    const linkGeo = new THREE.BufferGeometry();
+    linkGeo.setAttribute('position', new THREE.BufferAttribute(this.linkPositions, 3));
+    this.linkLines = new THREE.LineSegments(linkGeo, new THREE.LineBasicMaterial({
+      color: 0x8effc9, transparent: true, opacity: 0.7, depthTest: false,
+    }));
+    this.linkLines.frustumCulled = false;
+    this.linkLines.renderOrder = 12;
+    this.scene.add(this.linkLines);
 
     // Ghost of the part about to be placed.
     this.ghost = new THREE.Mesh(
@@ -241,15 +271,16 @@ export class EditorScene {
 
   // ---------------------------------------------------------- assembly
 
-  setAssembly(assembly) {
+  setAssembly(assembly, { keepCamera = false, keepSelection = false } = {}) {
+    const keep = keepSelection ? [...this.selection] : [];
     if (this.rig) this.rig.dispose();
     this.assembly = assembly;
-    this.selection.clear();
+    this.selection = new Set(keep.filter((id) => assembly.get(id)));
     this._makeRig();
-    this._frameCamera();
+    if (!keepCamera) this._frameCamera();
     this._syncSelectionVisuals();
     this.onChange(this.stats);
-    this.onSelect(null);
+    this.onSelect(this.selectedParts());
     return this;
   }
 
@@ -298,6 +329,16 @@ export class EditorScene {
     return [...this.selection].map((id) => this.assembly.get(id)).filter(Boolean);
   }
 
+  /**
+   * The most recently selected part. Connecting attaches everything else to
+   * this one, the way "parent to active" works in most 3D editors.
+   */
+  get anchorId() {
+    let last = null;
+    for (const id of this.selection) last = id;
+    return last;
+  }
+
   select(idOrIds, additive = false) {
     const ids = idOrIds === null || idOrIds === undefined
       ? []
@@ -323,6 +364,7 @@ export class EditorScene {
   deleteSelected() {
     const doomed = [...this.selection].filter((id) => id !== this.assembly.rootId);
     if (!doomed.length) return false;
+    this.onBeforeChange('削除');
     for (const id of doomed) this.assembly.remove(id);
     this.selection.clear();
     this.rebuild();
@@ -360,15 +402,19 @@ export class EditorScene {
 
     if (!ids.length) {
       this.gizmo.detach();
+      this._syncLinkLines();
       return;
     }
 
+    const anchor = this.anchorId;
     this.rig.root.updateMatrixWorld(true);
     _v2.set(0, 0, 0);
     ids.forEach((id, i) => {
       const node = this.rig.nodes.get(id);
       if (!node) return;
       this._partBox(node, this._outlinePool[i]);
+      this._outlinePool[i].material = (ids.length > 1 && id === anchor)
+        ? this.anchorMat : this.outlineMat;
       _v2.add(this._outlinePool[i].position);
     });
     _v2.divideScalar(ids.length);
@@ -379,6 +425,185 @@ export class EditorScene {
 
     if (this.tool === TOOL.SELECT) this.gizmo.attach(this.pivot);
     else this.gizmo.detach();
+
+    // Last: _syncLinkLines reuses the shared temporaries the centroid was
+    // accumulated in, so it must not run before the pivot has been read out.
+    this._syncLinkLines();
+  }
+
+  /** Draw a line from each selected part to whatever it is connected to. */
+  _syncLinkLines() {
+    let n = 0;
+    const max = this.linkPositions.length / 6;
+    this.rig.root.updateMatrixWorld(true);
+
+    for (const id of this.selection) {
+      if (n >= max) break;
+      const part = this.assembly.get(id);
+      const node = this.rig.nodes.get(id);
+      if (!part || !part.parent || !node) continue;
+      const host = this.rig.nodes.get(part.parent);
+      if (!host) continue;
+
+      node.group.getWorldPosition(_v);
+      host.group.getWorldPosition(_v2);
+      this.linkPositions.set([_v.x, _v.y, _v.z, _v2.x, _v2.y, _v2.z], n * 6);
+      n++;
+    }
+
+    this.linkLines.geometry.setDrawRange(0, n * 2);
+    this.linkLines.geometry.attributes.position.needsUpdate = true;
+    this.linkLines.visible = n > 0;
+  }
+
+  // ---------------------------------------------------------- clipboard
+
+  /**
+   * Copy the topmost selected parts. Each becomes a standalone document, so
+   * a paste is just a graft — the same code path the part library uses.
+   * @returns {Array<{json:object, parent:string, mount:object}>}
+   */
+  copySelected() {
+    const out = [];
+    for (const id of this._dragRoots()) {
+      const part = this.assembly.get(id);
+      const doc = this.assembly.extract(id);
+      if (!part || !doc) continue;
+      out.push({
+        json: doc.toJSON(),
+        parent: part.parent,
+        mount: part.mount ? { pos: [...part.mount.pos], rot: [...part.mount.rot] } : null,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Paste clipboard entries back in, nudged off the original so the copy is
+   * visible rather than hiding inside its source.
+   * @returns {string[]} the ids of the pasted roots
+   */
+  paste(entries, { offset = SIZE_STEP } = {}) {
+    if (!entries?.length) return [];
+    const fallback = this.selected ?? this.assembly.rootId;
+    const made = [];
+
+    for (const entry of entries) {
+      const parent = this.assembly.get(entry.parent) ? entry.parent : fallback;
+      const base = entry.mount ?? { pos: [0, 0, 0], rot: [0, 0, 0, 1] };
+      const mount = {
+        pos: [base.pos[0] + offset, base.pos[1], base.pos[2] + offset],
+        rot: [...base.rot],
+      };
+      const doc = Assembly.fromJSON(JSON.parse(JSON.stringify(entry.json)));
+      const root = this.assembly.graft(doc, parent, mount);
+      if (root) made.push(root.id);
+    }
+    return made;
+  }
+
+  /** Arm the stamp tool with a part document from the library. */
+  armStamp(assembly) {
+    this.stampSource = assembly;
+    if (assembly) {
+      // Measure once, so hovering does not rebuild a rig every frame.
+      const probe = new Rig(assembly);
+      const size = probe.bounds.getSize(_v);
+      this.stampSize = [
+        Math.max(0.25, size.x), Math.max(0.25, size.y), Math.max(0.25, size.z),
+      ];
+      probe.dispose();
+    }
+    return this;
+  }
+
+  // ---------------------------------------------------------- connections
+
+  /**
+   * Re-home a part onto another one without moving it a millimetre.
+   *
+   * A part's stored mount is expressed in its PARENT's frame — including for
+   * bones, where the frame runs along the shaft from the bone root. So the
+   * conversion is the same for every parent kind, and no rebuild is needed
+   * in between: the caller rebuilds once at the end.
+   */
+  _reparentKeepingWorld(id, parentId) {
+    if (!this.assembly.canReparent(id, parentId)) return false;
+    const node = this.rig.nodes.get(id);
+    const host = this.rig.nodes.get(parentId);
+    if (!node || !host) return false;
+
+    _m.copy(host.group.matrixWorld).invert().multiply(node.group.matrixWorld);
+    _m.decompose(_v, _q, _s);
+    return this.assembly.reparent(id, parentId, { pos: _v.toArray(), rot: _q.toArray() });
+  }
+
+  /**
+   * Which half of a bone a part rides, or null when its parent is a block.
+   * Connecting to a bone can legitimately land on the rigid near half, and
+   * silently doing nothing when the joint bends is baffling — so this gets
+   * surfaced in the inspector and in the connect message.
+   * @returns {'far'|'near'|null}
+   */
+  boneHalfOf(id) {
+    const part = this.assembly.get(id);
+    const parent = part?.parent ? this.assembly.get(part.parent) : null;
+    if (!parent || parent.kind !== 'bone') return null;
+    return ridesFarHalf(part, parent) ? 'far' : 'near';
+  }
+
+  /** Connections are defined in the rest pose, never in a posed frame. */
+  _restPose() {
+    this.rig.resetPose();
+    this.rig.root.updateMatrixWorld(true);
+  }
+
+  /**
+   * Connect every selected part to the last-selected one, so they move with
+   * it — which is how a block ends up riding a bone's far half.
+   * @returns {{connected:number, skipped:number, rigid:number}}
+   */
+  connectSelected() {
+    const anchor = this.anchorId;
+    if (!anchor || this.selection.size < 2) return { connected: 0, skipped: 0, rigid: 0 };
+    this._restPose();
+
+    // Only the topmost selected parts move; their children come with them,
+    // which keeps any structure you already built intact.
+    const movers = this._dragRoots().filter((id) => id !== anchor);
+    if (movers.length) this.onBeforeChange('連結');
+    const done = [];
+    let skipped = 0;
+    for (const id of movers) {
+      const part = this.assembly.get(id);
+      if (!part || part.parent === anchor) { skipped++; continue; }
+      if (this._reparentKeepingWorld(id, anchor)) done.push(id);
+      else skipped++;
+    }
+    // Landing on a bone's rigid half is legal but will not articulate.
+    const rigid = done.filter((id) => this.boneHalfOf(id) === 'near').length;
+    if (done.length) this.rebuild();
+    return { connected: done.length, skipped, rigid };
+  }
+
+  /** Cut the selection loose: back onto the core segment, in place. */
+  disconnectSelected() {
+    const root = this.assembly.rootId;
+    const movers = this._dragRoots().filter((id) => {
+      const part = this.assembly.get(id);
+      return part && id !== root && part.parent !== root;
+    });
+    if (!movers.length) return 0;
+    this.onBeforeChange('連結解除');
+    this._restPose();
+    let disconnected = 0;
+    for (const id of this._dragRoots()) {
+      const part = this.assembly.get(id);
+      if (!part || id === root || part.parent === root) continue;
+      if (this._reparentKeepingWorld(id, root)) disconnected++;
+    }
+    if (disconnected) this.rebuild();
+    return disconnected;
   }
 
   // ---------------------------------------------------------- gizmo drag
@@ -402,6 +627,7 @@ export class EditorScene {
   }
 
   _beginDrag() {
+    this.onBeforeChange(this.gizmoMode === 'rotate' ? '回転' : '移動');
     this.rig.root.updateMatrixWorld(true);
     this._dragStart = {
       pivotInverse: this.pivot.matrixWorld.clone().invert(),
@@ -487,6 +713,7 @@ export class EditorScene {
     if (!id) return false;
     const part = this.assembly.get(id);
     if (!part || part.kind === 'bone') return false;
+    this.onBeforeChange('寸法変更');
     this.assembly.setSize(id, size);
     this.rig.refreshSize(id);
     this.refreshStats();
@@ -499,6 +726,7 @@ export class EditorScene {
     if (!id) return false;
     const part = this.assembly.get(id);
     if (!part || part.kind !== 'bone') return false;
+    this.onBeforeChange('ボーン寸法');
     this.assembly.setBoneShape(id, shape);
     this.rebuild();
     return true;
@@ -507,6 +735,7 @@ export class EditorScene {
   setMountSelected({ pos, rot }) {
     const id = this.selected;
     if (!id) return false;
+    this.onBeforeChange('位置変更');
     if (!this.assembly.setMount(id, { pos, rot })) return false;
     if (!this.rig.refreshMount(id)) this.rebuild();
     else { this.refreshStats(); this._syncSelectionVisuals(); }
@@ -516,22 +745,19 @@ export class EditorScene {
   reparentSelected(parentId) {
     const id = this.selected;
     if (!id) return false;
-    // Keep it visually where it is: convert its world transform into the new frame.
-    const node = this.rig.nodes.get(id);
-    const world = node ? node.group.matrixWorld.clone() : null;
-    if (!this.assembly.reparent(id, parentId)) return false;
+    if (!this.assembly.canReparent(id, parentId)) return false;
+    this.onBeforeChange('連結先変更');
+    this._restPose();
+    if (!this._reparentKeepingWorld(id, parentId)) return false;
     this.rebuild();
-    if (world) {
-      this._applyWorldTransform(id, world);
-      this.rebuild();
-    }
     return true;
   }
 
   /** Duplicate the selection in place, offset slightly so it is visible. */
   duplicateSelected() {
-    const parts = this.selectedParts().filter((p) => p.kind !== 'core');
+    const parts = this.selectedParts().filter((p) => p.id !== this.assembly.rootId);
     if (!parts.length) return false;
+    this.onBeforeChange('複製');
     const made = [];
     for (const p of parts) {
       const mount = {
@@ -572,10 +798,10 @@ export class EditorScene {
       this._updateNdc(e);
       this._hover();
       if (SCULPT_TOOLS.has(this.tool)) {
-        this.painting = true;
-        this._applySculpt();
+        this.beginStroke();
       } else {
-        this._applyClick(e.shiftKey);
+        // Ctrl (or Cmd) adds to the selection.
+        this._applyClick(e.ctrlKey || e.metaKey);
       }
     };
     this._up = () => {
@@ -619,7 +845,8 @@ export class EditorScene {
   /** Where would a new part land, given the current ray? */
   proposePlacement() {
     const forBone = BONE_TOOLS.has(this.tool);
-    const size = forBone ? [0.4, 0.4, 0.4] : this.newBlockSize;
+    const size = forBone ? [0.4, 0.4, 0.4]
+      : (this.tool === TOOL.STAMP ? this.stampSize : this.newBlockSize);
     const hits = _ray.intersectObjects(this.rig.pickables, false);
 
     if (hits.length) {
@@ -708,6 +935,7 @@ export class EditorScene {
     } else {
       this.ghost.scale.fromArray(plan.size);
     }
+    if (this.tool === TOOL.STAMP && !this.stampSource) this.ghost.visible = false;
     this.ghost.visible = true;
   }
 
@@ -768,6 +996,20 @@ export class EditorScene {
     return { x, y, z };
   }
 
+  /**
+   * Open a sculpting stroke: one undo step per stroke, not per frame of
+   * dragging, and then the first dab.
+   */
+  beginStroke() {
+    if (!SCULPT_TOOLS.has(this.tool)) return false;
+    if (this.hoverVoxel) {
+      this.onBeforeChange({ carve: '削る', add: '盛る', paint: '塗る' }[this.tool]);
+    }
+    this.painting = true;
+    this._applySculpt();
+    return true;
+  }
+
   _applySculpt() {
     const id = this.selected;
     const node = id ? this.rig.nodes.get(id) : null;
@@ -808,15 +1050,20 @@ export class EditorScene {
     if (PART_TOOLS.has(this.tool)) {
       const plan = this.pendingPlacement ?? this.proposePlacement();
       if (!plan) return;
+      if (this.tool === TOOL.STAMP && !this.stampSource) return;
+      this.onBeforeChange(this.tool === TOOL.STAMP ? 'パーツ配置' : '配置');
+
       let added;
-      if (this.tool === TOOL.BLOCK) {
+      if (this.tool === TOOL.STAMP) {
+        added = this.assembly.graft(this.stampSource, plan.parentId, plan.mount);
+      } else if (this.tool === TOOL.BLOCK) {
         added = this.assembly.addBlock(plan.parentId, plan.mount, this.colorIndex, { size: plan.size });
       } else {
         added = this.assembly.addBone(plan.parentId, plan.mount, this.tool, { ...this.boneOpts });
       }
       if (!added) return;
       const made = [added.id];
-      if (this.symmetry) {
+      if (this.symmetry && this.tool !== TOOL.STAMP) {
         const twin = this._mirror(added);
         if (twin) made.push(twin.id);
       }
@@ -857,12 +1104,21 @@ export class EditorScene {
 
   // ---------------------------------------------------------- frame
 
-  enter() { this.active = true; this._syncCameraButtons(); }
+  enter() {
+    this.active = true;
+    this.gizmo.enabled = true;
+    this._syncCameraButtons();
+    this._syncSelectionVisuals();
+  }
 
   exit() {
     this.active = false;
     this.painting = false;
+    // Two editors share one canvas, so the inactive one must stop listening
+    // or its gizmo and orbit controls fight the active one for the mouse.
     this.gizmo.detach();
+    this.gizmo.enabled = false;
+    this.controls.enabled = false;
   }
 
   resize(w, h) {
@@ -923,6 +1179,11 @@ export class EditorScene {
       if (o.geometry) o.geometry.dispose();
       if (o.material) o.material.dispose();
     });
+    this.linkLines.geometry.dispose();
+    this.linkLines.material.dispose();
+    this.outlineGeo.dispose();
+    this.outlineMat.dispose();
+    this.anchorMat.dispose();
     this.controls.dispose();
   }
 }

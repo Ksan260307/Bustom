@@ -497,3 +497,62 @@ input.wheel-hex {
 .vecrow input::-webkit-outer-spin-button,
 .vecrow input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .vecrow input { -moz-appearance: textfield; appearance: textfield; }
+
+/* ---------------------------------------------------------- part workbench */
+
+#partbar {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  right: 14px;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  background: var(--panel);
+  border: 1px solid rgba(142, 255, 201, 0.35);
+  border-radius: 10px;
+  backdrop-filter: blur(14px);
+}
+
+#partbar .brand { color: var(--ok); text-shadow: 0 0 16px rgba(142, 255, 201, 0.4); }
+
+button.icon {
+  font-size: 15px;
+  line-height: 1;
+  padding: 5px 10px;
+  min-width: 34px;
+}
+
+button:disabled {
+  opacity: 0.32;
+  cursor: default;
+  transform: none;
+}
+
+button:disabled:hover { background: rgba(255, 255, 255, 0.045); border-color: var(--line); }
+
+/* ---------------------------------------------------------- part library */
+
+.libitem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(120, 180, 220, 0.08);
+}
+
+.libitem .libname {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.libitem .row { flex: none; }
+.libitem button { padding: 4px 7px; font-size: 10px; }

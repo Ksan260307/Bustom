@@ -320,6 +320,134 @@ describe('lock-on and assist', () => {
   });
 });
 
+describe('ground lock-on', () => {
+  /** A target well above head height, the case that used to fly the machine. */
+  const high = { position: V(0, 26, 45), radius: 2 };
+
+  it('does not take off while walking with a high target locked', () => {
+    const b = makeBody();
+    b.setTarget(high);
+    b.locked = true;
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    run(b, input, 6);
+
+    expect(b.assist.authority, 'the lock is genuinely engaged').toBeGreaterThan(0.8);
+    expect(b.forward.y, 'the nose really is pitched up at it').toBeGreaterThan(0.2);
+    expect(b.position.y, 'but the machine stays on the ground').toBeCloseTo(2, 1);
+    expect(b.grounded).toBeGreaterThan(0.9);
+  });
+
+  it('holds the floor even while strafing under a lock', () => {
+    const b = makeBody();
+    b.setTarget(high);
+    b.locked = true;
+    input.move.set(1, 0, 0.4);
+    input.intensity = 1;
+    run(b, input, 6);
+    expect(b.position.y).toBeCloseTo(2, 1);
+    expect(Math.abs(b.velocity.y)).toBeLessThan(1);
+  });
+
+  it('a target below does not push the machine into the floor either', () => {
+    const b = makeBody();
+    b.setTarget({ position: V(0, -20, 45), radius: 2 });
+    b.locked = true;
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    run(b, input, 5);
+    expect(b.position.y).toBeCloseTo(2, 1);
+  });
+
+  it('deliberate lift still works with a lock engaged', () => {
+    const b = makeBody();
+    b.setTarget(high);
+    b.locked = true;
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    input.hold('up', true);
+    run(b, input, 3);
+    expect(b.position.y).toBeGreaterThan(8);
+  });
+
+  it('once airborne, thrust follows the nose again', () => {
+    // Same lock, but off the ground: forward thrust toward a target above us
+    // SHOULD carry us upward. The flattening is a ground-contact rule only.
+    const b = makeBody();
+    b.reset(V(0, 12, 0));
+    // high and inside assist range, but too far to overshoot in this window
+    b.setTarget({ position: V(0, 45, 50), radius: 2 });
+    b.locked = true;
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    input.hold('up', true);
+    const start = b.position.y;
+    run(b, input, 1.5);
+    expect(b.grounded).toBeLessThan(0.1);
+    expect(b.forward.y, 'nose is up at the target').toBeGreaterThan(0.05);
+    expect(b.position.y, 'and it climbs').toBeGreaterThan(start);
+  });
+});
+
+describe('frame locking on the ground', () => {
+  /** A locked target that happens to be climbing, parked right next to us. */
+  const climber = (vy) => ({ position: V(0, 2, 3), velocity: V(0, vy, 0) });
+
+  it('does not hand the machine the climb of a hopping target', () => {
+    const b = makeBody();
+    const target = climber(16);
+    b.setTarget({ position: target.position, radius: 2 });
+    b.locked = true;
+    b.space.register('target', target, 4);
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    run(b, input, 4);
+
+    expect(b.space.blend, 'the frame really is engaged').toBeGreaterThan(0.9);
+    expect(b.space.frameVelocity.y, 'and it really is climbing').toBeGreaterThan(8);
+    expect(b.position.y, 'but we stay on the floor').toBeCloseTo(2, 1);
+    expect(b.grounded).toBeGreaterThan(0.9);
+  });
+
+  it('a diving target does not drive us into the floor either', () => {
+    const b = makeBody();
+    const target = climber(-16);
+    b.space.register('target', target, 4);
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    run(b, input, 4);
+    expect(b.position.y).toBeCloseTo(2, 1);
+  });
+
+  it('still carries the frame sideways while grounded', () => {
+    const b = makeBody();
+    const slider = { position: V(0, 2, 3), velocity: V(20, 0, 0) };
+    b.space.register('target', slider, 4);
+    input.move.set(0, 0, 0);
+    input.intensity = 0;
+    run(b, input, 2);
+    expect(b.position.x, 'the horizontal share is untouched').toBeGreaterThan(1);
+    expect(b.position.y).toBeCloseTo(2, 1);
+  });
+
+  it('airborne, the vertical share applies again', () => {
+    // Same frame, off the ground: being carried upward by something big is
+    // the whole point of §5. The suppression is a ground-contact rule only.
+    const lift = (vy) => {
+      const b = makeBody();
+      b.reset(V(0, 30, 0));
+      b.space.register('target', { position: V(0, 30, 3), velocity: V(0, vy, 0) }, 4);
+      const inp = new SyntheticInput();
+      inp.intensity = 0;
+      run(b, inp, 1.2);
+      return b.position.y;
+    };
+    const carried = lift(18);
+    const alone = lift(0);
+    expect(carried).toBeGreaterThan(alone);
+  });
+});
+
 describe('telemetry', () => {
   it('reports every channel the HUD reads, all finite', () => {
     const b = makeBody();

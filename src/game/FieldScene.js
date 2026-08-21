@@ -12,6 +12,9 @@ import { clamp01 } from '../zmf/math.js';
 //  This is the harness the motion model is tuned against.
 // ============================================================
 
+/** Wheel deltaY is ~100 per notch; this makes a notch about 13% of distance. */
+const ZOOM_PER_WHEEL_UNIT = 0.0013;
+
 const _v = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _screenDir = new THREE.Vector2();
@@ -73,6 +76,9 @@ export class FieldScene {
   respawn() {
     const h = Math.max(0.35, -this.player.rig.restLowestY);
     this.player.body.reset(new THREE.Vector3(0, h + 0.2, -18));
+    // A respawn is a fresh view: whatever the player had the boom swung to,
+    // they are looking at a new fight now. Their zoom is a preference, so it stays.
+    this.cameraRig.recenter();
     this.cameraRig.snap(this.player.position, this.player.body.forward);
     this.lock = null;
     this.player.setTarget(null);
@@ -260,7 +266,11 @@ export class FieldScene {
     // ---- camera
     const tel = p.body.telemetry();
     const avoid = p.body.env.contact;
+    const orbiting = this.input.isDown('camera');
+    this.cameraRig.orbitBy(this.input.cameraLook.yaw, this.input.cameraLook.pitch);
+    this.cameraRig.zoomBy(this.input.zoomDelta * ZOOM_PER_WHEEL_UNIT);
     this.cameraRig.update({
+      orbiting,
       position: p.position,
       forward: p.body.forward,
       up: p.body.angular.up,
@@ -272,6 +282,7 @@ export class FieldScene {
       jerk: tel.jerk,
       bank: tel.bank,
       thrust: tel.thrust,
+      grounded: tel.grounded,
       groundY: 0,
       impact: tel.impact,
       avoid,

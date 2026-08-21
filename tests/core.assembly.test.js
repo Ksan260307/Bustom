@@ -194,6 +194,162 @@ describe('reparenting', () => {
   });
 });
 
+describe('part documents', () => {
+  it('createPart is rooted at an ordinary block, not a core', () => {
+    const doc = Assembly.createPart('SHIELD');
+    expect(doc.name).toBe('SHIELD');
+    expect(doc.size).toBe(1);
+    expect(doc.core.kind).toBe('block');
+    expect(doc.core.mount).toBeNull();
+    expect(doc.isPart).toBe(true);
+    expect(Assembly.createDefault().isPart).toBe(false);
+  });
+
+  it('a part document root cannot be removed either', () => {
+    const doc = Assembly.createPart();
+    expect(doc.remove(doc.rootId)).toBe(false);
+    expect(doc.size).toBe(1);
+  });
+
+  it('round-trips through JSON like any other document', () => {
+    const doc = Assembly.createPart('POD');
+    doc.addBlockOnFace(doc.rootId, 2, 5, { size: [0.5, 0.5, 0.5] });
+    const copy = Assembly.fromJSON(JSON.parse(JSON.stringify(doc.toJSON())));
+    expect(copy.size).toBe(2);
+    expect(copy.core.kind).toBe('block');
+    expect(copy.core.mount).toBeNull();
+  });
+});
+
+describe('extract', () => {
+  it('lifts a subtree into a standalone document', () => {
+    const b = a.addBlockOnFace(a.rootId, 2);
+    const bone = a.addBoneOnFace(b.id, 2, BONE.ARM, { length: 2 });
+    a.addBlockOnBone(bone.id, 1.5, 5);
+
+    const doc = a.extract(b.id);
+    expect(doc.size).toBe(3);
+    expect(doc.rootId).toBe(b.id);
+    expect(doc.core.mount, 'the new root has no mount').toBeNull();
+    expect(doc.get(bone.id).parent).toBe(b.id);
+    // the original is untouched
+    expect(a.size).toBe(4);
+    expect(a.get(b.id).mount).toBeTruthy();
+  });
+
+  it('carries only the colours it uses, remapped', () => {
+    const custom = a.palette.ensure(0x123456);
+    a.palette.ensure(0xabcdef);            // used by nothing
+    const b = a.addBlockOnFace(a.rootId, 2, custom);
+
+    const doc = a.extract(b.id);
+    expect(doc.palette.indexOf(0x123456)).toBeGreaterThanOrEqual(0);
+    expect(doc.palette.indexOf(0xabcdef)).toBe(-1);
+    // the voxels point at the new index
+    const idx = doc.palette.indexOf(0x123456);
+    expect([...doc.core.vox.usedColors()]).toEqual([idx]);
+  });
+
+  it('demotes a core root to a plain block', () => {
+    a.addBlockOnFace(a.rootId, 2);
+    const doc = a.extract(a.rootId);
+    expect(doc.core.kind).toBe('block');
+    expect(doc.size).toBe(2);
+  });
+
+  it('deep-copies the voxels', () => {
+    const b = a.addBlockOnFace(a.rootId, 2);
+    const doc = a.extract(b.id);
+    doc.core.vox.clear();
+    expect(b.vox.solid).toBeGreaterThan(0);
+  });
+
+  it('returns null for an unknown id', () => {
+    expect(a.extract('nope')).toBeNull();
+  });
+});
+
+describe('graft', () => {
+  const makePart = () => {
+    const doc = Assembly.createPart('POD', 5);
+    const bone = doc.addBoneOnFace(doc.rootId, 2, BONE.ARM, { length: 2 });
+    doc.addBlockOnBone(bone.id, 1.5, 6, { size: [0.5, 0.5, 0.5] });
+    return doc;
+  };
+
+  it('inserts a whole document under a parent', () => {
+    const doc = makePart();
+    const root = a.graft(doc, a.rootId, { pos: [0, 2, 0] });
+    expect(root).toBeTruthy();
+    expect(a.size).toBe(4);
+    expect(root.parent).toBe(a.rootId);
+    expect(root.mount.pos).toEqual([0, 2, 0]);
+    expect(root.children).toHaveLength(1);
+  });
+
+  it('regenerates ids so the same part can be grafted twice', () => {
+    const doc = makePart();
+    const one = a.graft(doc, a.rootId, { pos: [0, 2, 0] });
+    const two = a.graft(doc, a.rootId, { pos: [0, -2, 0] });
+    expect(one.id).not.toBe(two.id);
+    expect(a.size).toBe(7);
+    const ids = [...a.parts.keys()];
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('merges the source palette and repoints the voxels', () => {
+    const doc = Assembly.createPart('DOT');
+    doc.palette.colors.length = 0;
+    doc.palette.colors.push(0x123456);
+    doc.core.vox.fill(0);
+
+    const before = a.palette.size;
+    const root = a.graft(doc, a.rootId, { pos: [1, 0, 0] });
+    const idx = a.palette.indexOf(0x123456);
+    expect(a.palette.size).toBe(before + 1);
+    expect([...root.vox.usedColors()]).toEqual([idx]);
+  });
+
+  it('adopts the destination resolution', () => {
+    const doc = makePart();
+    doc.setVoxResolution(16);
+    a.setVoxResolution(50);
+    const root = a.graft(doc, a.rootId, { pos: [0, 2, 0] });
+    expect(root.vox.n).toBe(50);
+  });
+
+  it('keeps the internal structure of the part', () => {
+    const doc = makePart();
+    const root = a.graft(doc, a.rootId, { pos: [0, 2, 0] });
+    const bone = a.get(root.children[0]);
+    expect(bone.kind).toBe('bone');
+    expect(bone.boneType).toBe(BONE.ARM);
+    expect(bone.length).toBe(2);
+    expect(a.get(bone.children[0]).size).toEqual([0.5, 0.5, 0.5]);
+  });
+
+  it('refuses an unknown destination', () => {
+    expect(a.graft(makePart(), 'nope', { pos: [0, 0, 0] })).toBeNull();
+    expect(a.graft(null, a.rootId, { pos: [0, 0, 0] })).toBeNull();
+  });
+
+  it('extract then graft is a faithful round trip', () => {
+    const b = a.addBlockOnFace(a.rootId, 2, 7, { size: [1.5, 0.5, 1] });
+    const bone = a.addBoneOnFace(b.id, 0, BONE.LEG, { length: 3, gauge: 'thin' });
+    a.addBlockOnBone(bone.id, 2.5, 9);
+
+    const doc = a.extract(b.id);
+    const copy = a.graft(doc, a.rootId, { pos: [0, -2, 0] });
+
+    expect(copy.size).toEqual(b.size);
+    expect(copy.vox.solid).toBe(b.vox.solid);
+    const copiedBone = a.get(copy.children[0]);
+    expect(copiedBone.boneType).toBe(BONE.LEG);
+    expect(copiedBone.radius).toBeCloseTo(bone.radius, 6);
+    expect(a.get(copiedBone.children[0]).mount.pos[1]).toBeCloseTo(2.5, 6);
+  });
+});
+
 describe('sizing', () => {
   it('setSize snaps and rejects bones', () => {
     const b = a.addBlock(a.rootId, at(0, 1, 0));

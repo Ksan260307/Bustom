@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { Assembly, PRESETS } from './core/Assembly.js';
 import { EditorScene, TOOL } from './editor/EditorScene.js';
+import { History } from './editor/History.js';
+import { PartLibrary } from './editor/PartLibrary.js';
 import { FieldScene } from './game/FieldScene.js';
 import { EditorUI } from './ui/EditorUI.js';
 import { InputManager } from './zmf/InputManager.js';
@@ -8,7 +10,15 @@ import { KineticFeedback } from './zmf/KineticFeedback.js';
 
 // ============================================================
 //  BroStom — application shell.
-//  Two modes over one renderer: the editor, and the debug field.
+//
+//  Three modes over one renderer:
+//    edit   the machine
+//    part   one part on its own, saved to a reusable library
+//    field  the debug arena
+//
+//  The two editing modes are the SAME EditorScene class over two documents,
+//  each with its own undo stack. Everything the machine editor can do — free
+//  placement, sculpting, colours, connections — works on a part too.
 // ============================================================
 
 const SAVE_KEY = 'brostom.assembly.v1';
@@ -24,6 +34,8 @@ const TOOL_KEYS = {
   KeyZ: TOOL.ADD,
   KeyP: TOOL.PAINT,
 };
+
+const EDIT_MODES = new Set(['edit', 'part']);
 
 export class App {
   constructor({ canvas, hudCanvas, overlay } = {}) {
@@ -43,13 +55,25 @@ export class App {
 
     this.input = new InputManager(this.canvas);
     this.feedback = new KineticFeedback();
+    this.library = new PartLibrary();
+    this.clipboard = [];
 
-    this.assembly = this._loadInitial();
+    this.mode = 'edit';
 
-    this.editor = new EditorScene({ renderer: this.renderer, canvas: this.canvas });
-    this.editor.onChange = (stats) => this.ui?.renderStats(stats);
-    this.editor.onSelect = (parts) => this.ui?.renderInspector(parts);
-    this.editor.setAssembly(this.assembly);
+    // ---- the machine document
+    this.mainAssembly = this._loadInitial();
+    this.mainEditor = this._makeEditor();
+    this.mainHistory = new History();
+    this.mainEditor.setAssembly(this.mainAssembly);
+
+    // ---- the part document
+    this.partAssembly = Assembly.createPart('NEW PART');
+    this.partEditor = this._makeEditor();
+    this.partHistory = new History();
+    this.partEditor.setAssembly(this.partAssembly);
+    this.partEditor.exit();
+    /** Library entry the open part came from, for plain "save". */
+    this.partSourceId = null;
 
     this.field = new FieldScene({
       renderer: this.renderer,
@@ -61,6 +85,8 @@ export class App {
     this.ui = new EditorUI(this.overlay, this);
     this.ui.renderStats(this.editor.stats);
     this.ui.renderInspector(null);
+    this.ui.renderLibrary();
+    this.ui.syncHistory();
 
     this.mode = null;
     this.setMode('edit');
@@ -72,6 +98,95 @@ export class App {
 
     this.clock = new THREE.Clock();
     this.renderer.setAnimationLoop(() => this.frame());
+  }
+
+  _makeEditor() {
+    const ed = new EditorScene({ renderer: this.renderer, canvas: this.canvas });
+    ed.onChange = (stats) => this.ui?.renderStats(stats);
+    ed.onSelect = (parts) => this.ui?.renderInspector(parts);
+    ed.onBeforeChange = (label) => this.pushHistory(label);
+    return ed;
+  }
+
+  // ---------------------------------------------------------- active document
+
+  /** In field mode the machine is still the document being referred to. */
+  get editing() { return this.mode === 'part' ? 'part' : 'main'; }
+  get editor() { return this.editing === 'part' ? this.partEditor : this.mainEditor; }
+  get history() { return this.editing === 'part' ? this.partHistory : this.mainHistory; }
+  get assembly() { return this.editing === 'part' ? this.partAssembly : this.mainAssembly; }
+
+  set assembly(v) {
+    if (this.editing === 'part') this.partAssembly = v;
+    else this.mainAssembly = v;
+  }
+
+  // ---------------------------------------------------------- undo / redo
+
+  _snapshot() { return JSON.stringify(this.assembly.toJSON()); }
+
+  /** Record the state as it is now, before `label` changes it. */
+  pushHistory(label) {
+    if (!this.ui) return;                    // still booting
+    this.history.push(label, this._snapshot());
+    this.ui.syncHistory();
+  }
+
+  _restore(snapshot) {
+    const next = Assembly.fromJSON(JSON.parse(snapshot));
+    this.assembly = next;
+    this.editor.setAssembly(next, { keepCamera: true, keepSelection: true });
+    this.ui.syncName(next.name);
+    this.ui.syncResolution(next.voxRes);
+    this.ui.renderPalette();
+    this.ui.renderStats(this.editor.stats);
+    this.ui.syncHistory();
+  }
+
+  undo() {
+    if (!EDIT_MODES.has(this.mode)) return false;
+    const entry = this.history.undo(this._snapshot());
+    if (!entry) { this.ui.toastMsg('これ以上戻せません'); return false; }
+    this._restore(entry.snapshot);
+    this.ui.toastMsg(`元に戻す: ${entry.label}`);
+    return true;
+  }
+
+  redo() {
+    if (!EDIT_MODES.has(this.mode)) return false;
+    const entry = this.history.redo(this._snapshot());
+    if (!entry) { this.ui.toastMsg('やり直せる操作がありません'); return false; }
+    this._restore(entry.snapshot);
+    this.ui.toastMsg(`やり直し: ${entry.label}`);
+    return true;
+  }
+
+  // ---------------------------------------------------------- clipboard
+
+  copySelected({ cut = false } = {}) {
+    const entries = this.editor.copySelected();
+    if (!entries.length) { this.ui.toastMsg('コピーするパーツを選んでください'); return 0; }
+    this.clipboard = entries;
+    if (cut) {
+      const removable = entries.filter((e) => e.parent);
+      if (removable.length) this.editor.deleteSelected();
+      this.ui.toastMsg(`${entries.length} パーツを切り取りました`);
+    } else {
+      this.ui.toastMsg(`${entries.length} パーツをコピーしました`);
+    }
+    return entries.length;
+  }
+
+  pasteClipboard() {
+    if (!this.clipboard.length) { this.ui.toastMsg('クリップボードが空です'); return 0; }
+    this.pushHistory('貼り付け');
+    const made = this.editor.paste(this.clipboard);
+    if (!made.length) { this.ui.toastMsg('貼り付けできませんでした'); return 0; }
+    this.editor.rebuild();
+    this.editor.select(made);
+    this.ui.renderPalette();
+    this.ui.toastMsg(`${made.length} パーツを貼り付けました`);
+    return made.length;
   }
 
   // ---------------------------------------------------------- state
@@ -87,10 +202,11 @@ export class App {
   }
 
   save() {
-    this.assembly.prunePalette();
-    localStorage.setItem(SAVE_KEY, JSON.stringify(this.assembly.toJSON()));
+    if (this.mode === 'part') { this.savePart(); return; }
+    this.mainAssembly.prunePalette();
+    localStorage.setItem(SAVE_KEY, JSON.stringify(this.mainAssembly.toJSON()));
     this.ui.renderPalette();
-    this.ui.toastMsg(`「${this.assembly.name}」を保存しました`);
+    this.ui.toastMsg(`「${this.mainAssembly.name}」を保存しました`);
   }
 
   load() {
@@ -134,13 +250,91 @@ export class App {
     this.ui.toastMsg(`${p.label} を読み込みました`);
   }
 
+  /** Replace the active document wholesale. Undo history starts fresh. */
   _adopt(assembly) {
     this.assembly = assembly;
+    this.history.clear();
     this.editor.setAssembly(assembly);
     this.ui.syncName(assembly.name);
     this.ui.syncResolution(assembly.voxRes);
     this.ui.renderPalette();
     this.ui.renderStats(this.editor.stats);
+    this.ui.syncHistory();
+  }
+
+  // ---------------------------------------------------------- part library
+
+  /** Open the part workbench, optionally on an existing library entry. */
+  openPartEditor(libraryId = null) {
+    if (libraryId) {
+      const doc = this.library.open(libraryId);
+      if (!doc) { this.ui.toastMsg('パーツが見つかりません'); return; }
+      this.partAssembly = doc;
+      this.partSourceId = libraryId;
+      this.partHistory.clear();
+      this.partEditor.setAssembly(doc);
+    }
+    this.setMode('part');
+  }
+
+  newPart() {
+    this.partAssembly = Assembly.createPart('NEW PART', this.editor.colorIndex);
+    this.partSourceId = null;
+    this.partHistory.clear();
+    this.partEditor.setAssembly(this.partAssembly);
+    this.ui.syncName(this.partAssembly.name);
+    this.ui.renderPalette();
+    this.ui.renderStats(this.partEditor.stats);
+    this.ui.syncHistory();
+    this.ui.toastMsg('新しいパーツを作成しました');
+  }
+
+  savePart(name = this.partAssembly.name) {
+    this.partAssembly.prunePalette();
+    this.partAssembly.name = String(name || 'PART').trim().toUpperCase() || 'PART';
+    const entry = this.library.put(this.partAssembly.name, this.partAssembly);
+    this.partSourceId = entry.id;
+    this.ui.renderLibrary();
+    this.ui.syncName(this.partAssembly.name);
+    this.ui.toastMsg(`パーツ庫に「${entry.name}」を保存しました`);
+    return entry;
+  }
+
+  /** Push the current machine selection into the library as a reusable part. */
+  saveSelectionAsPart() {
+    const id = this.mainEditor.selected;
+    if (!id) { this.ui.toastMsg('保存するパーツを選んでください'); return null; }
+    const doc = this.mainAssembly.extract(id);
+    if (!doc) return null;
+    const part = this.mainAssembly.get(id);
+    doc.name = `${this.mainAssembly.name}-${part.kind === 'bone' ? 'BONE' : 'PART'}`.toUpperCase();
+    const entry = this.library.put(doc.name, doc);
+    this.ui.renderLibrary();
+    this.ui.toastMsg(`パーツ庫に「${entry.name}」を保存しました`);
+    return entry;
+  }
+
+  /** Arm the stamp tool so the next click grafts this part into the machine. */
+  placePart(libraryId) {
+    const doc = this.library.open(libraryId);
+    if (!doc) { this.ui.toastMsg('パーツが見つかりません'); return; }
+    if (this.mode !== 'edit') this.setMode('edit');
+    this.editor.armStamp(doc);
+    this.setTool(TOOL.STAMP);
+    this.ui.toastMsg(`「${doc.name}」を置く場所をクリック`);
+  }
+
+  renamePart(libraryId, name) {
+    if (this.library.rename(libraryId, name)) this.ui.renderLibrary();
+  }
+
+  deletePart(libraryId) {
+    const entry = this.library.get(libraryId);
+    if (!this.library.remove(libraryId)) return;
+    if (this.partSourceId === libraryId) this.partSourceId = null;
+    if (this.editor.stampSource) this.editor.armStamp(null);
+    this.ui.renderLibrary();
+    this.ui.toastMsg(`「${entry?.name ?? 'パーツ'}」を削除しました`);
   }
 
   // ---------------------------------------------------------- editor ops
@@ -153,6 +347,30 @@ export class App {
   setGizmoMode(mode) {
     this.editor.setGizmoMode(mode);
     this.ui.syncGizmoMode(this.editor.gizmoMode);
+  }
+
+  /** Link the selection to the last-selected part so they move together. */
+  connectSelected() {
+    if (this.editor.selection.size < 2) {
+      this.ui.toastMsg('2つ以上選んでください。最後に選んだパーツが連結先になります');
+      return;
+    }
+    const anchor = this.assembly.get(this.editor.anchorId);
+    const { connected, skipped, rigid } = this.editor.connectSelected();
+    if (!connected) {
+      this.ui.toastMsg('連結できませんでした（自分の子には連結できません）');
+      return;
+    }
+    const notes = [];
+    if (skipped) notes.push(`${skipped} 個は対象外`);
+    if (rigid) notes.push(`${rigid} 個はボーンの固定側`);
+    const tail = notes.length ? `（${notes.join(' / ')}）` : '';
+    this.ui.toastMsg(`${connected} パーツを ${anchor?.label ?? 'パーツ'} に連結しました${tail}`);
+  }
+
+  disconnectSelected() {
+    const n = this.editor.disconnectSelected();
+    this.ui.toastMsg(n ? `${n} パーツの連結を解除しました` : '解除できる連結がありません');
   }
 
   setColor(i) {
@@ -169,7 +387,9 @@ export class App {
   }
 
   setVoxResolution(n) {
-    if (!this.assembly.setVoxResolution(n)) return;
+    if (this.assembly.voxRes === n) return;
+    this.pushHistory('加工の細かさ');
+    this.assembly.setVoxResolution(n);
     this.editor.rebuild();
     this.ui.syncResolution(n);
     this.ui.renderInspector(this.editor.selectedParts());
@@ -199,6 +419,7 @@ export class App {
   fillSelected() {
     const part = this._selectedBlock();
     if (!part) return;
+    this.pushHistory('全埋め');
     part.vox.fill(this.editor.colorIndex);
     this._afterVoxelEdit(part);
   }
@@ -206,6 +427,7 @@ export class App {
   bevelSelected() {
     const part = this._selectedBlock();
     if (!part) return;
+    this.pushHistory('角落とし');
     part.vox.bevel(0.22);
     this._afterVoxelEdit(part);
   }
@@ -213,6 +435,7 @@ export class App {
   repaintSelected() {
     const part = this._selectedBlock();
     if (!part) return;
+    this.pushHistory('全塗り');
     part.vox.repaint(this.editor.colorIndex);
     this._afterVoxelEdit(part);
   }
@@ -227,19 +450,29 @@ export class App {
 
   setMode(mode) {
     if (this.mode === mode) return;
+    const previous = this.mode;
     this.mode = mode;
 
-    if (mode === 'edit') {
-      this.field.exit();
-      this.editor.enter();
-      this.hudCanvas.classList.add('hidden');
-    } else {
-      this.editor.exit();
+    if (previous === 'field') this.field.exit();
+    if (previous === 'edit') this.mainEditor.exit();
+    if (previous === 'part') this.partEditor.exit();
+
+    if (mode === 'field') {
       this.hudCanvas.classList.remove('hidden');
-      this.field.load(this.assembly);
+      this.field.load(this.mainAssembly);
       this.field.enter();
       // Straight into the action — the pause menu is for Esc, not for entry.
       this.resumeField();
+    } else {
+      this.hudCanvas.classList.add('hidden');
+      this.editor.enter();
+      this.ui.syncName(this.assembly.name);
+      this.ui.syncResolution(this.assembly.voxRes);
+      this.ui.syncTool(this.editor.tool);
+      this.ui.renderPalette();
+      this.ui.renderStats(this.editor.stats);
+      this.ui.renderInspector(this.editor.selectedParts());
+      this.ui.syncHistory();
     }
     this.ui.syncMode(mode);
     this.resize();
@@ -273,6 +506,7 @@ export class App {
   _bindGlobalKeys() {
     this._onKey = (e) => {
       if (e.target && /input|textarea|select/i.test(e.target.tagName)) return;
+      const editing = EDIT_MODES.has(this.mode);
 
       if (e.code === 'Escape') {
         if (this.mode === 'field') {
@@ -286,19 +520,35 @@ export class App {
 
       // Ctrl shortcuts, before the plain-key tool bindings swallow the letter.
       if (e.ctrlKey || e.metaKey) {
-        if (this.mode !== 'edit') return;
-        if (e.code === 'KeyA') { e.preventDefault(); this.editor.selectAll(); }
-        if (e.code === 'KeyD') { e.preventDefault(); this.editor.duplicateSelected(); }
+        if (!editing) return;
+        switch (e.code) {
+          case 'KeyZ':
+            e.preventDefault();
+            if (e.shiftKey) this.redo(); else this.undo();
+            break;
+          case 'KeyY': e.preventDefault(); this.redo(); break;
+          case 'KeyC': e.preventDefault(); this.copySelected(); break;
+          case 'KeyX': e.preventDefault(); this.copySelected({ cut: true }); break;
+          case 'KeyV': e.preventDefault(); this.pasteClipboard(); break;
+          case 'KeyA': e.preventDefault(); this.editor.selectAll(); break;
+          case 'KeyD': e.preventDefault(); this.editor.duplicateSelected(); break;
+          default: break;
+        }
         return;
       }
       if (e.code === 'F5') return;
 
-      if (this.mode === 'edit') {
+      if (editing) {
         const tool = TOOL_KEYS[e.code];
         if (tool) { e.preventDefault(); this.setTool(tool); }
         if (e.code === 'KeyT') { e.preventDefault(); this.setGizmoMode('translate'); }
         if (e.code === 'KeyR') { e.preventDefault(); this.setGizmoMode('rotate'); }
-        if (e.code === 'Enter') { e.preventDefault(); this.setMode('field'); }
+        if (e.code === 'KeyJ') {
+          e.preventDefault();
+          if (e.shiftKey) this.disconnectSelected();
+          else this.connectSelected();
+        }
+        if (e.code === 'Enter' && this.mode === 'edit') { e.preventDefault(); this.setMode('field'); }
         if (e.code === 'KeyS' && e.shiftKey) { e.preventDefault(); this.save(); }
       }
     };
@@ -319,14 +569,15 @@ export class App {
     const w = Math.max(1, window.innerWidth);
     const h = Math.max(1, window.innerHeight);
     this.renderer.setSize(w, h, false);
-    this.editor.resize(w, h);
+    this.mainEditor.resize(w, h);
+    this.partEditor.resize(w, h);
     this.field.resize(w, h);
   }
 
   frame() {
     const dt = Math.min(this.clock.getDelta(), 1 / 20);
 
-    if (this.mode === 'edit') {
+    if (EDIT_MODES.has(this.mode)) {
       this.editor.update(dt);
       this.editor.render();
     } else {
@@ -342,7 +593,8 @@ export class App {
     window.removeEventListener('resize', this._onResize);
     window.removeEventListener('keydown', this._onKey);
     document.removeEventListener('pointerlockchange', this._onLock);
-    this.editor.dispose();
+    this.mainEditor.dispose();
+    this.partEditor.dispose();
     this.input.dispose();
     this.renderer.dispose();
   }

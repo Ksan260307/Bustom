@@ -61,6 +61,7 @@ export function vectorField(label, value, step, onChange) {
 
 const ASSEMBLE_TOOLS = [
   { tool: TOOL.SELECT, label: '選択 / 移動', key: 'V', color: '#ffd166' },
+  { tool: TOOL.STAMP, label: 'パーツ配置', key: '—', color: '#8effc9' },
   { tool: TOOL.BLOCK, label: 'ブロック', key: 'B', color: '#c9d2dc' },
   { tool: TOOL.BONE_LEG, label: BONE_META.leg.label, key: 'L', color: '#6fe3ff' },
   { tool: TOOL.BONE_ARM, label: BONE_META.arm.label, key: 'A', color: '#ffc861' },
@@ -101,7 +102,11 @@ export class EditorUI {
     );
 
     this.editBtn = h('button', { class: 'active', onClick: () => app.setMode('edit') }, 'EDIT');
+    this.partBtn = h('button', { onClick: () => app.openPartEditor() }, 'パーツ編集');
     this.testBtn = h('button', { class: 'primary', onClick: () => app.setMode('field') }, '▶ TEST FIELD');
+
+    this.undoBtn = h('button', { class: 'icon', title: '元に戻す (Ctrl+Z)', onClick: () => app.undo() }, '↶');
+    this.redoBtn = h('button', { class: 'icon', title: 'やり直し (Ctrl+Y)', onClick: () => app.redo() }, '↷');
 
     this.topbar = h('div', { id: 'topbar' },
       h('div', { class: 'brand' }, 'BroStom', h('small', {}, 'BLOCK ROBO ARENA')),
@@ -109,13 +114,41 @@ export class EditorUI {
       this.nameInput,
       this.presetSelect,
       h('div', { class: 'sep' }),
+      this.undoBtn,
+      this.redoBtn,
+      h('div', { class: 'sep' }),
       h('button', { onClick: () => app.save() }, '保存'),
       h('button', { onClick: () => app.load() }, '読込'),
       h('button', { class: 'ghost', onClick: () => app.exportJson() }, '書出'),
       h('button', { class: 'ghost', onClick: () => app.importJson() }, '取込'),
       h('div', { class: 'spacer' }),
       this.editBtn,
+      this.partBtn,
       this.testBtn,
+    );
+
+    // ---------------------------------------------------- part workbench bar
+    this.partNameInput = h('input', {
+      type: 'text', value: app.partAssembly.name,
+      onInput: (e) => { app.partAssembly.name = e.target.value.toUpperCase(); },
+    });
+
+    this.partUndoBtn = h('button', { class: 'icon', title: '元に戻す (Ctrl+Z)', onClick: () => app.undo() }, '↶');
+    this.partRedoBtn = h('button', { class: 'icon', title: 'やり直し (Ctrl+Y)', onClick: () => app.redo() }, '↷');
+
+    this.partBar = h('div', { id: 'partbar', class: 'hidden' },
+      h('div', { class: 'brand' }, 'PART', h('small', {}, 'WORKBENCH')),
+      h('div', { class: 'sep' }),
+      this.partNameInput,
+      h('div', { class: 'sep' }),
+      this.partUndoBtn,
+      this.partRedoBtn,
+      h('div', { class: 'sep' }),
+      h('button', { class: 'primary', onClick: () => app.savePart(this.partNameInput.value) }, 'パーツ庫に保存'),
+      h('button', { onClick: () => app.newPart() }, '新規'),
+      h('div', { class: 'spacer' }),
+      h('span', { class: 'note', style: 'margin:0' }, '作ったパーツはメイン編集の「パーツ庫」から呼び出せます'),
+      h('button', { onClick: () => app.setMode('edit') }, '← メイン編集'),
     );
 
     // ---------------------------------------------------- left panel
@@ -148,7 +181,20 @@ export class EditorUI {
         h('button', { onClick: () => app.editor.selectAll() }, '全選択'),
         h('button', { onClick: () => app.editor.duplicateSelected() }, '複製'),
       ),
-      h('div', { class: 'note' }, 'Shift+クリックで複数選択。ギズモを掴んで自由に動かせます。'),
+      h('div', { class: 'row tight' },
+        h('button', { onClick: () => app.copySelected() }, 'コピー'),
+        h('button', { onClick: () => app.copySelected({ cut: true }) }, '切取'),
+        h('button', { onClick: () => app.pasteClipboard() }, '貼付'),
+      ),
+      h('h3', { class: 'inline' }, '連結'),
+      h('div', { class: 'row tight' },
+        h('button', { onClick: () => app.connectSelected() }, '連結 (J)'),
+        h('button', { onClick: () => app.disconnectSelected() }, '解除 (⇧J)'),
+      ),
+      h('div', { class: 'note' },
+        'Ctrl+クリックで複数選択。',
+        h('br'), '連結すると、最後に選んだパーツ（水色の枠）と一緒に動くようになります。',
+        h('br'), 'ボーンの先のブロックに連結すれば、その関節で一緒に振れます。'),
     );
 
     // --- new block size
@@ -244,8 +290,14 @@ export class EditorUI {
 
     this.inspectorEl = h('div', { class: 'body' });
     this.statsEl = h('div', { class: 'body' });
+    this.libraryEl = h('div', { class: 'body' });
+    this.librarySection = h('div', {},
+      h('h3', {}, 'パーツ庫'),
+      this.libraryEl,
+    );
 
     this.rightPanel = h('div', { class: 'panel', id: 'rightpanel' },
+      this.librarySection,
       h('h3', {}, '標準色'),
       h('div', { class: 'body' },
         this.paletteEl,
@@ -265,8 +317,11 @@ export class EditorUI {
       h('span', {}, h('b', {}, '左ドラッグ'), '回転'),
       h('span', {}, h('b', {}, '右ドラッグ'), '平行移動'),
       h('span', {}, h('b', {}, 'クリック'), '設置 / 選択'),
-      h('span', {}, h('b', {}, 'Shift+click'), '複数選択'),
+      h('span', {}, h('b', {}, 'Ctrl+click'), '複数選択'),
       h('span', {}, h('b', {}, 'T / R'), 'ギズモ'),
+      h('span', {}, h('b', {}, 'J'), '連結'),
+      h('span', {}, h('b', {}, 'Ctrl+Z'), '元に戻す'),
+      h('span', {}, h('b', {}, 'Ctrl+C/V'), 'コピー'),
       h('span', {}, h('b', {}, 'Del'), '削除'),
     );
 
@@ -275,8 +330,9 @@ export class EditorUI {
       h('span', { style: 'color:var(--accent);font-family:var(--mono);letter-spacing:.14em' }, 'DEBUG FIELD'),
       h('div', { class: 'sep' }),
       h('span', { style: 'color:var(--dim)' },
-        'WASD 移動（2回押しでダッシュ・後ろも可） / Space 上昇・跳躍 / Shift 下降 / '
-        + 'E ブースト / F ロックオン / Tab 切替 / 1·2·3 ABC / R リセット'),
+        'W/S 前後・A 右/D 左（2回押しでダッシュ・後ろも可） / Space 上昇・跳躍 / Shift 下降 / '
+        + 'E ブースト / F ロックオン / Tab 切替 / 1·2·3 ABC / R リセット / '
+        + '右ドラッグ（Alt）カメラ回転・ホイールでズーム'),
       h('div', { class: 'sep' }),
       h('span', { style: 'color:var(--dim)' }, 'Esc でポーズ'),
     );
@@ -294,7 +350,7 @@ export class EditorUI {
     this.toast = h('div', { id: 'toast' });
 
     this.root.append(
-      this.topbar, this.leftPanel, this.rightPanel, this.hint,
+      this.topbar, this.partBar, this.leftPanel, this.rightPanel, this.hint,
       this.fieldBar, this.pauseMenu, this.toast,
     );
 
@@ -317,6 +373,53 @@ export class EditorUI {
     dim(this.blockBox, tool === TOOL.BLOCK);
     dim(this.sculptBox, isSculpt);
     dim(this.gizmoBox, tool === TOOL.SELECT);
+  }
+
+  /** Enable / disable the undo buttons and say what they would reverse. */
+  syncHistory() {
+    const hist = this.app.history;
+    for (const btn of [this.undoBtn, this.partUndoBtn]) {
+      btn.disabled = !hist.canUndo;
+      btn.title = hist.canUndo ? `元に戻す: ${hist.undoLabel} (Ctrl+Z)` : '元に戻す (Ctrl+Z)';
+    }
+    for (const btn of [this.redoBtn, this.partRedoBtn]) {
+      btn.disabled = !hist.canRedo;
+      btn.title = hist.canRedo ? `やり直し: ${hist.redoLabel} (Ctrl+Y)` : 'やり直し (Ctrl+Y)';
+    }
+  }
+
+  /** The shelf of saved parts, with what you can do to each. */
+  renderLibrary() {
+    const app = this.app;
+    const items = app.library.list();
+
+    if (!items.length) {
+      this.libraryEl.replaceChildren(
+        h('div', { class: 'inspector-empty' },
+          'まだパーツがありません。',
+          h('br'), '「パーツ編集」で作るか、選択中のパーツを下のボタンで登録できます。'),
+        h('button', {
+          class: 'ghost wide', onClick: () => app.saveSelectionAsPart(),
+        }, '選択パーツを登録'),
+      );
+      return;
+    }
+
+    this.libraryEl.replaceChildren(
+      ...items.map((item) => h('div', { class: 'libitem' },
+        h('div', { class: 'libname', title: item.name }, item.name),
+        h('div', { class: 'row tight' },
+          h('button', { title: 'メイン編集に置く', onClick: () => app.placePart(item.id) }, '配置'),
+          h('button', { title: 'パーツ編集で開く', onClick: () => app.openPartEditor(item.id) }, '編集'),
+          h('button', {
+            class: 'danger', title: 'パーツ庫から削除', onClick: () => app.deletePart(item.id),
+          }, '×'),
+        ),
+      )),
+      h('button', {
+        class: 'ghost wide', onClick: () => app.saveSelectionAsPart(),
+      }, '選択パーツを登録'),
+    );
   }
 
   syncGizmoMode(mode) {
@@ -359,13 +462,23 @@ export class EditorUI {
   }
 
   syncMode(mode) {
-    const edit = mode === 'edit';
-    this.editBtn.classList.toggle('active', edit);
-    for (const el of [this.leftPanel, this.rightPanel, this.hint, this.topbar]) {
-      el.classList.toggle('hidden', !edit);
+    const editing = mode === 'edit' || mode === 'part';
+    const isPart = mode === 'part';
+
+    this.editBtn.classList.toggle('active', mode === 'edit');
+    this.partBtn.classList.toggle('active', isPart);
+
+    for (const el of [this.leftPanel, this.rightPanel, this.hint]) {
+      el.classList.toggle('hidden', !editing);
     }
-    this.fieldBar.classList.toggle('hidden', edit);
-    if (edit) this.setPaused(false);
+    this.topbar.classList.toggle('hidden', mode !== 'edit');
+    this.partBar.classList.toggle('hidden', !isPart);
+    this.fieldBar.classList.toggle('hidden', editing);
+
+    // The library is a machine-editor concern; on the workbench you ARE the part.
+    this.librarySection.classList.toggle('hidden', isPart);
+    if (isPart) this.partNameInput.value = this.app.partAssembly.name;
+    if (editing) this.setPaused(false);
   }
 
   setPaused(on) { this.pauseMenu.classList.toggle('hidden', !on); }
@@ -386,19 +499,31 @@ export class EditorUI {
 
     if (!list.length) {
       this.inspectorEl.append(h('div', { class: 'inspector-empty' },
-        'パーツをクリックで選択、Shift+クリックで複数選択。',
+        'パーツをクリックで選択、Ctrl+クリックで複数選択。',
         h('br'), 'ギズモを掴めば任意の位置に動かせます（空中に浮かせてもOK）。',
         h('br'), '設置は、面をクリックでぴったり／何もない所をクリックで浮遊配置。'));
       return;
     }
 
     if (list.length > 1) {
+      const anchor = this.app.assembly.get(this.app.editor.anchorId);
+      const anchorName = anchor
+        ? `${anchor.kind === 'bone' ? BONE_META[anchor.boneType].label : anchor.label} (${anchor.id})`
+        : '—';
+
       this.inspectorEl.append(
         h('div', { class: 'tag' }, `${list.length} パーツ選択中`),
-        h('div', { class: 'inspector-empty' }, 'ギズモで一括して移動・回転できます。'),
+        h('div', { class: 'stat' },
+          h('span', { class: 'k' }, '連結先'),
+          h('span', { class: 'v', style: 'color:var(--accent)' }, anchorName)),
+        h('div', { class: 'note' }, '最後に選んだパーツが連結先（水色の枠）になります。'),
+        h('div', { class: 'row tight', style: 'margin-top:6px' },
+          h('button', { onClick: () => this.app.connectSelected() }, '連結 (J)'),
+          h('button', { onClick: () => this.app.disconnectSelected() }, '解除 (⇧J)'),
+        ),
         h('div', { class: 'row tight' },
           h('button', { onClick: () => this.app.editor.duplicateSelected() }, '複製'),
-          h('button', { onClick: () => this.app.editor.clearSelection() }, '解除'),
+          h('button', { onClick: () => this.app.editor.clearSelection() }, '選択解除'),
         ),
         h('button', {
           class: 'danger wide', style: 'margin-top:8px',
@@ -441,12 +566,26 @@ export class EditorUI {
           value: p.id, ...(p.id === part.parent ? { selected: 'selected' } : {}),
         }, `${p.kind === 'bone' ? BONE_META[p.boneType].label : p.label} (${p.id})`));
 
-      rows.push(h('h3', { class: 'inline' }, '連動先'));
+      rows.push(h('h3', { class: 'inline' }, '連結先'));
       rows.push(h('select', {
         onChange: (ev) => app.editor.reparentSelected(ev.target.value),
       }, ...options));
+      const half = app.editor.boneHalfOf(part.id);
+      if (half) {
+        rows.push(h('div', { class: 'stat' },
+          h('span', { class: 'k' }, 'ボーン'),
+          h('span', { class: `v ${half === 'far' ? 'good' : 'warn'}` },
+            half === 'far' ? '可動側' : '固定側')));
+        rows.push(h('div', { class: 'note' }, half === 'far'
+          ? 'この関節から先なので、ボーンと一緒に振れます。'
+          : 'ボーンの手前半分なので動きません。中点より先へ動かすと可動側になります。'));
+      }
       rows.push(h('div', { class: 'note' },
-        'どのパーツと一緒に動くか。ボーンを選ぶと、その関節から先で動きます。'));
+        'どのパーツと一緒に動くか。ボーンを選ぶと、その関節から先で動きます。',
+        h('br'), '変更しても見た目の位置は動きません。'));
+      rows.push(h('button', {
+        class: 'ghost wide', onClick: () => app.disconnectSelected(),
+      }, '連結を解除 (⇧J)'));
     }
 
     if (part.kind === 'bone') {
@@ -557,5 +696,8 @@ export class EditorUI {
     );
   }
 
-  syncName(name) { this.nameInput.value = name; }
+  syncName(name) {
+    if (this.app.mode === 'part') this.partNameInput.value = name;
+    else this.nameInput.value = name;
+  }
 }

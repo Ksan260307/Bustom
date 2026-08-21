@@ -90,5 +90,6 @@ describe('gait labels', () => {
   it('labels every gait, and calls 3+ legs multileg', () => {
     expect(Object.keys(GAIT_LABEL).sort()).toEqual(['hop', 'hover', 'multileg', 'walk']);
     expect(GAIT_LABEL.multileg).toBe('多脚');
+    expect(GAIT_LABEL.hop).toBe('単脚');
   });
 });

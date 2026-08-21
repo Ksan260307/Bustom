@@ -105,6 +105,21 @@ export function shouldNotThrow(fn, what = 'call') {
   try { fn(); } catch (e) { throw new Error(`${what} threw: ${e.message}`); }
 }
 
+/**
+ * Yield to the event loop between tests, so the page can paint.
+ *
+ * A MessageChannel rather than setTimeout(0): a backgrounded tab clamps
+ * timers to roughly once a MINUTE, which does not slow the suite down so
+ * much as stop it. Channel messages are not throttled that way.
+ */
+function yieldToLoop() {
+  return new Promise((resolve) => {
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => { ch.port1.close(); resolve(); };
+    ch.port2.postMessage(0);
+  });
+}
+
 export async function run(onProgress = () => {}) {
   const results = { passed: 0, failed: 0, total: 0, failures: [], suites: [] };
 
@@ -125,19 +140,21 @@ export async function run(onProgress = () => {}) {
         console.error(`FAIL ${suite.name} > ${test.name}\n  ${failure.error}`);
       }
       onProgress(results);
-      // yield so the page can paint between tests
-      await new Promise((r) => setTimeout(r, 0));
+      await yieldToLoop();
     }
   }
   return results;
 }
 
-/** Wait for the next animation frame (or a timeout, if the tab is hidden). */
+/**
+ * Wait for the next animation frame. A hidden tab never paints, so fall back
+ * to a plain event-loop turn rather than hanging on rAF that will not fire.
+ */
 export function nextFrame() {
   return new Promise((resolve) => {
     let done = false;
     const finish = () => { if (!done) { done = true; resolve(); } };
     requestAnimationFrame(finish);
-    setTimeout(finish, 40);
+    yieldToLoop().then(finish);
   });
 }

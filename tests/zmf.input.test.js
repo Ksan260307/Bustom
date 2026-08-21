@@ -23,6 +23,7 @@ describe('bindings', () => {
     for (const action of [
       'forward', 'back', 'left', 'right', 'up', 'down',
       'boost', 'brake', 'lock', 'fire', 'layerA', 'layerB', 'layerC', 'reset', 'cycleTarget',
+      'camera',
     ]) {
       expect(BINDINGS[action], action).toBeTruthy();
       expect(BINDINGS[action].length).toBeGreaterThan(0);
@@ -41,23 +42,23 @@ describe('movement axes', () => {
     expect(input.move.z).toBe(-1);
   });
 
-  it('steers A left and D right', () => {
-    expect(input.profile.invertStrafe).toBe(false);
+  it('steers A right and D left, as configured', () => {
+    expect(input.profile.invertStrafe).toBe(true);
 
     key('KeyA');
     input.update(1 / 60);
-    expect(input.move.x, 'A goes left').toBe(-1);
+    expect(input.move.x, 'A goes right').toBe(1);
 
     key('KeyA', false); key('KeyD');
     input.update(1 / 60);
-    expect(input.move.x, 'D goes right').toBe(1);
+    expect(input.move.x, 'D goes left').toBe(-1);
   });
 
-  it('the strafe mapping can be swapped through the profile', () => {
-    input.profile.invertStrafe = true;
+  it('the strafe mapping can be swapped back through the profile', () => {
+    input.profile.invertStrafe = false;
     key('KeyD');
     input.update(1 / 60);
-    expect(input.move.x).toBe(-1);
+    expect(input.move.x).toBe(1);
   });
 
   it('normalises diagonals in the horizontal plane only', () => {
@@ -151,6 +152,137 @@ describe('look', () => {
   });
 });
 
+describe('camera stick', () => {
+  const holdCamera = (on = true) => dom.fire(on ? 'mousedown' : 'mouseup', { button: 2 });
+
+  it('is silent until the modifier is held', () => {
+    input.mouse.dx = 200;
+    input.update(1 / 60);
+    expect(input.cameraLook.yaw).toBe(0);
+    expect(input.look.yaw).not.toBe(0);
+  });
+
+  it('steals the stick from the machine while held', () => {
+    holdCamera();
+    input.mouse.dx = 200;
+    input.mouse.dy = 120;
+    input.update(1 / 60);
+
+    expect(input.cameraLook.yaw).not.toBe(0);
+    expect(input.cameraLook.pitch).not.toBe(0);
+    expect(input.look.yaw, 'the machine does not turn').toBe(0);
+    expect(input.look.pitch).toBe(0);
+  });
+
+  it('does not read as aim deflection, so it cannot break a lock', () => {
+    holdCamera();
+    input.mouse.dx = 100000;
+    input.update(1 / 60);
+    expect(input.lookMagnitude).toBe(0);
+  });
+
+  it('gives back the stick on release', () => {
+    holdCamera();
+    input.mouse.dx = 200;
+    input.update(1 / 60);
+    holdCamera(false);
+    input.mouse.dx = 200;
+    input.update(1 / 60);
+    expect(input.cameraLook.yaw).toBe(0);
+    expect(input.look.yaw).not.toBe(0);
+  });
+
+  it('turns left for rightward mouse travel, like the aim stick', () => {
+    holdCamera();
+    input.mouse.dx = 200;
+    input.update(1 / 60);
+    expect(input.cameraLook.yaw).toBeLessThan(0);
+  });
+
+  it('is an angle per pixel, not a rate: dt does not change it', () => {
+    holdCamera();
+    input.mouse.dx = 200;
+    input.update(1 / 30);
+    const slow = input.cameraLook.yaw;
+    input.mouse.dx = 200;
+    input.update(1 / 240);
+    expect(input.cameraLook.yaw).toBeCloseTo(slow, 9);
+  });
+
+  it('is proportional to how far the mouse moved', () => {
+    holdCamera();
+    input.mouse.dx = 100;
+    input.update(1 / 60);
+    const one = input.cameraLook.yaw;
+    input.mouse.dx = 300;
+    input.update(1 / 60);
+    expect(input.cameraLook.yaw).toBeCloseTo(one * 3, 9);
+  });
+
+  it('scales with look sensitivity and honours invertY', () => {
+    holdCamera();
+    input.mouse.dy = 100;
+    input.update(1 / 60);
+    const normal = input.cameraLook.pitch;
+
+    input.profile.invertY = true;
+    input.mouse.dy = 100;
+    input.update(1 / 60);
+    expect(Math.sign(input.cameraLook.pitch)).toBe(-Math.sign(normal));
+    input.profile.invertY = false;
+
+    input.profile.lookSensitivity = 2;
+    input.mouse.dy = 100;
+    input.update(1 / 60);
+    expect(input.cameraLook.pitch).toBeCloseTo(normal * 2, 9);
+  });
+
+  it('Alt works as the keyboard stand-in for the right button', () => {
+    key('AltLeft');
+    input.mouse.dx = 200;
+    input.update(1 / 60);
+    expect(input.cameraLook.yaw).not.toBe(0);
+    expect(input.look.yaw).toBe(0);
+  });
+});
+
+describe('zoom', () => {
+  it('reports the wheel travel for the frame', () => {
+    dom.fire('wheel', { deltaY: 100 });
+    dom.fire('wheel', { deltaY: 50 });
+    input.update(1 / 60);
+    expect(input.zoomDelta).toBe(150);
+  });
+
+  it('is cleared at the end of the frame, so a notch counts once', () => {
+    dom.fire('wheel', { deltaY: 100 });
+    input.update(1 / 60);
+    input.endFrame();
+    input.update(1 / 60);
+    expect(input.zoomDelta).toBe(0);
+  });
+
+  it('suppresses the context menu while locked, so right-drag can orbit', () => {
+    let prevented = false;
+    const ev = { preventDefault() { prevented = true; } };
+    dom.fire('contextmenu', ev);
+    expect(prevented, 'a plain page keeps its menu').toBe(false);
+
+    input.requestPointerLock();
+    dom.fire('pointerlockchange', {});
+    dom.fire('contextmenu', ev);
+    expect(prevented).toBe(true);
+  });
+
+  it('ignores the wheel while input is off', () => {
+    input.setEnabled(false);
+    dom.fire('wheel', { deltaY: 100 });
+    input.setEnabled(true);
+    input.update(1 / 60);
+    expect(input.zoomDelta).toBe(0);
+  });
+});
+
 describe('command buffer', () => {
   it('remembers a press for a short window', () => {
     key('Space');
@@ -204,14 +336,14 @@ describe('double tap dash', () => {
     input.update(1 / 60);
     key('KeyA');
     input.update(1 / 60);
-    expect(input.dash.dir.x, 'A dashes left').toBe(-1);
+    expect(input.dash.dir.x, 'A dashes right').toBe(1);
 
-    input.profile.invertStrafe = true;
+    input.profile.invertStrafe = false;
     key('KeyD'); key('KeyD', false);
     input.update(1 / 60);
     key('KeyD');
     input.update(1 / 60);
-    expect(input.dash.dir.x, 'swapped: D dashes left').toBe(-1);
+    expect(input.dash.dir.x, 'swapped back: D dashes right').toBe(1);
   });
 
   it('does not fire on a slow double tap', () => {

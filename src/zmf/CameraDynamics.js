@@ -14,6 +14,7 @@ const _tmp2 = new THREE.Vector3();
 const _up = new THREE.Vector3();
 const _boom = new THREE.Vector3();
 const _boomUp = new THREE.Vector3();
+const _axis = new THREE.Vector3();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 /** Steepest the camera boom may tilt, as a sine of the angle from horizontal. */
@@ -32,6 +33,16 @@ export class CameraDynamics {
     this.shake = new THREE.Vector3();
     this.shakeAmount = 0;
 
+    /**
+     * Player-driven boom offset, in radians around the machine. Held while
+     * the camera modifier is down; while travelling it eases back behind the
+     * machine, because a chase cam that stays sideways is a chase cam you
+     * cannot drive with. Standing still it holds, so you can look yourself over.
+     */
+    this.orbit = { yaw: 0, pitch: 0 };
+    /** Boom length multiplier. 1 = the distance `fitTo` chose for this build. */
+    this.zoom = 1;
+
     /** Exported to the HUD / post pass. */
     this.vfx = { chroma: 0, speedLines: 0, fovPump: 0 };
 
@@ -45,6 +56,13 @@ export class CameraDynamics {
       leadDistance: 5.5,
       /** Collision-avoidance gaze split, per §7.2. */
       avoidBias: 0.7,
+      /** Limits for the player-driven boom. */
+      zoomMin: 0.42,
+      zoomMax: 2.8,
+      orbitYawLimit: Math.PI,        // all the way around
+      orbitPitchLimit: 1.15,         // ~66°, short of straight over the top
+      /** How fast the boom eases back behind the machine, per unit of speed. */
+      recenterRate: 2.4,
     };
     this._framed = false;
   }
@@ -57,8 +75,37 @@ export class CameraDynamics {
     this.baseFov = 60 + stats.agility * 8;
   }
 
+  /**
+   * Swing the boom around the machine. Arguments are angle deltas in radians
+   * for this frame, not rates: the boom tracks the hand rather than being
+   * flown, so it must not scale with dt a second time.
+   */
+  orbitBy(dYaw, dPitch) {
+    if (!dYaw && !dPitch) return this;
+    const c = this.config;
+    this.orbit.yaw = clamp(this.orbit.yaw + dYaw, -c.orbitYawLimit, c.orbitYawLimit);
+    this.orbit.pitch = clamp(this.orbit.pitch + dPitch, -c.orbitPitchLimit, c.orbitPitchLimit);
+    return this;
+  }
+
+  /** Positive pulls the camera out, negative pushes it in. Multiplicative, so
+   *  a notch of wheel feels the same at every distance. */
+  zoomBy(delta) {
+    if (!delta) return this;
+    this.zoom = clamp(this.zoom * Math.exp(delta), this.config.zoomMin, this.config.zoomMax);
+    return this;
+  }
+
+  /** Put the boom straight back behind the machine. */
+  recenter() {
+    this.orbit.yaw = 0;
+    this.orbit.pitch = 0;
+    return this;
+  }
+
+  /** Put the boom where it belongs right now, with no easing. */
   snap(position, forward) {
-    _tmp.copy(forward).multiplyScalar(-this.config.distance);
+    _tmp.copy(forward).multiplyScalar(-this.config.distance * this.zoom);
     this.position.copy(position).add(_tmp);
     this.position.y += this.config.height;
     this.gaze.copy(position);
@@ -77,6 +124,8 @@ export class CameraDynamics {
    * @param {number} p.bank
    * @param {{normal:THREE.Vector3}|null} p.avoid   imminent-collision contact
    * @param {number} p.thrust  0..1
+   * @param {number} p.grounded 0..1 ground contact
+   * @param {boolean} [p.orbiting]  the player is holding the camera modifier
    */
   update(p, dt) {
     if (!this._framed) this.snap(p.position, p.forward);
@@ -95,11 +144,24 @@ export class CameraDynamics {
       _gaze.lerp(_tmp, clamp01(p.assistAuthority * 0.65));
     }
 
+    // While planted on the ground the machine must stay in frame. A target
+    // high overhead would otherwise drag the gaze off the top of the screen
+    // and leave the player flying blind on their own footing.
+    if ((p.grounded ?? 0) > 0.5) {
+      const ceiling = p.position.y + this.config.distance * 0.9;
+      if (_gaze.y > ceiling) _gaze.y = ceiling;
+    }
+
     // §7.2 collision-avoidance priority panning, 7:3 in favour of the escape.
     if (p.avoid) {
       _tmp.copy(p.position).addScaledVector(p.avoid.normal, 9);
       _gaze.lerp(_tmp, this.config.avoidBias * clamp01(p.avoidUrgency ?? 0.6));
     }
+
+    // Swung off the tail, the lead point drifts out of frame — pull the gaze
+    // back onto the machine itself in proportion to how far round we are.
+    const swing = clamp01(Math.abs(this.orbit.yaw) / 1.2 + Math.abs(this.orbit.pitch) / 1.4);
+    if (swing > 0) _gaze.lerp(p.position, swing * 0.85);
 
     this.gaze.x = damp(this.gaze.x, _gaze.x, this.config.gazeHalfLife, dt);
     this.gaze.y = damp(this.gaze.y, _gaze.y, this.config.gazeHalfLife, dt);
@@ -126,11 +188,39 @@ export class CameraDynamics {
       _boom.y = sign * BOOM_TILT_CAP;
     }
 
+    // The player's own swing goes on AFTER the cap: the cap exists to stop
+    // the machine's pitch from throwing the view around, not to overrule a
+    // deliberate look.
+    if (this.orbit.yaw) _boom.applyAxisAngle(WORLD_UP, this.orbit.yaw);
+    if (this.orbit.pitch) {
+      _axis.set(_boom.z, 0, -_boom.x);
+      if (_axis.lengthSq() > 1e-8) {
+        _boom.applyAxisAngle(_axis.normalize(), this.orbit.pitch);
+        // Never quite straight over the top: `lookAt` has no answer there.
+        if (Math.abs(_boom.y) > 0.94) {
+          const sign = Math.sign(_boom.y);
+          const h = Math.hypot(_boom.x, _boom.z) || 1;
+          const want = Math.sqrt(1 - 0.94 * 0.94) / h;
+          _boom.x *= want; _boom.z *= want; _boom.y = sign * 0.94;
+        }
+      }
+    }
+
+    // Ease the swing back behind the machine, at a rate set by how fast we
+    // are actually travelling. At a standstill it stays where you put it.
+    if (!p.orbiting && (this.orbit.yaw || this.orbit.pitch)) {
+      const k = Math.exp(-this.config.recenterRate * speedN * dt);
+      this.orbit.yaw *= k;
+      this.orbit.pitch *= k;
+      if (Math.abs(this.orbit.yaw) < 1e-4) this.orbit.yaw = 0;
+      if (Math.abs(this.orbit.pitch) < 1e-4) this.orbit.pitch = 0;
+    }
+
     // Likewise the boom rises along an axis that is mostly world-up, so the
     // horizon stays roughly where the player left it.
     _boomUp.copy(WORLD_UP).lerp(p.up, 0.35).normalize();
 
-    const dist = this.config.distance * (1 + speedN * 0.30);
+    const dist = this.config.distance * this.zoom * (1 + speedN * 0.30);
     _desired.copy(p.position)
       .addScaledVector(_boom, -dist)
       .addScaledVector(_boomUp, this.config.height)
