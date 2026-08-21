@@ -1,0 +1,21 @@
+{
+  "name": "bustom",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "BroStom - block robot assembly & battle game",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.4.10"
+  },
+  "dependencies": {
+    "three": "^0.169.0"
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true
+  }
+}

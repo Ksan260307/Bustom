@@ -1,0 +1,222 @@
+import * as THREE from 'three';
+import { deadzone, expoCurve, clamp } from './math.js';
+
+// ============================================================
+//  ZMF §8 : Input Management
+//  Normalised profiles, sensitivity curve correction, input buffering.
+//  Nothing downstream ever reads a raw key or a raw mouse delta.
+// ============================================================
+
+/** Radians of yaw per pixel of mouse travel, before the rate conversion. */
+const PX_TO_RATE = 0.0011;
+/** Angular rate treated as full stick deflection, rad/s. */
+const RATE_REF = 6.0;
+
+const BINDINGS = {
+  forward: ['KeyW', 'ArrowUp'],
+  back: ['KeyS', 'ArrowDown'],
+  left: ['KeyA', 'ArrowLeft'],
+  right: ['KeyD', 'ArrowRight'],
+  up: ['Space'],
+  down: ['ShiftLeft', 'ShiftRight'],
+  boost: ['KeyE'],
+  brake: ['KeyQ'],
+  lock: ['KeyF'],
+  fire: ['Mouse0'],
+  layerA: ['Digit1'],
+  layerB: ['Digit2'],
+  layerC: ['Digit3'],
+  reset: ['KeyR'],
+  cycleTarget: ['Tab'],
+};
+
+export class InputManager {
+  constructor(domElement) {
+    this.dom = domElement;
+    this.keys = new Set();
+    this.pressed = new Set();     // edge: went down this frame
+    this.released = new Set();
+    this.buffer = [];             // { action, t } — command buffer
+    this.bufferWindow = 0.28;     // seconds a buffered command stays live
+    this.mouse = { dx: 0, dy: 0, wheel: 0 };
+    this.pointerLocked = false;
+    this.enabled = false;
+    this.time = 0;
+
+    /** Normalised profile — every consumer works in 0..1 space. */
+    this.profile = {
+      lookSensitivity: 1.0,
+      expo: 0.42,
+      deadzone: 0.06,
+      invertY: false,
+      /** Filled in from the build's stats: heavier machines get slower look. */
+      massSensitivityScale: 1.0,
+    };
+
+    this.move = new THREE.Vector3();      // local: x=right, y=up, z=forward
+    this.moveRaw = new THREE.Vector3();
+    this.look = { yaw: 0, pitch: 0 };
+    this.intensity = 0;                   // |move|, used for soft-override
+    this._lastTap = new Map();
+    this.dash = null;                     // { dir: Vector3, t } on double-tap
+
+    this._bind();
+  }
+
+  _bind() {
+    this._onKeyDown = (e) => {
+      if (!this.enabled) return;
+      if (e.repeat) return;
+      if (e.code === 'Tab') e.preventDefault();
+      this.keys.add(e.code);
+      this.pressed.add(e.code);
+      this._pushBuffer(e.code);
+      this._checkDoubleTap(e.code);
+    };
+    this._onKeyUp = (e) => {
+      this.keys.delete(e.code);
+      this.released.add(e.code);
+    };
+    this._onMouseMove = (e) => {
+      if (!this.enabled || !this.pointerLocked) return;
+      this.mouse.dx += e.movementX;
+      this.mouse.dy += e.movementY;
+    };
+    this._onMouseDown = (e) => {
+      if (!this.enabled) return;
+      this.keys.add(`Mouse${e.button}`);
+      this.pressed.add(`Mouse${e.button}`);
+      this._pushBuffer(`Mouse${e.button}`);
+    };
+    this._onMouseUp = (e) => {
+      this.keys.delete(`Mouse${e.button}`);
+      this.released.add(`Mouse${e.button}`);
+    };
+    this._onWheel = (e) => { if (this.enabled) this.mouse.wheel += e.deltaY; };
+    this._onLockChange = () => {
+      this.pointerLocked = document.pointerLockElement === this.dom;
+    };
+    this._onBlur = () => { this.keys.clear(); };
+
+    window.addEventListener('keydown', this._onKeyDown);
+    window.addEventListener('keyup', this._onKeyUp);
+    window.addEventListener('mousemove', this._onMouseMove);
+    window.addEventListener('mousedown', this._onMouseDown);
+    window.addEventListener('mouseup', this._onMouseUp);
+    window.addEventListener('wheel', this._onWheel, { passive: true });
+    window.addEventListener('blur', this._onBlur);
+    document.addEventListener('pointerlockchange', this._onLockChange);
+  }
+
+  dispose() {
+    window.removeEventListener('keydown', this._onKeyDown);
+    window.removeEventListener('keyup', this._onKeyUp);
+    window.removeEventListener('mousemove', this._onMouseMove);
+    window.removeEventListener('mousedown', this._onMouseDown);
+    window.removeEventListener('mouseup', this._onMouseUp);
+    window.removeEventListener('wheel', this._onWheel);
+    window.removeEventListener('blur', this._onBlur);
+    document.removeEventListener('pointerlockchange', this._onLockChange);
+  }
+
+  setEnabled(on) {
+    this.enabled = on;
+    if (!on) { this.keys.clear(); this.move.set(0, 0, 0); this.mouse.dx = this.mouse.dy = 0; }
+  }
+
+  requestPointerLock() {
+    if (this.dom.requestPointerLock) this.dom.requestPointerLock();
+  }
+
+  exitPointerLock() {
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+
+  // ---------------------------------------------------------- buffering
+
+  _pushBuffer(code) {
+    for (const [action, codes] of Object.entries(BINDINGS)) {
+      if (codes.includes(code)) this.buffer.push({ action, t: this.time });
+    }
+  }
+
+  /**
+   * Consume a buffered command. Late presses still land, which is what makes
+   * chained inputs feel responsive rather than dropped.
+   */
+  consume(action, window = this.bufferWindow) {
+    for (let i = this.buffer.length - 1; i >= 0; i--) {
+      const e = this.buffer[i];
+      if (e.action === action && this.time - e.t <= window) {
+        this.buffer.splice(i, 1);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  _checkDoubleTap(code) {
+    const dirs = { forward: [0, 0, 1], back: [0, 0, -1], left: [-1, 0, 0], right: [1, 0, 0] };
+    for (const [action, codes] of Object.entries(BINDINGS)) {
+      if (!codes.includes(code) || !dirs[action]) continue;
+      const prev = this._lastTap.get(action) ?? -99;
+      if (this.time - prev < 0.26) {
+        this.dash = { dir: new THREE.Vector3().fromArray(dirs[action]), t: this.time };
+      }
+      this._lastTap.set(action, this.time);
+    }
+  }
+
+  // ---------------------------------------------------------- per-frame
+
+  isDown(action) { return BINDINGS[action].some((c) => this.keys.has(c)); }
+  wasPressed(action) { return BINDINGS[action].some((c) => this.pressed.has(c)); }
+
+  /** Call once per frame, before anything reads the input state. */
+  update(dt) {
+    this.time += dt;
+
+    const ax = (this.isDown('right') ? 1 : 0) - (this.isDown('left') ? 1 : 0);
+    const ay = (this.isDown('up') ? 1 : 0) - (this.isDown('down') ? 1 : 0);
+    const az = (this.isDown('forward') ? 1 : 0) - (this.isDown('back') ? 1 : 0);
+
+    this.moveRaw.set(ax, ay, az);
+    // Normalise the horizontal plane only — vertical thrust is its own channel.
+    const h = Math.hypot(ax, az);
+    if (h > 1) { this.move.set(ax / h, ay, az / h); } else { this.move.set(ax, ay, az); }
+    this.intensity = Math.min(1, Math.hypot(this.move.x, this.move.y, this.move.z));
+
+    // --- look: pixels -> angular RATE, then deadzone -> expo -> profile.
+    // Working in rad/s rather than rad/frame is what keeps the feel identical
+    // at 30fps and at 240fps; everything downstream just multiplies by dt.
+    const s = this.profile.lookSensitivity * this.profile.massSensitivityScale;
+    const invDt = 1 / Math.max(dt, 1e-4);
+    const rawYaw = -this.mouse.dx * PX_TO_RATE * s * invDt;
+    const rawPitch = -this.mouse.dy * PX_TO_RATE * s * invDt * (this.profile.invertY ? -1 : 1);
+
+    const nx = clamp(rawYaw / RATE_REF, -1, 1);
+    const ny = clamp(rawPitch / RATE_REF, -1, 1);
+
+    this.look.yaw = expoCurve(deadzone(nx, this.profile.deadzone), this.profile.expo) * RATE_REF;
+    this.look.pitch = expoCurve(deadzone(ny, this.profile.deadzone), this.profile.expo) * RATE_REF;
+    /** 0..1 normalised aim deflection — this is what soft-override reads. */
+    this.lookMagnitude = Math.min(1, Math.hypot(nx, ny));
+
+    this.mouse.dx = 0;
+    this.mouse.dy = 0;
+
+    // expire the command buffer
+    const cutoff = this.time - 1.0;
+    while (this.buffer.length && this.buffer[0].t < cutoff) this.buffer.shift();
+    if (this.dash && this.time - this.dash.t > 0.12) this.dash = null;
+  }
+
+  /** Call at the very end of the frame. */
+  endFrame() {
+    this.pressed.clear();
+    this.released.clear();
+    this.mouse.wheel = 0;
+  }
+}
+
+export { BINDINGS };
