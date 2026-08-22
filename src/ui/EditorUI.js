@@ -3,66 +3,29 @@ import {
   BONE_META, BONE_GAUGE, GAIT_LABEL, VOX_LEVELS,
   SIZE_MIN, SIZE_MAX, SIZE_STEP,
   BONE_LENGTH_MIN, BONE_LENGTH_MAX, BONE_RADIUS_MIN, BONE_RADIUS_MAX,
+  EQUIP_META, WEAPON_TYPES, SYSTEM_TYPES,
+  EQUIP_SIZE_MIN, EQUIP_SIZE_MAX, EQUIP_SIZE_STEP,
+  SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_WAVES, CUSTOM_SOURCES,
 } from '../core/constants.js';
 import { PRESETS } from '../core/Assembly.js';
 import { STANDARD_COLORS, hexToCss } from '../core/Palette.js';
 import { TOOL } from '../editor/EditorScene.js';
 import { ColorWheel } from './ColorWheel.js';
+import { h, slider, vectorField, collapsible, toolSection } from './dom.js';
+import { KeyConfig } from './KeyConfig.js';
+
+export { h, slider, vectorField };
 
 // ============================================================
 //  Editor DOM. Built in code so the whole editor stays one unit.
 // ============================================================
 
-export function h(tag, attrs = {}, ...kids) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') el.className = v;
-    else if (k === 'html') el.innerHTML = v;
-    else if (k.startsWith('on')) el.addEventListener(k.slice(2).toLowerCase(), v);
-    else if (v !== null && v !== undefined) el.setAttribute(k, v);
-  }
-  for (const kid of kids.flat()) {
-    if (kid === null || kid === undefined) continue;
-    el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
-  }
-  return el;
-}
-
-/** Labelled slider that reports its own value. */
-export function slider(label, { min, max, step, value, unit = '', fixed = 0 }, onInput) {
-  const fmt = (v) => `${fixed ? v.toFixed(fixed) : v}${unit}`;
-  const val = h('span', { class: 'val' }, fmt(value));
-  const input = h('input', {
-    type: 'range', min, max, step, value,
-    onInput: (e) => { const v = Number(e.target.value); val.textContent = fmt(v); onInput(v); },
-  });
-  const wrap = h('div', { class: 'sliderbox' },
-    h('label', { class: 'field' }, h('span', {}, label), val), input);
-  wrap.set = (v) => { input.value = v; val.textContent = fmt(v); };
-  return wrap;
-}
-
-/** Three numeric fields in a row — for free positions and rotations. */
-export function vectorField(label, value, step, onChange) {
-  const inputs = ['X', 'Y', 'Z'].map((axis, i) => h('input', {
-    type: 'number', step, value: Number(value[i]).toFixed(2), 'aria-label': `${label} ${axis}`,
-    onChange: (e) => {
-      const next = inputs.map((el) => Number(el.value) || 0);
-      onChange(next);
-    },
-  }));
-  const wrap = h('div', { class: 'vecbox' },
-    h('label', { class: 'field' }, h('span', {}, label)),
-    h('div', { class: 'vecrow' }, ...inputs),
-  );
-  wrap.set = (v) => inputs.forEach((el, i) => { el.value = Number(v[i]).toFixed(2); });
-  return wrap;
-}
 
 const ASSEMBLE_TOOLS = [
   { tool: TOOL.SELECT, label: '選択 / 移動', key: 'V', color: '#ffd166' },
   { tool: TOOL.STAMP, label: 'パーツ配置', key: '—', color: '#8effc9' },
   { tool: TOOL.BLOCK, label: 'ブロック', key: 'B', color: '#c9d2dc' },
+  { tool: TOOL.EQUIP, label: '装備プレート', key: 'G', color: '#8fd9ff' },
   { tool: TOOL.BONE_LEG, label: BONE_META.leg.label, key: 'L', color: '#6fe3ff' },
   { tool: TOOL.BONE_ARM, label: BONE_META.arm.label, key: 'A', color: '#ffc861' },
   { tool: TOOL.BONE_FACE, label: BONE_META.face.label, key: 'F', color: '#ff7ba6' },
@@ -74,6 +37,19 @@ const SCULPT_LIST = [
   { tool: TOOL.ADD, label: '盛る', key: 'Z', color: '#8effc9' },
   { tool: TOOL.PAINT, label: '塗る', key: 'P', color: '#4fd2ff' },
 ];
+
+/** Standard bullet colours: bright, saturated, and legible against the field. */
+const BULLET_COLORS = [
+  0x7fd4ff, 0x4fd2ff, 0x8effc9, 0xffd166, 0xff9f5c,
+  0xff5c7a, 0xb98cff, 0xffffff, 0x6bff6b, 0xff2fb0,
+];
+
+/** How a part reads in a list: its attribute if it has one, else its label. */
+function partName(p) {
+  if (p.kind === 'bone') return BONE_META[p.boneType].label;
+  if (p.kind === 'equip') return EQUIP_META[p.equipType]?.label ?? p.label;
+  return p.label;
+}
 
 export class EditorUI {
   /** @param {HTMLElement} root  @param {object} app */
@@ -116,6 +92,7 @@ export class EditorUI {
       h('div', { class: 'sep' }),
       this.undoBtn,
       this.redoBtn,
+      h('button', { class: 'icon', title: 'キー設定', onClick: () => this.keyConfig.show() }, '⌨'),
       h('div', { class: 'sep' }),
       h('button', { onClick: () => app.save() }, '保存'),
       h('button', { onClick: () => app.load() }, '読込'),
@@ -204,6 +181,36 @@ export class EditorUI {
 
     this.blockBox = h('div', {}, ...this.newSizeSliders);
 
+    // --- equipment: pick a plate, then click the machine to stick it on
+    this.equipButtons = new Map();
+    const mkEquip = (type) => {
+      const meta = EQUIP_META[type];
+      const btn = h('button', {
+        class: 'equipbtn',
+        title: meta.blurb,
+        onClick: () => app.setEquipType(type),
+      },
+      h('span', { class: `equipicon ${meta.category === 'weapon' ? 'round' : 'square'}`,
+        style: `background:${hexToCss(meta.accent)}` }),
+      h('span', {}, meta.label));
+      this.equipButtons.set(type, btn);
+      return btn;
+    };
+
+    this.equipSize = slider('プレート径', {
+      min: EQUIP_SIZE_MIN, max: EQUIP_SIZE_MAX, step: EQUIP_SIZE_STEP,
+      value: app.editor.newEquipSize, fixed: 2,
+    }, (v) => app.setNewEquipSize(v));
+
+    this.equipHint = h('div', { class: 'note' }, EQUIP_META[app.editor.equipType].blurb);
+
+    this.equipBox = h('div', {},
+      h('div', { class: 'equipgrid' }, ...WEAPON_TYPES.map(mkEquip)),
+      h('div', { class: 'equipgrid' }, ...SYSTEM_TYPES.map(mkEquip)),
+      this.equipSize,
+      this.equipHint,
+    );
+
     // --- new bone shape
     this.boneLen = slider('長さ', {
       min: BONE_LENGTH_MIN, max: BONE_LENGTH_MAX, step: 0.25, value: app.editor.boneOpts.length, fixed: 2,
@@ -253,21 +260,35 @@ export class EditorUI {
       type: 'checkbox', onChange: (e) => { app.editor.previewMotion = e.target.checked; },
     });
 
+    // Each tool brings its own settings and takes them away again: with a
+    // dozen sliders stacked up, the panel is longer than the screen and the
+    // three that matter right now are lost in it.
+    this.gizmoSection = toolSection('ギズモ', this.gizmoBox);
+    this.blockSection = toolSection('新規ブロック寸法', this.blockBox);
+    this.equipSection = toolSection('装備プレート', this.equipBox);
+    this.boneSection = toolSection('新規ボーン寸法', this.boneBox);
+    this.sculptSection = toolSection('加工設定', this.sculptBox);
+    this.stampSection = toolSection('パーツ配置',
+      h('div', { class: 'note' },
+        '右の「パーツ庫」で ＜配置＞ を押すと、そのパーツを置く場所を選べます。'));
+
+    this.toolSections = [
+      this.gizmoSection, this.blockSection, this.equipSection,
+      this.boneSection, this.sculptSection, this.stampSection,
+    ];
+
+    // The sculpting tools start folded: they are the advanced half, and
+    // three more buttons is three more rows between you and everything else.
+    this.sculptTools = collapsible('加工 (上級)',
+      h('div', { class: 'body' }, ...SCULPT_LIST.map(mkTool)), { open: false });
+
     this.leftPanel = h('div', { class: 'panel', id: 'leftpanel' },
       h('h3', {}, '組み立て'),
+      h('div', { class: 'body' }, ...ASSEMBLE_TOOLS.map(mkTool)),
+      this.sculptTools,
+      h('h3', {}, 'ツール設定'),
       h('div', { class: 'body' },
-        ...ASSEMBLE_TOOLS.map(mkTool),
-        h('h3', { class: 'inline' }, 'ギズモ'),
-        this.gizmoBox,
-        h('h3', { class: 'inline' }, '新規ブロック寸法'),
-        this.blockBox,
-        h('h3', { class: 'inline' }, '新規ボーン寸法'),
-        this.boneBox,
-      ),
-      h('h3', {}, '加工 (上級)'),
-      h('div', { class: 'body' },
-        ...SCULPT_LIST.map(mkTool),
-        this.sculptBox,
+        ...this.toolSections,
         h('label', { class: 'checkline' }, this.symmetryToggle, '左右対称でつける'),
         h('label', { class: 'checkline' }, this.previewToggle, '歩行プレビュー'),
       ),
@@ -291,25 +312,19 @@ export class EditorUI {
     this.inspectorEl = h('div', { class: 'body' });
     this.statsEl = h('div', { class: 'body' });
     this.libraryEl = h('div', { class: 'body' });
-    this.librarySection = h('div', {},
-      h('h3', {}, 'パーツ庫'),
-      this.libraryEl,
-    );
+    this.librarySection = collapsible('パーツ庫', this.libraryEl, { open: false });
 
     this.rightPanel = h('div', { class: 'panel', id: 'rightpanel' },
       this.librarySection,
-      h('h3', {}, '標準色'),
-      h('div', { class: 'body' },
+      collapsible('色', h('div', { class: 'body' },
         this.paletteEl,
         h('h3', { class: 'inline' }, 'カスタム色'),
         this.customEl,
         this.wheelToggle,
         this.wheelWrap,
-      ),
-      h('h3', {}, 'インスペクタ'),
-      this.inspectorEl,
-      h('h3', {}, 'スペック'),
-      this.statsEl,
+      ), { open: false }),
+      collapsible('インスペクタ', this.inspectorEl),
+      collapsible('スペック', this.statsEl, { open: false }),
     );
 
     // ---------------------------------------------------- hints
@@ -326,15 +341,20 @@ export class EditorUI {
     );
 
     // ---------------------------------------------------- field mode
+    // Built from the live bindings, so it stays true after a rebind — and
+    // the weapon keys come FIRST, because "how do I shoot" is the one
+    // question a control hint has to answer.
+    this.fieldWeaponHint = h('span', { class: 'fieldkeys hot' });
+    this.fieldMoveHint = h('span', { class: 'fieldkeys' });
+
     this.fieldBar = h('div', { id: 'fieldbar', class: 'hidden' },
       h('span', { style: 'color:var(--accent);font-family:var(--mono);letter-spacing:.14em' }, 'DEBUG FIELD'),
       h('div', { class: 'sep' }),
-      h('span', { style: 'color:var(--dim)' },
-        'W/S 前後・A 右/D 左（2回押しでダッシュ・後ろも可） / Space 上昇・跳躍 / Shift 下降 / '
-        + 'E ブースト / F ロックオン / Tab 切替 / 1·2·3 ABC / R リセット / '
-        + '右ドラッグ（Alt）カメラ回転・ホイールでズーム'),
+      this.fieldWeaponHint,
       h('div', { class: 'sep' }),
-      h('span', { style: 'color:var(--dim)' }, 'Esc でポーズ'),
+      this.fieldMoveHint,
+      h('div', { class: 'spacer' }),
+      h('button', { onClick: () => this.keyConfig.show() }, 'キー設定'),
     );
 
     this.pauseMenu = h('div', { id: 'pause', class: 'hidden' },
@@ -343,36 +363,72 @@ export class EditorUI {
         h('div', { class: 'pausesub' }, 'ESC で再開'),
         h('button', { class: 'primary wide', onClick: () => app.resumeField() }, '▶ 再開する'),
         h('button', { class: 'wide', onClick: () => app.restartField() }, '⟲ リスポーン'),
+        h('button', { class: 'wide', onClick: () => this.keyConfig.show() }, '⌨ キー設定'),
         h('button', { class: 'wide', onClick: () => app.setMode('edit') }, '← 編集画面に戻る'),
       ),
     );
 
     this.toast = h('div', { id: 'toast' });
 
+    this.keyConfig = new KeyConfig(app.input, {
+      onChange: () => { app.saveBindings(); this.syncFieldHint(); },
+    });
+
     this.root.append(
       this.topbar, this.partBar, this.leftPanel, this.rightPanel, this.hint,
-      this.fieldBar, this.pauseMenu, this.toast,
+      this.fieldBar, this.pauseMenu, this.keyConfig.el, this.toast,
     );
 
     this.renderPalette();
     this.syncTool(app.editor.tool);
     this.syncResolution(app.assembly.voxRes);
+    this.syncFieldHint();
+  }
+
+  /** Redraw the field control strip from whatever the keys are bound to now. */
+  syncFieldHint() {
+    const k = (a) => this.app.input.primary(a);
+    const pair = (keys, what) => h('span', { class: 'keypair' }, h('b', {}, keys), what);
+    this.fieldWeaponHint.replaceChildren(
+      pair(k('fire'), '武器を撃つ'),
+      pair(`${k('weaponNext')} / ${k('weaponPrev')}`, '武器切替'),
+      pair(k('lock'), 'ロックオン'),
+      pair(k('cycleTarget'), 'ターゲット切替'),
+    );
+    this.fieldMoveHint.replaceChildren(
+      pair(`${k('forward')}${k('left')}${k('back')}${k('right')}`, '移動（2回押しでダッシュ）'),
+      pair(k('up'), '上昇・跳躍'),
+      pair(k('down'), '下降'),
+      pair(k('boost'), 'ブースト'),
+      pair(`${k('layerA')}·${k('layerB')}·${k('layerC')}`, 'ABC'),
+      pair(k('reset'), 'リスポーン'),
+      pair(k('camera'), 'カメラ回転（ホイールでズーム）'),
+      pair('Esc', 'ポーズ'),
+    );
   }
 
   // ---------------------------------------------------------- sync
 
+  /**
+   * Show the settings the current tool actually uses, and hide the rest.
+   * Dimming them was not enough: they still took up the panel.
+   */
   syncTool(tool) {
     for (const [t, btn] of this.toolButtons) btn.classList.toggle('active', t === tool);
     const isBone = [TOOL.BONE_LEG, TOOL.BONE_ARM, TOOL.BONE_FACE, TOOL.BONE_CUSTOM].includes(tool);
     const isSculpt = [TOOL.CARVE, TOOL.ADD, TOOL.PAINT].includes(tool);
-    const dim = (el, on) => {
-      el.style.opacity = on ? '1' : '0.35';
-      el.style.pointerEvents = on ? 'auto' : 'none';
-    };
-    dim(this.boneBox, isBone);
-    dim(this.blockBox, tool === TOOL.BLOCK);
-    dim(this.sculptBox, isSculpt);
-    dim(this.gizmoBox, tool === TOOL.SELECT);
+
+    this.gizmoSection.setVisible(tool === TOOL.SELECT);
+    this.blockSection.setVisible(tool === TOOL.BLOCK);
+    this.equipSection.setVisible(tool === TOOL.EQUIP);
+    this.boneSection.setVisible(isBone);
+    this.sculptSection.setVisible(isSculpt);
+    this.stampSection.setVisible(tool === TOOL.STAMP);
+
+    // Reaching a sculpt tool by keyboard should not leave its button folded away.
+    if (isSculpt) this.sculptTools.setOpen(true);
+
+    this.syncEquipType(this.app.editor.equipType);
   }
 
   /** Enable / disable the undo buttons and say what they would reverse. */
@@ -420,6 +476,12 @@ export class EditorUI {
         class: 'ghost wide', onClick: () => app.saveSelectionAsPart(),
       }, '選択パーツを登録'),
     );
+  }
+
+  /** Highlight the armed plate, and say what it does. */
+  syncEquipType(type) {
+    for (const [t, btn] of this.equipButtons) btn.classList.toggle('active', t === type);
+    this.equipHint.textContent = EQUIP_META[type]?.blurb ?? '';
   }
 
   syncGizmoMode(mode) {
@@ -508,7 +570,7 @@ export class EditorUI {
     if (list.length > 1) {
       const anchor = this.app.assembly.get(this.app.editor.anchorId);
       const anchorName = anchor
-        ? `${anchor.kind === 'bone' ? BONE_META[anchor.boneType].label : anchor.label} (${anchor.id})`
+        ? `${partName(anchor)} (${anchor.id})`
         : '—';
 
       this.inspectorEl.append(
@@ -541,7 +603,9 @@ export class EditorUI {
     const isCore = part.kind === 'core';
     const rows = [
       h('div', { class: 'tag' },
-        part.kind.toUpperCase() + (part.kind === 'bone' ? ` / ${BONE_META[part.boneType].label}` : '')),
+        part.kind.toUpperCase()
+        + (part.kind === 'bone' ? ` / ${BONE_META[part.boneType].label}` : '')
+        + (part.kind === 'equip' ? ` / ${EQUIP_META[part.equipType]?.label ?? part.equipType}` : '')),
     ];
 
     if (part.mount) {
@@ -564,7 +628,7 @@ export class EditorUI {
         .filter((p) => app.assembly.canReparent(part.id, p.id))
         .map((p) => h('option', {
           value: p.id, ...(p.id === part.parent ? { selected: 'selected' } : {}),
-        }, `${p.kind === 'bone' ? BONE_META[p.boneType].label : p.label} (${p.id})`));
+        }, `${partName(p)} (${p.id})`));
 
       rows.push(h('h3', { class: 'inline' }, '連結先'));
       rows.push(h('select', {
@@ -579,6 +643,11 @@ export class EditorUI {
         rows.push(h('div', { class: 'note' }, half === 'far'
           ? 'この関節から先なので、ボーンと一緒に振れます。'
           : 'ボーンの手前半分なので動きません。中点より先へ動かすと可動側になります。'));
+        rows.push(h('div', { class: 'row tight' },
+          h('button', { title: 'ボーンの根元へ', onClick: () => app.editor.slideAlongBone(0) }, '根元へ'),
+          h('button', { title: '関節の少し先へ', onClick: () => app.editor.slideAlongBone(0.55) }, '可動側へ'),
+          h('button', { title: 'ボーンの先端へ', onClick: () => app.editor.slideAlongBone(1) }, '先端へ'),
+        ));
       }
       rows.push(h('div', { class: 'note' },
         'どのパーツと一緒に動くか。ボーンを選ぶと、その関節から先で動きます。',
@@ -605,23 +674,90 @@ export class EditorUI {
           onChange: (ev) => { part.invert = ev.target.checked; app.editor.rebuild(); },
         }), '動きを反転'));
 
-      if (part.boneType === 'custom') {
-        const c = part.custom;
-        rows.push(h('h3', { class: 'inline' }, 'カスタム動作'));
+      rows.push(h('h3', { class: 'inline' }, 'つなげる'));
+      rows.push(h('button', {
+        class: 'ghost wide',
+        title: 'このボーンの先端に、もう1本つなげます',
+        onClick: () => app.editor.addBoneOnTipSelected(),
+      }, `＋ 先端に${BONE_META[part.boneType].label}`));
+      rows.push(h('div', { class: 'note' },
+        '関節は中央。青い弧が可動範囲、緑の線が動く側（先端半分）です。'));
+
+      if (part.boneType === 'custom') rows.push(...this._customMotion(part));
+    } else if (part.kind === 'equip') {
+      const meta = EQUIP_META[part.equipType];
+
+      rows.push(h('div', { class: 'note' }, meta.blurb));
+
+      rows.push(h('h3', { class: 'inline' }, '種類'));
+      const swap = (type) => h('button', {
+        class: part.equipType === type ? 'active' : '',
+        title: EQUIP_META[type].blurb,
+        onClick: () => app.editor.setEquipTypeSelected(type),
+      }, EQUIP_META[type].label);
+      rows.push(h('div', { class: 'equipgrid' }, ...WEAPON_TYPES.map(swap)));
+      rows.push(h('div', { class: 'equipgrid' }, ...SYSTEM_TYPES.map(swap)));
+
+      rows.push(h('h3', { class: 'inline' }, '大きさ'));
+      rows.push(slider('径', {
+        min: EQUIP_SIZE_MIN, max: EQUIP_SIZE_MAX, step: EQUIP_SIZE_STEP,
+        value: part.size, fixed: 2,
+      }, (v) => app.editor.setEquipSizeSelected(v)));
+
+      if (meta.category === 'weapon' && meta.ammo) {
+        rows.push(h('div', { class: 'stat' },
+          h('span', { class: 'k' }, '装弾 / リロード'),
+          h('span', { class: 'v' }, `${meta.ammo} 発 / ${meta.reload.toFixed(1)}s`)));
+      }
+      if (meta.dps) {
+        rows.push(h('div', { class: 'stat' },
+          h('span', { class: 'k' }, '接触ダメージ'),
+          h('span', { class: 'v' }, `${meta.dps}/s`)));
+      }
+
+      if (part.spin) {
+        const parent = app.assembly.get(part.parent);
+        rows.push(h('h3', { class: 'inline' }, '回転'));
         rows.push(h('div', { class: 'row tight' },
-          ...['x', 'y', 'z'].map((ax) => h('button', {
-            class: c.axis === ax ? 'active' : '',
-            onClick: (ev) => {
-              c.axis = ax;
-              [...ev.target.parentElement.children].forEach((b) => b.classList.toggle('active', b === ev.target));
+          ...[[1, '正転 ↻'], [-1, '逆転 ↺']].map(([d, label]) => h('button', {
+            class: part.spin.dir === d ? 'active' : '',
+            onClick: () => {
+              app.editor.setEquipSpinSelected({ dir: d });
+              this.renderInspector(app.editor.selectedParts());
             },
-          }, { x: '前後', y: 'ひねり', z: '上下' }[ax]))));
-        rows.push(slider('振幅', { min: 0, max: 90, step: 5, value: c.amp, unit: '°' }, (v) => { c.amp = v; }));
-        rows.push(slider('速さ', { min: 0, max: 4, step: 0.1, value: c.freq, fixed: 1 }, (v) => { c.freq = v; }));
-        rows.push(h('label', { class: 'field' }, h('span', {}, '駆動ソース')));
-        rows.push(h('select', { onChange: (ev) => { c.source = ev.target.value; } },
-          ...[['time', '常時'], ['speed', '速度'], ['thrust', '推力'], ['jerk', '衝撃'], ['aim', 'ロックオン']]
-            .map(([v, l]) => h('option', { value: v, ...(c.source === v ? { selected: 'selected' } : {}) }, l))));
+          }, label))));
+        rows.push(slider('速さ', {
+          min: SPIN_RPM_MIN, max: SPIN_RPM_MAX, step: 5, value: part.spin.rpm, unit: ' rpm',
+        }, (v) => app.editor.setEquipSpinSelected({ rpm: v })));
+        rows.push(h('div', { class: 'note' },
+          '貼った面の向きが回転軸になります。ブロックごと、載っているものも一緒に回ります。'));
+        if (parent?.kind === 'bone') {
+          rows.push(h('div', { class: 'inspector-empty warn' },
+            'ボーンに貼っても回りません。ブロックに貼ってください。'));
+        } else if (part.parent === app.assembly.rootId) {
+          rows.push(h('div', { class: 'inspector-empty warn' },
+            'コアは回せません（機体ごと回ってしまうため）。'));
+        }
+      }
+
+      rows.push(h('h3', { class: 'inline' }, '弾の色'));
+      if (meta.colorable) {
+        rows.push(h('div', { class: 'palette' },
+          ...BULLET_COLORS.map((hex) => h('button', {
+            class: `swatch${part.bulletColor === hex ? ' active' : ''}`,
+            style: `background:${hexToCss(hex)}`,
+            title: hexToCss(hex),
+            onClick: () => app.setBulletColor(hex),
+          }))));
+        rows.push(h('label', { class: 'field' },
+          h('span', {}, '自由な色'),
+          h('input', {
+            type: 'color', value: hexToCss(part.bulletColor ?? meta.bullet),
+            onInput: (ev) => app.setBulletColor(parseInt(ev.target.value.slice(1), 16)),
+          })));
+      } else {
+        rows.push(h('div', { class: 'inspector-empty' },
+          `${meta.label}は弾の色を変えられません。`));
       }
     } else {
       rows.push(h('h3', { class: 'inline' }, '寸法'));
@@ -666,6 +802,63 @@ export class EditorUI {
     return rows;
   }
 
+  /**
+   * The custom bone's motion, laid out as "what moves / how / how fast".
+   * It used to be three unlabelled sliders and a dropdown; the shape of the
+   * motion was invisible until you deployed.
+   */
+  _customMotion(part) {
+    const app = this.app;
+    const c = part.custom;
+    const rows = [h('h3', { class: 'inline' }, 'カスタム動作')];
+
+    const redraw = () => this.renderInspector(app.editor.selectedParts());
+
+    rows.push(h('label', { class: 'field' }, h('span', {}, '軸')));
+    rows.push(h('div', { class: 'row tight' },
+      ...['x', 'y', 'z'].map((ax) => h('button', {
+        class: c.axis === ax ? 'active' : '',
+        onClick: () => { c.axis = ax; redraw(); },
+      }, { x: '前後', y: 'ひねり', z: '上下' }[ax]))));
+
+    rows.push(h('label', { class: 'field' }, h('span', {}, '動き方')));
+    rows.push(h('div', { class: 'equipgrid' },
+      ...Object.entries(CUSTOM_WAVES).map(([k, w]) => h('button', {
+        class: c.wave === k ? 'active' : '',
+        onClick: () => { c.wave = k; redraw(); },
+      }, w.label))));
+
+    const spinning = CUSTOM_WAVES[c.wave]?.spins;
+    if (spinning) {
+      rows.push(h('div', { class: 'note' },
+        '回転は可動域を無視してぐるぐる回り続けます。プロペラやレーダー向け。'));
+    } else {
+      rows.push(slider('振幅', { min: 0, max: 90, step: 5, value: c.amp, unit: '°' },
+        (v) => { c.amp = v; }));
+    }
+
+    rows.push(slider(spinning ? '回転速度' : '速さ',
+      { min: 0, max: 4, step: 0.1, value: c.freq, fixed: 1, unit: spinning ? ' 回転/秒' : ' Hz' },
+      (v) => { c.freq = v; }));
+
+    rows.push(slider('中心角', { min: -90, max: 90, step: 5, value: c.offset ?? 0, unit: '°' },
+      (v) => { c.offset = v; }));
+    rows.push(slider('位相ずらし', { min: 0, max: 1, step: 0.05, value: c.phase ?? 0, fixed: 2 },
+      (v) => { c.phase = v; }));
+    rows.push(h('div', { class: 'note' },
+      '位相をずらすと、同じ設定のボーン同士でも動きがそろわずに波打ちます。'));
+
+    rows.push(h('label', { class: 'field' }, h('span', {}, '駆動ソース')));
+    rows.push(h('select', { onChange: (ev) => { c.source = ev.target.value; } },
+      ...CUSTOM_SOURCES.map(([v, l]) => h('option', {
+        value: v, ...(c.source === v ? { selected: 'selected' } : {}),
+      }, l))));
+    rows.push(h('div', { class: 'note' },
+      '選択している間、編集画面でもこの動きが再生されます。'));
+
+    return rows;
+  }
+
   // ---------------------------------------------------------- stats
 
   renderStats(stats) {
@@ -693,6 +886,17 @@ export class EditorUI {
         h('span', { class: 'v' }, `${stats.legs} / ${stats.arms}`)),
       h('div', { class: 'stat' }, h('span', { class: 'k' }, '顔 / カスタム'),
         h('span', { class: 'v' }, `${stats.faces} / ${stats.customs}`)),
+
+      h('div', { class: 'stat' }, h('span', { class: 'k' }, '装備 / 武装'),
+        h('span', { class: 'v' }, `${stats.equipCount ?? 0} / ${stats.weaponCount ?? 0}`)),
+      ...(stats.dashBonus
+        ? [h('div', { class: 'stat' }, h('span', { class: 'k' }, 'ダッシュ'),
+          h('span', { class: 'v good' }, `+${Math.round(stats.dashBonus * 100)}%`))]
+        : []),
+      ...(stats.noFly
+        ? [h('div', { class: 'stat' }, h('span', { class: 'k' }, 'グラビティ'),
+          h('span', { class: 'v warn' }, `浮遊不可 / 耐久 +${Math.round(stats.hpBonus * 100)}%`))]
+        : []),
     );
   }
 

@@ -29,6 +29,11 @@ export class AngularDynamics {
     this.quaternion = new THREE.Quaternion();
     /** The free-look forward vector, before assist and bank are applied. */
     this.freeForward = new THREE.Vector3(0, 0, 1);
+    /**
+     * Where the machine is AIMING, before the ground stance flattens the
+     * chassis. Weapons and the head bone read this; the body does not.
+     */
+    this.aimForward = new THREE.Vector3(0, 0, 1);
     this.forward = new THREE.Vector3(0, 0, 1);
     this.up = new THREE.Vector3(0, 1, 0);
     this.right = new THREE.Vector3(1, 0, 0);
@@ -52,6 +57,7 @@ export class AngularDynamics {
 
   reset(forward = new THREE.Vector3(0, 0, 1)) {
     this.freeForward.copy(forward).normalize();
+    this.aimForward.copy(this.freeForward);
     this.forward.copy(this.freeForward);
     this.bank = 0;
     this.angularVelocity.set(0, 0, 0);
@@ -117,6 +123,24 @@ export class AngularDynamics {
         _tmp.normalize();
         _fwd.lerp(_tmp, clamp01(dt * 1.8)).normalize();
         this.freeForward.copy(_fwd);
+      }
+    }
+
+    // ---------------------------------------------------- 2b. ground stance
+    // A machine standing on its feet keeps the chassis parallel to the floor.
+    // It tracks a target by TURNING, not by leaning back at it — and a nose
+    // tipped 40° up while walking reads as "about to take off" even when the
+    // physics has been made honest about not doing so.
+    //
+    // The aim itself is untouched: `aimForward` keeps the pitch, so weapons
+    // and the head bone still point at what you are looking at, and lifting
+    // off restores the attitude with no snap.
+    this.aimForward.copy(_fwd);
+    const stance = clamp01(p.grounded ?? 0);
+    if (stance > 0.001) {
+      _tmp.set(_fwd.x, 0, _fwd.z);
+      if (_tmp.lengthSq() > 1e-6) {
+        _fwd.lerp(_tmp.normalize(), stance).normalize();
       }
     }
 

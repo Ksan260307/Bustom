@@ -16,6 +16,13 @@ function makeBody(stats = STATS, world = testWorld()) {
 }
 
 /** Run the body for `seconds` with a fixed input. */
+/** Stats for a biped wearing the named equipment plates. */
+function platedStats(...types) {
+  const a = PRESETS.biped.build();
+  for (const t of types) a.addEquipOnFace(a.core.id, 4, t);
+  return computeStats(a);
+}
+
 function run(body, input, seconds, dt = 1 / 60) {
   const steps = Math.round(seconds / dt);
   for (let i = 0; i < steps; i++) {
@@ -144,7 +151,9 @@ describe('energy', () => {
   });
 
   it('stays inside 0..1 and reports strain once the tank runs dry', () => {
-    const b = makeBody();
+    // Boosting is the heaviest drain there is, so this needs a machine that
+    // can actually boost.
+    const b = makeBody(platedStats('boost'));
     input.hold('up', true);
     input.hold('boost', true);
     run(b, input, 3);
@@ -333,8 +342,9 @@ describe('ground lock-on', () => {
     run(b, input, 6);
 
     expect(b.assist.authority, 'the lock is genuinely engaged').toBeGreaterThan(0.8);
-    expect(b.forward.y, 'the nose really is pitched up at it').toBeGreaterThan(0.2);
-    expect(b.position.y, 'but the machine stays on the ground').toBeCloseTo(2, 1);
+    expect(b.aimForward.y, 'it really is aiming up at it').toBeGreaterThan(0.2);
+    expect(b.forward.y, 'but the chassis stays level').toBeCloseTo(0, 2);
+    expect(b.position.y, 'and on the ground').toBeCloseTo(2, 1);
     expect(b.grounded).toBeGreaterThan(0.9);
   });
 
@@ -368,6 +378,54 @@ describe('ground lock-on', () => {
     input.hold('up', true);
     run(b, input, 3);
     expect(b.position.y).toBeGreaterThan(8);
+  });
+
+  it('turns toward the target instead of leaning at it', () => {
+    const b = makeBody();
+    // Off to one side and well above: the yaw must happen, the pitch must not.
+    b.setTarget({ position: V(60, 30, 0), radius: 2 });
+    b.locked = true;
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    run(b, input, 6);
+
+    expect(b.forward.x, 'it turned to face the target').toBeGreaterThan(0.7);
+    expect(Math.abs(b.forward.y), 'without tipping the chassis').toBeLessThan(0.05);
+    expect(b.aimForward.y, 'the aim still points up at it').toBeGreaterThan(0.2);
+  });
+
+  it('the level stance fades out as the machine leaves the ground', () => {
+    const b = makeBody();
+    b.setTarget({ position: V(0, 45, 15), radius: 2 });   // steeply overhead
+    b.locked = true;
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    run(b, input, 3);
+
+    expect(b.aimForward.y, 'planted: aiming steeply up').toBeGreaterThan(0.5);
+    expect(Math.abs(b.forward.y), 'but flat as a table').toBeLessThan(0.05);
+
+    input.hold('up', true);
+    run(b, input, 2);
+    expect(b.grounded).toBeLessThan(0.2);
+    expect(Math.abs(b.forward.y - b.aimForward.y),
+      'off the floor, the chassis is the aim again').toBeLessThan(0.12);
+    expect(Math.abs(b.forward.y), 'and no longer pinned flat').toBeGreaterThan(0.3);
+  });
+
+  it('mouse pitch is remembered on the ground and honoured in the air', () => {
+    const b = makeBody();
+    input.look.pitch = 3;
+    run(b, input, 1);
+    input.look.pitch = 0;
+    run(b, input, 1);
+
+    expect(Math.abs(b.forward.y), 'the chassis ignored it while planted').toBeLessThan(0.05);
+    expect(b.aimForward.y, 'but the aim went where it was pointed').toBeGreaterThan(0.3);
+
+    input.hold('up', true);
+    run(b, input, 2);
+    expect(b.forward.y, 'and the nose follows once off the floor').toBeGreaterThan(0.2);
   });
 
   it('once airborne, thrust follows the nose again', () => {
@@ -448,6 +506,117 @@ describe('frame locking on the ground', () => {
   });
 });
 
+describe('equipment on the body', () => {
+  const plated = platedStats;
+
+  it('a boost plate makes the dash bite harder', () => {
+    const bare = makeBody(computeStats(PRESETS.biped.build()));
+    const boosted = makeBody(plated('boost', 'boost'));
+    expect(boosted.dashSpeed).toBeGreaterThan(bare.dashSpeed);
+  });
+
+  it('a machine with no boost plate cannot boost at all', () => {
+    const bare = makeBody();
+    expect(bare.canBoost).toBe(false);
+
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    input.hold('boost', true);
+    run(bare, input, 2);
+    expect(bare.boosting, 'the key does nothing').toBe(false);
+    expect(bare.boostOutput).toBe(0);
+    expect(bare.energy, 'and it costs nothing').toBeGreaterThan(0.9);
+  });
+
+  it('a boost plate switches the thruster on', () => {
+    const b = makeBody(plated('boost'));
+    expect(b.canBoost).toBe(true);
+
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    input.hold('boost', true);
+    run(b, input, 1);
+    expect(b.boosting).toBe(true);
+    expect(b.boostOutput).toBeGreaterThan(0.8);
+  });
+
+  it('and it costs fuel to hold', () => {
+    // On the ground the regen almost pays for it, so measure in the air,
+    // where the tank is genuinely on its own.
+    const drain = (boost) => {
+      const body = makeBody(plated('boost'));
+      const inp = new SyntheticInput();
+      inp.move.set(0, 0, 1);
+      inp.intensity = 1;
+      inp.hold('up', true);
+      inp.hold('boost', boost);
+      run(body, inp, 3);
+      return body.energy;
+    };
+    expect(drain(true)).toBeLessThan(drain(false));
+  });
+
+  it('boosting really is faster than not boosting', () => {
+    const bare = makeBody();
+    const plated1 = makeBody(plated('boost'));
+    const drive = (body) => {
+      const inp = new SyntheticInput();
+      inp.move.set(0, 0, 1);
+      inp.intensity = 1;
+      inp.hold('boost', true);
+      run(body, inp, 2.5);
+      return body.speed;
+    };
+    expect(drive(plated1)).toBeGreaterThan(drive(bare) + 1);
+  });
+
+  it('the flame dies down rather than switching off', () => {
+    const b = makeBody(plated('boost'));
+    input.hold('boost', true);
+    run(b, input, 1);
+    const lit = b.boostOutput;
+    input.hold('boost', false);
+    run(b, input, 1 / 30);
+    expect(b.boostOutput).toBeLessThan(lit);
+    expect(b.boostOutput, 'but not instantly').toBeGreaterThan(0.1);
+    run(b, input, 1);
+    expect(b.boostOutput).toBeLessThan(0.05);
+  });
+
+  it('an empty tank puts the thruster out, plate or no plate', () => {
+    const b = makeBody(plated('boost'));
+    input.hold('up', true);
+    input.hold('boost', true);
+    run(b, input, 8);
+    expect(b.energy).toBeLessThan(0.05);
+    expect(b.boosting).toBe(false);
+  });
+
+  it('a gravity plate takes away sustained flight', () => {
+    const b = makeBody(plated('gravity'));
+    expect(b.noFly).toBe(true);
+    input.hold('up', true);
+    run(b, input, 3);
+    expect(b.hover, 'gravity is never bought back').toBeLessThan(0.05);
+    expect(b.position.y, 'so it cannot climb away').toBeLessThan(9);
+  });
+
+  it('but it can still jump, because a jump is not hovering', () => {
+    const b = makeBody(plated('gravity'));
+    const start = b.position.y;
+    input.hold('up', true);
+    run(b, input, 0.25);
+    expect(b.position.y).toBeGreaterThan(start + 0.5);
+  });
+
+  it('without the plate the same input flies', () => {
+    const b = makeBody(computeStats(PRESETS.biped.build()));
+    input.hold('up', true);
+    run(b, input, 3);
+    expect(b.position.y).toBeGreaterThan(12);
+  });
+});
+
 describe('telemetry', () => {
   it('reports every channel the HUD reads, all finite', () => {
     const b = makeBody();
@@ -521,6 +690,40 @@ describe('Robot', () => {
     expect(robot.stats.gait).toBe('walk');
     expect(robot.hp).toBeGreaterThan(0);
     expect(robot.object3D.children).toContain(robot.rig.root);
+  });
+
+  it('carries no glow of its own — only a directional exhaust', () => {
+    const robot = new Robot(PRESETS.biped.build(), testWorld());
+    expect(robot.glow, 'the old core bloom is gone').toBe(undefined);
+
+    let sprites = 0;
+    robot.rig.root.traverse((o) => { if (o.isSprite) sprites++; });
+    expect(sprites, 'nothing billboarded onto the chassis').toBe(0);
+
+    // and the plume still answers the throttle
+    expect(robot.plume).toBeTruthy();
+    expect(robot.plume.material.opacity).toBe(0);
+    const i = new SyntheticInput();
+    i.move.set(0, 0, 1);
+    i.intensity = 1;
+    for (let k = 0; k < 120; k++) { robot.update(i, 1 / 60); i.endFrame(); }
+    expect(robot.plume.material.opacity).toBeGreaterThan(0.05);
+  });
+
+  it('a dash lights nothing on the machine itself', () => {
+    const robot = new Robot(PRESETS.biped.build(), testWorld());
+    const i = new SyntheticInput();
+    i.move.set(0, 0, 1);
+    i.intensity = 1;
+    for (let k = 0; k < 30; k++) { robot.update(i, 1 / 60); i.endFrame(); }
+    const coasting = robot.plume.material.opacity;
+
+    i.dash = { dir: V(0, 0, 1), t: 0 };
+    for (let k = 0; k < 12; k++) { robot.update(i, 1 / 60); i.endFrame(); }
+
+    expect(robot.body.dashFlash, 'the dash really fired').toBeGreaterThan(0.2);
+    expect(robot.plume.material.opacity, 'but nothing flared up for it')
+      .toBeCloseTo(coasting, 1);
   });
 
   it('stands on the ground at spawn', () => {

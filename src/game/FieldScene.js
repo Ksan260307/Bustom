@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { World } from './World.js';
 import { Robot, SimpleAI } from './Robot.js';
+import { Projectiles } from './Weapons.js';
 import { Hud } from './Hud.js';
 import { PostFX } from './PostFX.js';
 import { CameraDynamics } from '../zmf/CameraDynamics.js';
@@ -37,11 +38,14 @@ export class FieldScene {
     this.lock = null;
     this.tracers = [];
     this.fireCooldown = 0;
+    /** Decaying kick from landing a shot, folded into the feedback bus. */
+    this.hitPulse = 0;
     this.time = 0;
     this.active = false;
     this.paused = false;
 
     this._buildTracerPool();
+    this.projectiles = new Projectiles(this.scene, this.world);
   }
 
   // ---------------------------------------------------------- lifecycle
@@ -78,6 +82,8 @@ export class FieldScene {
     this.player.body.reset(new THREE.Vector3(0, h + 0.2, -18));
     // A respawn is a fresh view: whatever the player had the boom swung to,
     // they are looking at a new fight now. Their zoom is a preference, so it stays.
+    this.projectiles.clear();
+    this.player.rearm();
     this.cameraRig.recenter();
     this.cameraRig.snap(this.player.position, this.player.body.forward);
     this.lock = null;
@@ -201,7 +207,40 @@ export class FieldScene {
     }
   }
 
+  /**
+   * Everything the player has bolted on, then — only for a machine carrying
+   * no weapon plates at all — the built-in vulcan, so a bare chassis is
+   * still worth taking into the field.
+   */
   _fire(dt) {
+    const p = this.player;
+
+    if (this.input.consume('weaponNext', 0.2)) this._switchWeapon(1);
+    if (this.input.consume('weaponPrev', 0.2)) this._switchWeapon(-1);
+
+    const firing = this.input.isDown('fire');
+
+    p.weapons.update({
+      firing,
+      aimPoint: this.lock && p.body.assist.hasTarget ? p.body.assist.aimPoint : null,
+      projectiles: this.projectiles,
+      targets: this.enemies,
+      lockTarget: this.lock?.robot ?? null,
+    }, dt);
+
+    if (!p.weapons.hasWeapons) this._fireDefault(dt);
+  }
+
+  /** Cycle the sub-weapon set, and say what came up. */
+  _switchWeapon(dir) {
+    const w = this.player.weapons;
+    if (w.slots.length < 2) return null;
+    const slot = dir > 0 ? w.next() : w.prev();
+    this.hud.flashWeapon(slot?.meta.label ?? '');
+    return slot;
+  }
+
+  _fireDefault(dt) {
     this.fireCooldown = Math.max(0, this.fireCooldown - dt);
     if (!this.input.isDown('fire') || this.fireCooldown > 0) return;
     this.fireCooldown = 0.11;
@@ -262,6 +301,11 @@ export class FieldScene {
 
     this._fire(dt);
     this._updateTracers(dt);
+    this.projectiles.update(dt, this.enemies);
+    this.hitPulse = Math.max(0, this.hitPulse - dt * 5);
+    for (const hit of this.projectiles.hits) {
+      if (hit.robot) this.hitPulse = Math.max(this.hitPulse, clamp01(hit.damage / 26));
+    }
 
     // ---- camera
     const tel = p.body.telemetry();
@@ -292,7 +336,7 @@ export class FieldScene {
     // ---- feedback
     this.feedback.update({
       thrust: tel.thrust, jerk: tel.jerk, speed: tel.speed,
-      impact: tel.impact, strain: tel.strain,
+      impact: Math.max(tel.impact, this.hitPulse), strain: tel.strain,
     }, dt);
 
     // ---- post uniforms: thrust direction projected to screen
@@ -321,6 +365,7 @@ export class FieldScene {
       lock: this.lock,
       telemetry: p.body.telemetry(),
       gait: p.stats.gait,
+      weapons: p.weapons.readout(),
     }, dt);
   }
 

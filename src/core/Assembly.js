@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import {
   BONE, BONE_GAUGE, FACE_NORMAL, FACE_AXIS, DEFAULT_VOX, snapSize,
   BONE_LENGTH_MIN, BONE_LENGTH_MAX, BONE_RADIUS_MIN, BONE_RADIUS_MAX,
+  EQUIP, EQUIP_META, EQUIP_SIZE_DEFAULT, snapEquipSize,
+  SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT,
 } from './constants.js';
 import { VoxelBlock } from './VoxelBlock.js';
 import { Palette } from './Palette.js';
@@ -41,6 +43,17 @@ const UP = new THREE.Vector3(0, 1, 0);
  * `pos[1]` is simply "how far along the bone".
  */
 export const defaultMount = (m = {}) => ({ pos: [0, 0, 0], rot: [0, 0, 0, 1], ...m });
+
+/** A spin setting that is always sane, whatever the caller or a save file says. */
+function normaliseSpin(spin, meta) {
+  // A non-numeric rpm from a hand-edited save would clamp to NaN and poison
+  // the block's quaternion, which takes the whole transform with it.
+  const rpm = Number(spin?.rpm);
+  return {
+    dir: (spin?.dir ?? 1) < 0 ? -1 : 1,
+    rpm: clamp(Number.isFinite(rpm) ? rpm : (meta.rpm ?? 60), SPIN_RPM_MIN, SPIN_RPM_MAX),
+  };
+}
 
 /** Quaternion that points a bone's +Y shaft along a face normal. */
 export function alignYToFace(face, roll = 0) {
@@ -164,12 +177,111 @@ export class Assembly {
       length: clamp(opts.length ?? 3, BONE_LENGTH_MIN, BONE_LENGTH_MAX),
       limit: opts.limit ?? 70,          // joint travel, degrees
       invert: opts.invert ?? false,     // mirror the animator's swing
-      custom: opts.custom ?? { axis: 'x', amp: 30, freq: 1.0, phase: 0, source: 'time' },
+      custom: { ...CUSTOM_DEFAULT, ...(opts.custom ?? {}) },
       label: 'BONE',
     };
     this.parts.set(part.id, part);
     parent.children.push(part.id);
     return part;
+  }
+
+  /**
+   * Equipment: a thin plate stuck onto a part. It has no voxels and carries
+   * no structure — it is kit, not chassis. `size` is the plate's diameter
+   * (round) or edge (square); the thickness is fixed, because a uniform
+   * silhouette is the whole point of the format.
+   */
+  addEquip(parentId, mount, equipType = EQUIP.BEAM, opts = {}) {
+    const parent = this.parts.get(parentId);
+    const meta = EQUIP_META[equipType];
+    if (!parent || !meta) return null;
+    if (meta.unique && this.countEquip(equipType) >= 1) return null;
+
+    const part = {
+      id: nextId('e'),
+      kind: 'equip',
+      parent: parentId,
+      mount: defaultMount(mount),
+      children: [],
+      equipType,
+      size: snapEquipSize(opts.size ?? EQUIP_SIZE_DEFAULT),
+      /** Bullet colour as a raw hex. Null on plates that cannot recolour. */
+      bulletColor: meta.colorable ? (opts.bulletColor ?? meta.bullet) : null,
+      /** Rotation, for plates that spin what they are stuck to. */
+      spin: meta.spins ? normaliseSpin(opts.spin, meta) : null,
+      label: 'EQUIP',
+    };
+    this.parts.set(part.id, part);
+    parent.children.push(part.id);
+    return part;
+  }
+
+  /** A sticker laid flat on a face, its plate normal pointing outward. */
+  addEquipOnFace(parentId, face, equipType, opts = {}) {
+    const parent = this.parts.get(parentId);
+    if (!parent) return null;
+    return this.addEquip(parentId, {
+      pos: faceAnchor(parent, face),
+      rot: alignYToFace(face, opts.roll ?? 0),
+    }, equipType, opts);
+  }
+
+  /** How many plates of one type the build already carries. */
+  countEquip(type) {
+    let n = 0;
+    this.walk((p) => { if (p.kind === 'equip' && p.equipType === type) n++; });
+    return n;
+  }
+
+  /** Would adding this type be legal right now? */
+  canAddEquip(type) {
+    const meta = EQUIP_META[type];
+    if (!meta) return false;
+    return !meta.unique || this.countEquip(type) < 1;
+  }
+
+  /** Every equip plate, in stable tree order. */
+  equips() {
+    const out = [];
+    this.walk((p) => { if (p.kind === 'equip') out.push(p); });
+    return out;
+  }
+
+  setEquipType(id, type) {
+    const part = this.parts.get(id);
+    const meta = EQUIP_META[type];
+    if (!part || part.kind !== 'equip' || !meta) return false;
+    if (part.equipType === type) return true;
+    if (meta.unique && this.countEquip(type) >= 1) return false;
+    part.equipType = type;
+    part.bulletColor = meta.colorable ? (part.bulletColor ?? meta.bullet) : null;
+    part.spin = meta.spins ? normaliseSpin(part.spin, meta) : null;
+    return true;
+  }
+
+  /** Which way and how fast a ROLLING plate turns its block. */
+  setEquipSpin(id, { dir, rpm } = {}) {
+    const part = this.parts.get(id);
+    if (!part || part.kind !== 'equip' || !part.spin) return false;
+    if (dir !== undefined) part.spin.dir = dir < 0 ? -1 : 1;
+    if (rpm !== undefined) part.spin.rpm = clamp(rpm, SPIN_RPM_MIN, SPIN_RPM_MAX);
+    return true;
+  }
+
+  setEquipSize(id, size) {
+    const part = this.parts.get(id);
+    if (!part || part.kind !== 'equip') return false;
+    part.size = snapEquipSize(size);
+    return true;
+  }
+
+  /** Only bites on plates whose meta says they may be recoloured. */
+  setBulletColor(id, hex) {
+    const part = this.parts.get(id);
+    if (!part || part.kind !== 'equip') return false;
+    if (!EQUIP_META[part.equipType]?.colorable) return false;
+    part.bulletColor = hex & 0xffffff;
+    return true;
   }
 
   /** Convenience for presets and for click-to-place: flush against a face. */
@@ -272,7 +384,7 @@ export class Assembly {
 
   setSize(id, size) {
     const part = this.parts.get(id);
-    if (!part || part.kind === 'bone') return false;
+    if (!part || part.kind === 'bone' || part.kind === 'equip') return false;
     part.size = size.map(snapSize);
     return true;
   }
@@ -289,7 +401,7 @@ export class Assembly {
   setVoxResolution(n) {
     if (this.voxRes === n) return false;
     this.voxRes = n;
-    this.walk((p) => { if (p.kind !== 'bone') p.vox.setResolution(n, true); });
+    this.walk((p) => { if (p.vox) p.vox.setResolution(n, true); });
     return true;
   }
 
@@ -329,6 +441,11 @@ export class Assembly {
         Object.assign(copy, {
           boneType: p.boneType, radius: p.radius, length: p.length,
           limit: p.limit, invert: p.invert, custom: { ...p.custom },
+        });
+      } else if (p.kind === 'equip') {
+        Object.assign(copy, {
+          equipType: p.equipType, size: p.size, bulletColor: p.bulletColor,
+          spin: p.spin ? { ...p.spin } : null,
         });
       } else {
         copy.size = [...p.size];
@@ -383,6 +500,12 @@ export class Assembly {
           length: p.length, radius: p.radius, limit: p.limit,
           invert: p.invert, custom: { ...p.custom },
         });
+      } else if (p.kind === 'equip') {
+        // A unique plate the destination already carries is dropped rather
+        // than quietly becoming a second one.
+        copy = this.addEquip(destParent, m, p.equipType, {
+          size: p.size, bulletColor: p.bulletColor, spin: p.spin,
+        });
       } else {
         copy = this.addBlock(destParent, m, 0, { size: [...p.size] });
         copy.vox = p.vox.clone();
@@ -429,7 +552,7 @@ export class Assembly {
   usedColors() {
     const all = new Set();
     this.walk((p) => {
-      if (p.kind === 'bone') return;
+      if (!p.vox) return;
       for (const c of p.vox.usedColors()) all.add(c);
     });
     return all;
@@ -438,7 +561,7 @@ export class Assembly {
   /** Drop unreferenced custom colours and rewrite every voxel index. */
   prunePalette() {
     const remap = this.palette.prune(this.usedColors());
-    this.walk((p) => { if (p.kind !== 'bone') p.vox.remapColors(remap); });
+    this.walk((p) => { if (p.vox) p.vox.remapColors(remap); });
     return remap;
   }
 
@@ -453,6 +576,11 @@ export class Assembly {
           boneType: p.boneType, radius: p.radius, length: p.length,
           limit: p.limit, invert: p.invert, custom: p.custom,
         });
+      } else if (p.kind === 'equip') {
+        Object.assign(o, {
+          equipType: p.equipType, size: p.size, bulletColor: p.bulletColor,
+          spin: p.spin,
+        });
       } else {
         o.size = p.size;
         o.vox = p.vox.encode();
@@ -461,7 +589,7 @@ export class Assembly {
     });
     return {
       format: 'brostom.assembly',
-      version: 3,
+      version: 4,
       name: this.name,
       root: this.rootId,
       voxRes: this.voxRes,
@@ -489,6 +617,16 @@ export class Assembly {
           part.radius = (BONE_GAUGE[o.gauge] ?? BONE_GAUGE.thick).radius;
         }
         delete part.gauge;
+        part.custom = { ...CUSTOM_DEFAULT, ...(o.custom ?? {}) };
+      } else if (o.kind === 'equip') {
+        delete part.vox;
+        const type = EQUIP_META[o.equipType] ? o.equipType : EQUIP.BEAM;
+        part.equipType = type;
+        part.size = snapEquipSize(o.size ?? EQUIP_SIZE_DEFAULT);
+        part.bulletColor = EQUIP_META[type].colorable
+          ? (o.bulletColor ?? EQUIP_META[type].bullet)
+          : null;
+        part.spin = EQUIP_META[type].spins ? normaliseSpin(o.spin, EQUIP_META[type]) : null;
       } else {
         part.size = (o.size ?? [1, 1, 1]).map(snapSize);
         part.vox = VoxelBlock.decode(a.voxRes, o.vox);
@@ -560,11 +698,19 @@ export function computeStats(assembly, rig = null) {
   let volume = 0;
   let solidVolume = 0;
   let boneMass = 0;
+  let equipMass = 0;
   let thrust = 30;
   const bones = { leg: 0, arm: 0, face: 0, custom: 0 };
+  const equips = [];
 
   assembly.walk((p) => {
-    if (p.kind === 'bone') {
+    if (p.kind === 'equip') {
+      const meta = EQUIP_META[p.equipType];
+      if (!meta) return;
+      // A plate weighs what its table says, scaled by how big it was made.
+      equipMass += (meta.mass ?? 0.5) * (p.size / EQUIP_SIZE_DEFAULT) ** 2;
+      equips.push(p);
+    } else if (p.kind === 'bone') {
       // Thicker and longer bones weigh more, quadratically in radius.
       boneMass += p.length * 0.28 * Math.pow(p.radius / BONE_GAUGE.thick.radius, 1.6);
       bones[p.boneType] = (bones[p.boneType] ?? 0) + 1;
@@ -585,8 +731,11 @@ export function computeStats(assembly, rig = null) {
   const limbs = countLimbs(assembly);
   thrust += limbs * 8;
 
+  // ---- equipment: what the plates do to the machine that carries them
+  const loadout = summariseEquipment(equips);
+
   // A solid 1x1x1 block weighs 1.0; carving it out makes it genuinely lighter.
-  const mass = Math.max(0.8, solidVolume + boneMass);
+  const mass = Math.max(0.8, solidVolume + boneMass + equipMass);
 
   // Density: how much of the occupied volume is actually solid. Hollowed,
   // skeletal builds are nimble; packed bricks are ponderous.
@@ -619,6 +768,44 @@ export function computeStats(assembly, rig = null) {
     // 0 = feather, 1 = tank. Drives ZMF drag, spool and camera weight.
     weightClass: clamp01((mass - 2) / 26),
     agility: clamp01((thrustToMass - 18) / 42),
+    ...loadout,
+  };
+}
+
+/**
+ * Fold the equipped plates into the handful of numbers the rest of the game
+ * asks about. Weapons stay as a list, because each plate is its own gun with
+ * its own magazine; systems collapse into modifiers.
+ *
+ * GRAVITY is capped at one plate even if a malformed document carries two:
+ * the rule is "one only", and a loader should not be able to break it.
+ */
+export function summariseEquipment(equips) {
+  const weapons = [];
+  let boostPlates = 0;
+  let gravityPlates = 0;
+
+  for (const p of equips) {
+    const meta = EQUIP_META[p.equipType];
+    if (!meta) continue;
+    if (meta.category === 'weapon') { weapons.push(p); continue; }
+    if (p.equipType === EQUIP.BOOST) boostPlates++;
+    if (p.equipType === EQUIP.GRAVITY) gravityPlates++;
+  }
+
+  const gravity = gravityPlates > 0;
+  return {
+    equipCount: equips.length,
+    weapons,
+    weaponCount: weapons.length,
+    boostPlates,
+    gravityPlates: Math.min(1, gravityPlates),
+    /** Dash impulse multiplier. Each plate is a small step, and they stack. */
+    dashBonus: boostPlates * EQUIP_META[EQUIP.BOOST].dashBonus,
+    /** Sustained flight is off while a gravity plate is fitted. */
+    noFly: gravity,
+    /** Extra durability, as a fraction of base HP. */
+    hpBonus: gravity ? EQUIP_META[EQUIP.GRAVITY].hpBonus : 0,
   };
 }
 

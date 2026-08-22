@@ -5,7 +5,7 @@ import { History } from './editor/History.js';
 import { PartLibrary } from './editor/PartLibrary.js';
 import { FieldScene } from './game/FieldScene.js';
 import { EditorUI } from './ui/EditorUI.js';
-import { InputManager } from './zmf/InputManager.js';
+import { InputManager, DEFAULT_BINDINGS } from './zmf/InputManager.js';
 import { KineticFeedback } from './zmf/KineticFeedback.js';
 
 // ============================================================
@@ -26,6 +26,7 @@ const SAVE_KEY = 'brostom.assembly.v1';
 const TOOL_KEYS = {
   KeyV: TOOL.SELECT,
   KeyB: TOOL.BLOCK,
+  KeyG: TOOL.EQUIP,
   KeyL: TOOL.BONE_LEG,
   KeyA: TOOL.BONE_ARM,
   KeyF: TOOL.BONE_FACE,
@@ -36,6 +37,18 @@ const TOOL_KEYS = {
 };
 
 const EDIT_MODES = new Set(['edit', 'part']);
+const KEY_SAVE = 'brostom.keys.v1';
+
+/** Only the rows the player changed are stored, so new defaults still land. */
+function loadBindings() {
+  try {
+    const raw = localStorage.getItem(KEY_SAVE);
+    if (raw) return { ...DEFAULT_BINDINGS, ...JSON.parse(raw) };
+  } catch (e) {
+    console.warn('key bindings could not be read, using the defaults', e);
+  }
+  return null;
+}
 
 export class App {
   constructor({ canvas, hudCanvas, overlay } = {}) {
@@ -53,7 +66,7 @@ export class App {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.18;
 
-    this.input = new InputManager(this.canvas);
+    this.input = new InputManager(this.canvas, { bindings: loadBindings() });
     this.feedback = new KineticFeedback();
     this.library = new PartLibrary();
     this.clipboard = [];
@@ -105,6 +118,7 @@ export class App {
     ed.onChange = (stats) => this.ui?.renderStats(stats);
     ed.onSelect = (parts) => this.ui?.renderInspector(parts);
     ed.onBeforeChange = (label) => this.pushHistory(label);
+    ed.onReject = (msg) => this.ui?.toastMsg(msg);
     return ed;
   }
 
@@ -344,6 +358,45 @@ export class App {
     this.ui.syncTool(tool);
   }
 
+  // ---------------------------------------------------------- equipment
+
+  /** Arm a plate type and switch to the tool that sticks it on. */
+  setEquipType(type) {
+    this.editor.equipType = type;
+    this.ui.syncEquipType(type);
+    if (this.editor.tool !== TOOL.EQUIP) this.setTool(TOOL.EQUIP);
+    // Selecting a plate while one is selected swaps it, which is what the
+    // player means far more often than "arm it for the next click".
+    const sel = this.editor.selectedParts();
+    if (sel.length === 1 && sel[0].kind === 'equip') {
+      this.editor.setEquipTypeSelected(type);
+      this.ui.renderInspector(this.editor.selectedParts());
+    }
+  }
+
+  setNewEquipSize(v) {
+    this.editor.newEquipSize = v;
+    const sel = this.editor.selectedParts();
+    if (sel.length === 1 && sel[0].kind === 'equip') this.editor.setEquipSizeSelected(v);
+  }
+
+  setBulletColor(hex) {
+    if (this.editor.setBulletColorSelected(hex)) {
+      this.ui.renderInspector(this.editor.selectedParts());
+    }
+  }
+
+  /** Persist the key scheme. Called by the key-config screen on every edit. */
+  saveBindings() {
+    try {
+      localStorage.setItem(KEY_SAVE, JSON.stringify(this.input.bindingsToJSON()));
+      return true;
+    } catch (e) {
+      console.warn('key bindings could not be saved', e);
+      return false;
+    }
+  }
+
   setGizmoMode(mode) {
     this.editor.setGizmoMode(mode);
     this.ui.syncGizmoMode(this.editor.gizmoMode);
@@ -509,9 +562,14 @@ export class App {
       const editing = EDIT_MODES.has(this.mode);
 
       if (e.code === 'Escape') {
+        if (this.ui.keyConfig.open) { this.ui.keyConfig.close(); return; }
         if (this.mode === 'field') {
           if (this.field.paused) this.resumeField();
           else this.pauseField();
+        } else if (this.editor.tool !== TOOL.SELECT) {
+          // Escape backs out one step: first out of whatever tool you are
+          // holding, and only then out of the selection.
+          this.setTool(TOOL.SELECT);
         } else {
           this.editor.clearSelection();
         }
@@ -531,6 +589,7 @@ export class App {
           case 'KeyX': e.preventDefault(); this.copySelected({ cut: true }); break;
           case 'KeyV': e.preventDefault(); this.pasteClipboard(); break;
           case 'KeyA': e.preventDefault(); this.editor.selectAll(); break;
+          case 'KeyS': e.preventDefault(); this.save(); break;
           case 'KeyD': e.preventDefault(); this.editor.duplicateSelected(); break;
           default: break;
         }

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { BONE_META } from './constants.js';
+import { BONE_META, EQUIP_META, EQUIP_THICKNESS, equipShape } from './constants.js';
 
 // ============================================================
 //  Rig : turns an Assembly (data) into a live Three.js hierarchy.
@@ -57,6 +57,10 @@ export class Rig {
     this.nodes = new Map();
     /** every articulated node, in tree order */
     this.joints = [];
+    /** every equipment plate, in tree order */
+    this.equipNodes = [];
+    /** blocks a ROLLING plate keeps turning */
+    this.rollers = [];
     /** pickable meshes, tagged with userData.partId */
     this.pickables = [];
     /** geometry + materials this rig created itself and must dispose */
@@ -84,6 +88,7 @@ export class Rig {
     const part = this.assembly.get(partId);
     if (!part) return;
     if (part.kind === 'bone') this._buildBone(part, parentGroup, parentPart);
+    else if (part.kind === 'equip') this._buildEquip(part, parentGroup, parentPart);
     else this._buildBlock(part, parentGroup, parentPart);
   }
 
@@ -104,7 +109,7 @@ export class Rig {
   /** Which group does a child belong in: the parent's own, or a bone half? */
   _hostGroupFor(part, parentPart) {
     const pnode = this.nodes.get(parentPart.id);
-    if (parentPart.kind !== 'bone') return pnode.group;
+    if (parentPart.kind !== 'bone') return pnode.spin ?? pnode.group;
     return ridesFarHalf(part, parentPart) ? pnode.far : pnode.near;
   }
 
@@ -112,6 +117,18 @@ export class Rig {
     const group = new THREE.Group();
     group.name = `block:${part.id}`;
     this._placeOnParent(group, part, parentPart);
+
+    // A ROLLING plate turns the block it is stuck to, so the block's contents
+    // — mesh and everything mounted on it — live one level down, inside a
+    // group that is free to spin. The root never spins: turning the core
+    // would take the whole machine with it.
+    let spin = null;
+    if (part.id !== this.assembly.rootId && this._rollerOn(part)) {
+      spin = new THREE.Group();
+      spin.name = 'spin';
+      group.add(spin);
+    }
+    const inner = spin ?? group;
 
     // Cached, unit-cube geometry; size lives on the transform.
     const geo = part.vox.geometry(this.assembly.palette);
@@ -123,15 +140,226 @@ export class Rig {
     mesh.receiveShadow = true;
     mesh.userData.partId = part.id;
     mesh.userData.kind = part.kind;
-    group.add(mesh);
+    inner.add(mesh);
 
     const host = parentPart ? this._hostGroupFor(part, parentPart) : parentGroup;
     host.add(group);
 
-    this.nodes.set(part.id, { part, group, mesh, host });
+    this.nodes.set(part.id, { part, group, spin, mesh, host });
     this.pickables.push(mesh);
 
     for (const c of part.children) this._build(c, group, part);
+  }
+
+  /** The ROLLING plate mounted directly on this part, if any. */
+  _rollerOn(part) {
+    for (const id of part.children) {
+      const child = this.assembly.get(id);
+      if (child?.kind === 'equip' && child.equipType === 'rolling' && child.spin) return child;
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------- equipment
+
+  /**
+   * A plate: one thin slab lying on the surface, plus an emissive inset so
+   * the player can tell at a glance what is fitted and — for the weapons
+   * that allow it — what colour it will fire.
+   *
+   * The plate's local +Y is its facing. Placed on a face the mount already
+   * points +Y down the face normal, so the slab lies flat and the inset
+   * looks outward with no extra work.
+   */
+  _buildEquip(part, parentGroup, parentPart) {
+    const group = new THREE.Group();
+    group.name = `equip:${part.id}`;
+    this._placeOnParent(group, part, parentPart);
+
+    const meta = EQUIP_META[part.equipType] ?? EQUIP_META.beam;
+    const round = equipShape(part.equipType) === 'round';
+    const d = part.size;
+    const t = EQUIP_THICKNESS;
+
+    const plateGeo = round
+      ? new THREE.CylinderGeometry(d / 2, d / 2, t, 24)
+      : new THREE.BoxGeometry(d, t, d);
+    this._owned.push(plateGeo);
+    const plateMat = new THREE.MeshStandardMaterial({
+      color: meta.plate, metalness: 0.72, roughness: 0.36, flatShading: !round,
+    });
+    this._ownedMaterials.push(plateMat);
+    const plate = new THREE.Mesh(plateGeo, plateMat);
+    plate.position.y = t / 2;
+    plate.castShadow = true;
+    plate.userData.partId = part.id;
+    plate.userData.kind = 'equip';
+    group.add(plate);
+    this.pickables.push(plate);
+
+    // The inset carries the bullet colour where the player may choose it.
+    const accentColor = part.bulletColor ?? meta.accent;
+    const k = round ? 0.62 : 0.52;
+    const accentGeo = round
+      ? new THREE.CylinderGeometry((d / 2) * k, (d / 2) * k, t * 0.9, 20)
+      : new THREE.BoxGeometry(d * k, t * 0.9, d * k);
+    this._owned.push(accentGeo);
+    const accentMat = new THREE.MeshStandardMaterial({
+      color: accentColor, emissive: accentColor, emissiveIntensity: 0.85,
+      metalness: 0.2, roughness: 0.4,
+    });
+    this._ownedMaterials.push(accentMat);
+    const accent = new THREE.Mesh(accentGeo, accentMat);
+    accent.position.y = t * 0.75;
+    accent.userData.partId = part.id;
+    accent.userData.kind = 'equip';
+    group.add(accent);
+    this.pickables.push(accent);
+
+    const host = parentPart ? this._hostGroupFor(part, parentPart) : parentGroup;
+    host.add(group);
+
+    const node = { part, group, mesh: plate, plate, accent, host, meta };
+    if (part.equipType === 'blade') node.bladeGlow = this._bladeGlow(part, parentPart, host);
+    if (part.equipType === 'boost') node.boostFlare = this._boostFlare(part, group);
+    this.nodes.set(part.id, node);
+    this.equipNodes.push(node);
+
+    // The plate's own facing IS the axis it turns the block about: where you
+    // stuck it decides which way the thing spins, with no extra setting.
+    const pnode = parentPart ? this.nodes.get(parentPart.id) : null;
+    if (part.equipType === 'rolling' && part.spin && pnode?.spin) {
+      node.roller = {
+        part,
+        spin: pnode.spin,
+        axis: new THREE.Vector3(0, 1, 0)
+          .applyQuaternion(new THREE.Quaternion().fromArray(part.mount.rot)).normalize(),
+        angle: 0,
+      };
+      this.rollers.push(node.roller);
+    }
+
+    for (const c of part.children) this._build(c, group, part);
+  }
+
+  /**
+   * The shell that lights up while a blade is held. It wraps the part the
+   * plate is stuck to — "the block it is attached to glows" — so a blade on
+   * a shin lights the shin, not the whole machine.
+   */
+  _bladeGlow(part, parentPart, host) {
+    const pnode = parentPart ? this.nodes.get(parentPart.id) : null;
+    const color = EQUIP_META.blade.accent;
+    const mat = new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0, blending: THREE.AdditiveBlending,
+      depthWrite: false, side: THREE.BackSide,
+    });
+    this._ownedMaterials.push(mat);
+
+    let mesh;
+    if (pnode && parentPart.kind !== 'bone' && pnode.mesh?.geometry) {
+      // Same silhouette as the block, a touch proud of it.
+      mesh = new THREE.Mesh(pnode.mesh.geometry, mat);
+      mesh.scale.copy(pnode.mesh.scale).multiplyScalar(1.07);
+      mesh.position.copy(pnode.mesh.position).multiplyScalar(1.07);
+      pnode.group.add(mesh);
+    } else {
+      const geo = new THREE.IcosahedronGeometry(Math.max(0.4, part.size * 0.9), 1);
+      this._owned.push(geo);
+      mesh = new THREE.Mesh(geo, mat);
+      host.add(mesh);
+    }
+    mesh.frustumCulled = false;
+    mesh.visible = false;
+    return mesh;
+  }
+
+  /**
+   * Advance every rolling block. Called every frame in both the editor and
+   * the field: a plate whose whole job is "it is always turning" has to be
+   * turning while you look at it.
+   */
+  updateRollers(dt) {
+    for (const r of this.rollers) {
+      const { dir, rpm } = r.part.spin;
+      r.angle = (r.angle + dir * rpm * (Math.PI / 30) * dt) % (Math.PI * 2);
+      r.spin.quaternion.setFromAxisAngle(r.axis, r.angle);
+    }
+    return this;
+  }
+
+  /**
+   * The flame a BOOST plate throws while the thruster is lit. It fires along
+   * the plate's own facing (+Y), so a plate stuck on the back pushes you
+   * forward and one on the belly pushes you up — where you put it is what it
+   * does, exactly like the rolling plate's axis.
+   */
+  _boostFlare(part, group) {
+    const d = part.size;
+    const meta = EQUIP_META.boost;
+
+    const flare = new THREE.Group();
+    flare.position.y = EQUIP_THICKNESS;
+    flare.visible = false;
+    group.add(flare);
+
+    const coneGeo = new THREE.ConeGeometry(d * 0.34, d * 1.9, 12, 1, true);
+    coneGeo.translate(0, d * 0.95, 0);       // base at the plate, tip outward
+    this._owned.push(coneGeo);
+    const coneMat = new THREE.MeshBasicMaterial({
+      color: meta.accent, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    });
+    this._ownedMaterials.push(coneMat);
+    const cone = new THREE.Mesh(coneGeo, coneMat);
+    cone.frustumCulled = false;
+    flare.add(cone);
+
+    // A bright disc right on the plate face, so the source reads even when
+    // the flame is edge-on to the camera.
+    const discGeo = new THREE.CircleGeometry(d * 0.44, 16);
+    discGeo.rotateX(-Math.PI / 2);
+    this._owned.push(discGeo);
+    const discMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    });
+    this._ownedMaterials.push(discMat);
+    const disc = new THREE.Mesh(discGeo, discMat);
+    disc.position.y = 0.01;
+    disc.frustumCulled = false;
+    flare.add(disc);
+
+    return { group: flare, cone, disc, size: d };
+  }
+
+  /** 0..1 — how hard the boost thrusters are burning right now. */
+  setBoostGlow(amount, flicker = 0) {
+    for (const node of this.equipNodes) {
+      const f = node.boostFlare;
+      if (!f) continue;
+      const on = amount > 0.01;
+      f.group.visible = on;
+      if (!on) continue;
+      const wobble = 1 + flicker * 0.18;
+      f.cone.material.opacity = amount * 0.55;
+      f.cone.scale.set(1, amount * wobble, 1);
+      f.disc.material.opacity = amount * 0.8;
+      f.disc.scale.setScalar(0.6 + amount * 0.7);
+      node.accent.material.emissiveIntensity = 0.85 + amount * 3.2;
+    }
+    return this;
+  }
+
+  /** 0..1 — how hard every blade on this machine is lit right now. */
+  setBladeGlow(amount) {
+    for (const node of this.equipNodes) {
+      if (!node.bladeGlow) continue;
+      node.bladeGlow.visible = amount > 0.01;
+      node.bladeGlow.material.opacity = amount * 0.55;
+      node.accent.material.emissiveIntensity = 0.85 + amount * 2.4;
+    }
+    return this;
   }
 
   _buildBone(part, parentGroup, parentPart) {
@@ -285,7 +513,7 @@ export class Rig {
   /** Re-mesh one block in place, after a sculpt stroke. */
   refreshBlock(partId) {
     const node = this.nodes.get(partId);
-    if (!node || node.part.kind === 'bone') return false;
+    if (!node || !node.part.vox) return false;
     node.mesh.geometry = node.part.vox.geometry(this.assembly.palette);
     return true;
   }
@@ -293,7 +521,7 @@ export class Rig {
   /** Apply a size change without rebuilding the whole hierarchy. */
   refreshSize(partId) {
     const node = this.nodes.get(partId);
-    if (!node || node.part.kind === 'bone') return false;
+    if (!node || node.part.kind === 'bone' || node.part.kind === 'equip') return false;
     const [sx, sy, sz] = node.part.size;
     node.mesh.scale.set(sx, sy, sz);
     node.mesh.position.set(-sx / 2, -sy / 2, -sz / 2);
@@ -308,12 +536,51 @@ export class Rig {
   refreshMount(partId) {
     const node = this.nodes.get(partId);
     if (!node) return false;
+    // A rolling plate's axis is baked from its mount, so moving one is a rebuild.
+    if (node.roller) return false;
     const parent = node.part.parent ? this.assembly.get(node.part.parent) : null;
     if (parent?.kind === 'bone') {
       const wanted = ridesFarHalf(node.part, parent) ? this.nodes.get(parent.id).far : this.nodes.get(parent.id).near;
       if (wanted !== node.host) return false;
     }
     this._placeOnParent(node.group, node.part, parent);
+    return true;
+  }
+
+  /**
+   * Re-cut one plate after a size, type or colour change, without touching
+   * the rest of the hierarchy.
+   * @returns {boolean} false when the caller must do a full rebuild
+   */
+  refreshEquip(partId) {
+    const node = this.nodes.get(partId);
+    if (!node || node.part.kind !== 'equip') return false;
+    const part = node.part;
+    const meta = EQUIP_META[part.equipType];
+    if (!meta) return false;
+    // The blade shell and the roller are both bound to the host at build
+    // time, so gaining or losing either one is a rebuild, not a re-cut.
+    if ((part.equipType === 'blade') !== !!node.bladeGlow) return false;
+    if ((part.equipType === 'rolling') !== !!node.roller) return false;
+
+    const round = equipShape(part.equipType) === 'round';
+    const d = part.size;
+    const t = EQUIP_THICKNESS;
+    const k = round ? 0.62 : 0.52;
+
+    node.plate.geometry = round
+      ? new THREE.CylinderGeometry(d / 2, d / 2, t, 24)
+      : new THREE.BoxGeometry(d, t, d);
+    node.accent.geometry = round
+      ? new THREE.CylinderGeometry((d / 2) * k, (d / 2) * k, t * 0.9, 20)
+      : new THREE.BoxGeometry(d * k, t * 0.9, d * k);
+    this._owned.push(node.plate.geometry, node.accent.geometry);
+
+    const accentColor = part.bulletColor ?? meta.accent;
+    node.plate.material.color.setHex(meta.plate);
+    node.accent.material.color.setHex(accentColor);
+    node.accent.material.emissive.setHex(accentColor);
+    node.meta = meta;
     return true;
   }
 

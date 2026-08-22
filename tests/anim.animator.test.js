@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
-import { Animator } from '../src/anim/Animator.js';
+import { Animator, waveAt } from '../src/anim/Animator.js';
 import { Rig } from '../src/core/Rig.js';
 import { Assembly, PRESETS, computeStats } from '../src/core/Assembly.js';
 import { BONE } from '../src/core/constants.js';
@@ -331,5 +331,145 @@ describe('joint limits', () => {
       expect(Number.isFinite(j.joint.quaternion.x)).toBe(true);
       expect(j.joint.quaternion.length()).toBeCloseTo(1, 4);
     }
+  });
+});
+
+// ============================================================
+//  Custom bones
+// ============================================================
+
+describe('custom bone waveforms', () => {
+  it('every wave stays inside -1..1 and completes in one cycle', () => {
+    for (const wave of ['sine', 'tri', 'square', 'saw']) {
+      for (let i = 0; i <= 40; i++) {
+        const v = waveAt(wave, i / 40);
+        expect(v, `${wave} @${i}`).toBeGreaterThanOrEqual(-1.0001);
+        expect(v, `${wave} @${i}`).toBeLessThanOrEqual(1.0001);
+      }
+      expect(waveAt(wave, 0), `${wave} wraps`).toBeCloseTo(waveAt(wave, 3), 6);
+    }
+  });
+
+  it('each wave has the shape its name promises', () => {
+    expect(waveAt('sine', 0.25)).toBeCloseTo(1, 6);
+    expect(waveAt('sine', 0.75)).toBeCloseTo(-1, 6);
+
+    expect(waveAt('tri', 0.5), 'peaks halfway').toBeCloseTo(1, 6);
+    expect(waveAt('tri', 0), 'and bottoms at the ends').toBeCloseTo(-1, 6);
+    expect(waveAt('tri', 0.25), 'linear in between').toBeCloseTo(0, 6);
+
+    expect(waveAt('square', 0.2)).toBe(1);
+    expect(waveAt('square', 0.7)).toBe(-1);
+
+    expect(waveAt('saw', 0)).toBeCloseTo(-1, 6);
+    expect(waveAt('saw', 0.999)).toBeCloseTo(1, 2);
+  });
+
+  it('an unknown wave falls back to a sine rather than breaking', () => {
+    expect(waveAt('spiral', 0.25)).toBeCloseTo(1, 6);
+  });
+});
+
+describe('custom bone motion', () => {
+  const rotorRig = (custom) => {
+    const a = Assembly.createDefault();
+    const bone = a.addBoneOnFace(a.rootId, 2, BONE.CUSTOM, { length: 1.5 });
+    Object.assign(bone.custom, custom);
+    const rig = new Rig(a);
+    return { a, bone, rig, animator: new Animator(rig, computeStats(a, rig)) };
+  };
+
+  const angleOf = (rig, id) => 2 * Math.acos(
+    Math.min(1, Math.abs(rig.nodes.get(id).joint.quaternion.w)),
+  );
+
+  it('a swing stays inside the joint limit', () => {
+    const { bone, rig, animator } = rotorRig({ wave: 'sine', amp: 90, freq: 2 });
+    bone.limit = 30;
+    let peak = 0;
+    for (let i = 0; i < 240; i++) {
+      animator.updateCustomsOnly(1 / 60);
+      peak = Math.max(peak, angleOf(rig, bone.id));
+    }
+    expect(peak * (180 / Math.PI)).toBeLessThan(31);
+    rig.dispose();
+  });
+
+  it('a rotation ignores the limit, because a propeller has to go round', () => {
+    const { bone, rig, animator } = rotorRig({ wave: 'saw', freq: 2 });
+    bone.limit = 30;
+    let peak = 0;
+    for (let i = 0; i < 240; i++) {
+      animator.updateCustomsOnly(1 / 60);
+      peak = Math.max(peak, angleOf(rig, bone.id));
+    }
+    expect(peak * (180 / Math.PI)).toBeGreaterThan(120);
+    rig.dispose();
+  });
+
+  it('a rotation keeps turning the same way rather than snapping back', () => {
+    const { bone, rig, animator } = rotorRig({ wave: 'saw', freq: 1 });
+    const node = rig.nodes.get(bone.id);
+    for (let i = 0; i < 30; i++) animator.updateCustomsOnly(1 / 60);
+    const half = node.spinPhase;
+    for (let i = 0; i < 30; i++) animator.updateCustomsOnly(1 / 60);
+    expect(node.spinPhase).toBeGreaterThan(half);
+    expect(node.spinPhase).toBeCloseTo(1, 1);
+    rig.dispose();
+  });
+
+  it('the drive source scales a rotation SPEED, not its angle', () => {
+    const idle = rotorRig({ wave: 'saw', freq: 2, source: 'speed' });
+    for (let i = 0; i < 60; i++) idle.animator.updateCustomsOnly(1 / 60);
+    expect(idle.rig.nodes.get(idle.bone.id).spinPhase, 'standing still: no turn')
+      .toBeCloseTo(0, 6);
+    idle.rig.dispose();
+
+    const moving = rotorRig({ wave: 'saw', freq: 2, source: 'speed' });
+    for (let i = 0; i < 60; i++) {
+      moving.animator.time += 1 / 60;
+      moving.animator._customs({ planarSpeed: 18, thrust: 0, jerk: 0 }, 1 / 60);
+    }
+    expect(moving.rig.nodes.get(moving.bone.id).spinPhase).toBeGreaterThan(1.5);
+    moving.rig.dispose();
+  });
+
+  it('the centre angle biases the swing', () => {
+    const { bone, rig, animator } = rotorRig({ wave: 'sine', amp: 0, offset: 40 });
+    bone.limit = 90;
+    for (let i = 0; i < 240; i++) animator.updateCustomsOnly(1 / 60);
+    expect(angleOf(rig, bone.id) * (180 / Math.PI)).toBeCloseTo(40, 0);
+    rig.dispose();
+  });
+
+  it('the phase offsets one bone against another', () => {
+    const a = Assembly.createDefault();
+    const one = a.addBoneOnFace(a.rootId, 2, BONE.CUSTOM, { length: 1.5 });
+    const two = a.addBone(a.rootId, { pos: [1, 0.5, 0] }, BONE.CUSTOM, { length: 1.5 });
+    Object.assign(one.custom, { wave: 'sine', amp: 60, freq: 1, phase: 0 });
+    Object.assign(two.custom, { wave: 'sine', amp: 60, freq: 1, phase: 0.5 });
+    const rig = new Rig(a);
+    const animator = new Animator(rig, computeStats(a, rig));
+
+    for (let i = 0; i < 60; i++) animator.updateCustomsOnly(1 / 60);
+    const qa = rig.nodes.get(one.id).joint.quaternion;
+    const qb = rig.nodes.get(two.id).joint.quaternion;
+    expect(qa.angleTo(qb), 'half a cycle apart').toBeGreaterThan(0.3);
+    rig.dispose();
+  });
+
+  it('updateCustomsOnly leaves every other joint alone', () => {
+    const a = PRESETS.biped.build();
+    const custom = a.addBoneOnFace(a.core.id, 2, BONE.CUSTOM, { length: 1.2 });
+    custom.custom.amp = 60;
+    const rig = new Rig(a);
+    const animator = new Animator(rig, computeStats(a, rig));
+    const leg = rig.joints.find((n) => n.part.boneType === 'leg');
+
+    for (let i = 0; i < 60; i++) animator.updateCustomsOnly(1 / 60);
+    expect(leg.joint.quaternion.w, 'the legs never moved').toBeCloseTo(1, 6);
+    expect(rig.nodes.get(custom.id).joint.quaternion.w, 'but the custom bone did')
+      .toBeLessThan(0.999);
+    rig.dispose();
   });
 });

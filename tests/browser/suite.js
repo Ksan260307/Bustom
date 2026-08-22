@@ -4,7 +4,7 @@ import { App } from '../../src/main.js';
 import { TOOL } from '../../src/editor/EditorScene.js';
 import { PRESETS, computeStats } from '../../src/core/Assembly.js';
 import { STANDARD_COLORS, hexToCss } from '../../src/core/Palette.js';
-import { VOX_LEVELS } from '../../src/core/constants.js';
+import { VOX_LEVELS, EQUIP, EQUIP_META } from '../../src/core/constants.js';
 import { ColorWheel } from '../../src/ui/ColorWheel.js';
 import { Hud } from '../../src/game/Hud.js';
 
@@ -30,6 +30,7 @@ function boot() {
 
   localStorage.removeItem('brostom.assembly.v1');
   localStorage.removeItem('brostom.parts.v1');
+  localStorage.removeItem('brostom.keys.v1');
   const a = new App({ canvas: gl, hudCanvas: hud, overlay });
   // Drive frames by hand at a fixed step: rAF is throttled in hidden tabs.
   a.renderer.setAnimationLoop(null);
@@ -73,6 +74,20 @@ function worldOf(id) {
   return app.editor.rig.nodes.get(id).group.getWorldPosition(new THREE.Vector3());
 }
 
+/**
+ * Put a lock on a live enemy without depending on where the camera happens
+ * to be pointing. Acquisition itself is covered in the field-mode suite;
+ * everything else just needs a lock to exist.
+ */
+function forceLock() {
+  const target = app.field.enemies.find((e) => e.alive);
+  if (!target) return null;
+  app.field.lock = { robot: target, aimPoint: target.position.clone() };
+  app.field._applyLock();
+  step(2);
+  return app.field.lock;
+}
+
 function sculptAt(x, y, z) {
   app.editor.hoverVoxel = { x, y, z };
   app.editor._applySculpt();
@@ -106,7 +121,23 @@ describe('boot', () => {
       'fieldbar', 'pause', 'toast']) {
       expect(document.getElementById(id), id).toBeTruthy();
     }
-    expect(document.querySelectorAll('.toolbtn').length).toBe(10);
+    expect(document.querySelectorAll('.toolbtn').length).toBe(11);
+  });
+
+  it('dresses the native widgets dark, so the dropdowns are readable', () => {
+    // A <select> paints its popup list from the page's colour scheme; without
+    // this the preset list comes out white on a black page.
+    expect(getComputedStyle(document.documentElement).colorScheme).toBe('dark');
+
+    const sel = document.querySelector('#topbar select');
+    expect(sel, 'the preset list is a real select').toBeTruthy();
+    const bg = getComputedStyle(sel).backgroundColor;
+    expect(bg, 'and it is opaque, not see-through white').not.toContain('rgba');
+    const rgb = bg.match(/\d+/g).map(Number);
+    expect(Math.max(...rgb), 'a dark background').toBeLessThan(60);
+
+    const optRgb = getComputedStyle(sel.querySelector('option')).backgroundColor.match(/\d+/g).map(Number);
+    expect(Math.max(...optRgb), 'the options too').toBeLessThan(60);
   });
 
   it('shows the standard palette', () => {
@@ -253,6 +284,383 @@ describe('placing parts', () => {
     pointAt(core.clone().add(new THREE.Vector3(0.49, 0, 0)));
     expect(app.editor.ghost.visible).toBe(true);
     expect(app.editor.pendingPlacement).toBeTruthy();
+  });
+});
+
+describe('escape', () => {
+  const esc = () => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+
+  it('backs out of the tool first, then out of the selection', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setTool(TOOL.BLOCK);
+    app.editor.select(app.assembly.rootId);
+
+    esc();
+    expect(app.editor.tool, 'first press: back to select').toBe(TOOL.SELECT);
+    expect(app.editor.selection.size, 'the selection survives it').toBe(1);
+
+    esc();
+    expect(app.editor.selection.size, 'second press: clear').toBe(0);
+    expect(app.editor.tool).toBe(TOOL.SELECT);
+  });
+
+  it('works from every tool, including sculpting', () => {
+    app.setMode('edit');
+    for (const tool of [TOOL.EQUIP, TOOL.BONE_LEG, TOOL.CARVE, TOOL.STAMP]) {
+      app.setTool(tool);
+      esc();
+      expect(app.editor.tool, tool).toBe(TOOL.SELECT);
+    }
+  });
+
+  it('closes the key config before anything else', () => {
+    app.setMode('edit');
+    app.setTool(TOOL.BLOCK);
+    app.ui.keyConfig.show();
+    esc();
+    expect(app.ui.keyConfig.open).toBe(false);
+    expect(app.editor.tool, 'the tool is untouched by that press').toBe(TOOL.BLOCK);
+    esc();
+    expect(app.editor.tool).toBe(TOOL.SELECT);
+  });
+});
+
+describe('the rolling plate', () => {
+  const stickRoller = () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    const a = app.assembly;
+    const dish = a.addBlockOnFace(a.rootId, 2, 5, { size: [1.5, 0.25, 0.5] });
+    app.editor.rebuild();
+
+    app.setEquipType(EQUIP.ROLLING);
+    const at = worldOf(dish.id);
+    aimCamera(at, new THREE.Vector3(0, 6, 0.01));
+    pointAt(at.clone().add(new THREE.Vector3(0, 0.13, 0)), { click: true });
+    return { dish, plate: app.assembly.get(app.editor.selected) };
+  };
+
+  it('sticks on like any other plate, and is square', () => {
+    const { dish, plate } = stickRoller();
+    expect(plate.kind).toBe('equip');
+    expect(plate.equipType).toBe(EQUIP.ROLLING);
+    expect(plate.parent).toBe(dish.id);
+    expect(plate.spin).toEqual({ dir: 1, rpm: EQUIP_META.rolling.rpm });
+  });
+
+  it('turns the block it is stuck to, and keeps turning', () => {
+    const { dish } = stickRoller();
+    const node = app.editor.rig.nodes.get(dish.id);
+    expect(node.spin, 'the block got a group to turn in').toBeTruthy();
+    expect(app.editor.rig.rollers).toHaveLength(1);
+
+    const before = node.spin.quaternion.clone();
+    step(20);
+    expect(before.angleTo(node.spin.quaternion)).toBeGreaterThan(0.2);
+  });
+
+  it('runs in the editor without the walk preview turned on', () => {
+    stickRoller();
+    expect(app.editor.previewMotion).toBe(false);
+    const a0 = app.editor.rig.rollers[0].angle;
+    step(20);
+    expect(app.editor.rig.rollers[0].angle).not.toBe(a0);
+  });
+
+  it('the panel sets the direction and the speed', () => {
+    const { plate } = stickRoller();
+    app.ui.renderInspector(app.editor.selectedParts());
+    expect(app.ui.inspectorEl.textContent).toContain('逆転');
+
+    app.editor.setEquipSpinSelected({ dir: -1, rpm: 180 });
+    expect(app.assembly.get(plate.id).spin).toEqual({ dir: -1, rpm: 180 });
+
+    const before = app.editor.rig.rollers[0].angle;
+    step(10);
+    expect(app.editor.rig.rollers[0].angle, 'and it now turns the other way')
+      .toBeLessThan(before);
+  });
+
+  it('warns when it is stuck somewhere it cannot work', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    const plate = app.assembly.addEquipOnFace(app.assembly.rootId, 2, EQUIP.ROLLING);
+    app.editor.rebuild();
+    app.editor.select(plate.id);
+    app.ui.renderInspector(app.editor.selectedParts());
+    expect(app.ui.inspectorEl.textContent).toContain('コアは回せません');
+    expect(app.editor.rig.rollers).toHaveLength(0);
+  });
+
+  it('a mirrored roller turns the other way, like a mirrored propeller', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    const a = app.assembly;
+    // Symmetry mirrors a part inside its own parent, so the plate has to sit
+    // off-centre ON that parent for there to be anything to mirror.
+    const hub = a.addBlockOnFace(a.rootId, 2, 3, { size: [1, 1, 1] });
+    app.editor.rebuild();
+
+    app.setEquipType(EQUIP.ROLLING);
+    app.editor.symmetry = true;
+    const at = worldOf(hub.id);
+    aimCamera(at, new THREE.Vector3(6, 0, 0.01));
+    pointAt(at.clone().add(new THREE.Vector3(0.49, 0, 0)), { click: true });
+    app.editor.symmetry = false;
+
+    const plates = app.assembly.equips();
+    expect(plates).toHaveLength(2);
+    expect(plates.map((p) => p.mount.pos[0]).sort()).toEqual([-0.5, 0.5]);
+    expect(plates.map((p) => p.spin.dir).sort()).toEqual([-1, 1]);
+  });
+
+  it('survives a save and load', () => {
+    const { plate } = stickRoller();
+    app.editor.setEquipSpinSelected({ dir: -1, rpm: 240 });
+    app.save();
+    app.loadPreset('core');
+    app.load();
+    expect(app.assembly.equips()[0].spin).toEqual({ dir: -1, rpm: 240 });
+    expect(app.editor.rig.rollers).toHaveLength(1);
+  });
+});
+
+describe('working with bones', () => {
+  const pickArm = () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setTool(TOOL.SELECT);
+    const arm = [...app.assembly.parts.values()].find((p) => p.boneType === 'arm');
+    app.editor.select(arm.id);
+    return arm;
+  };
+
+  it('a selected bone shows where its joint is and how far it swings', () => {
+    const arm = pickArm();
+    const g = app.editor.jointGizmo;
+    expect(g.visible).toBe(true);
+    expect(g.parent, 'rides the bone, so it tracks the machine')
+      .toBe(app.editor.rig.nodes.get(arm.id).group);
+
+    // the far-half marker runs from the joint to the tip
+    const far = app.editor.jointFar.geometry.attributes.position;
+    expect(far.getY(0)).toBeCloseTo(arm.length / 2, 4);
+    expect(far.getY(1)).toBeCloseTo(arm.length, 4);
+  });
+
+  it('the arc really is the swing limit', () => {
+    const arm = pickArm();
+    const span = () => {
+      const p = app.editor.jointArc.geometry.attributes.position;
+      const n = p.count - 1;
+      return Math.hypot(p.getX(0) - p.getX(n), p.getY(0) - p.getY(n), p.getZ(0) - p.getZ(n));
+    };
+    const wide = span();
+    arm.limit = 20;
+    app.editor.select(arm.id);
+    expect(span(), 'a tighter limit draws a tighter arc').toBeLessThan(wide);
+  });
+
+  it('it goes away when the selection is not a single bone', () => {
+    pickArm();
+    app.editor.clearSelection();
+    expect(app.editor.jointGizmo.visible).toBe(false);
+
+    app.editor.select(app.assembly.rootId);
+    expect(app.editor.jointGizmo.visible, 'a block has no joint').toBe(false);
+  });
+
+  it('chains another bone off the tip in one click', () => {
+    const arm = pickArm();
+    const before = app.assembly.size;
+    expect(app.editor.addBoneOnTipSelected()).toBe(true);
+
+    const made = app.assembly.get(app.editor.selected);
+    expect(app.assembly.size).toBe(before + 1);
+    expect(made.kind).toBe('bone');
+    expect(made.boneType, 'same attribute as the bone it grew from').toBe('arm');
+    expect(made.parent).toBe(arm.id);
+    expect(made.mount.pos[1], 'at the tip').toBeCloseTo(arm.length, 4);
+    expect(app.editor.rig.nodes.get(made.id)).toBeTruthy();
+  });
+
+  it('chaining is one undo step', () => {
+    pickArm();
+    const before = app.assembly.size;
+    app.editor.addBoneOnTipSelected();
+    app.undo();
+    expect(app.assembly.size).toBe(before);
+  });
+
+  it('slides a child across the joint without hunting for the midpoint', () => {
+    const arm = pickArm();
+    const hand = [...app.assembly.parts.values()]
+      .find((p) => p.parent === arm.id && p.kind === 'block');
+    app.editor.select(hand.id);
+
+    app.editor.slideAlongBone(0);
+    expect(app.editor.boneHalfOf(hand.id)).toBe('near');
+    app.editor.slideAlongBone(1);
+    expect(app.editor.boneHalfOf(hand.id)).toBe('far');
+    expect(app.assembly.get(hand.id).mount.pos[1]).toBeCloseTo(arm.length, 4);
+  });
+
+  it('sliding does nothing to a part that is not on a bone', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const block = [...app.assembly.parts.values()]
+      .find((p) => p.kind === 'block' && app.assembly.get(p.parent)?.kind !== 'bone');
+    app.editor.select(block.id);
+    expect(app.editor.slideAlongBone(1)).toBe(false);
+  });
+});
+
+describe('the custom bone', () => {
+  const rotor = (custom = {}) => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    const a = app.assembly;
+    const bone = a.addBoneOnFace(a.rootId, 2, 'custom', { length: 1.5 });
+    Object.assign(bone.custom, custom);
+    a.addBlockOnBone(bone.id, 1.2, 7, { size: [1.5, 0.25, 0.25] });
+    app.editor.rebuild();
+    return bone;
+  };
+
+  it('holds still until you select it, then shows you the motion', () => {
+    const bone = rotor({ amp: 60, freq: 2 });
+    const node = app.editor.rig.nodes.get(bone.id);
+    step(30);
+    const resting = node.joint.quaternion.clone();
+    step(60);
+    expect(resting.angleTo(node.joint.quaternion), 'idle machines stand still')
+      .toBeLessThan(0.01);
+
+    app.editor.select(bone.id);
+    const before = node.joint.quaternion.clone();
+    step(30);
+    expect(before.angleTo(node.joint.quaternion)).toBeGreaterThan(0.05);
+  });
+
+  it('previewing it leaves the rest of the machine at rest', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const a = app.assembly;
+    const bone = a.addBoneOnFace(a.core.id, 2, 'custom', { length: 1.2 });
+    bone.custom.amp = 60;
+    app.editor.rebuild();
+    app.editor.select(bone.id);
+    step(60);
+
+    const leg = app.editor.rig.joints.find((n) => n.part.boneType === 'leg');
+    expect(leg.joint.quaternion.w, 'the legs stayed put').toBeCloseTo(1, 3);
+  });
+
+  it('a rotation goes right round, past the joint limit', () => {
+    const bone = rotor({ wave: 'saw', freq: 2 });
+    bone.limit = 30;
+    app.editor.select(bone.id);
+    const node = app.editor.rig.nodes.get(bone.id);
+    let peak = 0;
+    for (let i = 0; i < 120; i++) {
+      step(1);
+      peak = Math.max(peak, 2 * Math.acos(Math.min(1, Math.abs(node.joint.quaternion.w))));
+    }
+    expect(peak * (180 / Math.PI)).toBeGreaterThan(120);
+  });
+
+  it('the panel offers every knob, and hides the ones that do not apply', () => {
+    const bone = rotor();
+    app.editor.select(bone.id);
+    app.ui.renderInspector(app.editor.selectedParts());
+    let text = app.ui.inspectorEl.textContent;
+    for (const k of ['動き方', '振幅', '中心角', '位相ずらし', '駆動ソース']) {
+      expect(text, k).toContain(k);
+    }
+
+    bone.custom.wave = 'saw';
+    app.ui.renderInspector(app.editor.selectedParts());
+    text = app.ui.inspectorEl.textContent;
+    expect(text).toContain('回転速度');
+    expect(text, 'a rotation has no amplitude to set').not.toContain('振幅');
+  });
+
+  it('the joint read-out follows the axis the motion uses', () => {
+    const bone = rotor({ axis: 'x' });
+    app.editor.select(bone.id);
+    const axisPos = () => {
+      const p = app.editor.jointAxis.geometry.attributes.position;
+      return new THREE.Vector3(p.getX(1) - p.getX(0), p.getY(1) - p.getY(0), p.getZ(1) - p.getZ(0))
+        .normalize();
+    };
+    const onX = axisPos();
+    bone.custom.axis = 'y';
+    app.editor.select(bone.id);
+    expect(axisPos().dot(onX), 'a different axis draws a different hinge')
+      .toBeLessThan(0.9);
+  });
+});
+
+describe('tool settings panel', () => {
+  const shown = () => ({
+    gizmo: !app.ui.gizmoSection.classList.contains('hidden'),
+    block: !app.ui.blockSection.classList.contains('hidden'),
+    equip: !app.ui.equipSection.classList.contains('hidden'),
+    bone: !app.ui.boneSection.classList.contains('hidden'),
+    sculpt: !app.ui.sculptSection.classList.contains('hidden'),
+    stamp: !app.ui.stampSection.classList.contains('hidden'),
+  });
+  const only = (key) => {
+    const v = shown();
+    return Object.keys(v).every((k) => v[k] === (k === key));
+  };
+
+  it('shows the settings for the tool in hand, and only those', () => {
+    app.setMode('edit');
+    app.setTool(TOOL.SELECT);
+    expect(only('gizmo'), JSON.stringify(shown())).toBe(true);
+    app.setTool(TOOL.BLOCK);
+    expect(only('block')).toBe(true);
+    app.setTool(TOOL.EQUIP);
+    expect(only('equip')).toBe(true);
+    app.setTool(TOOL.BONE_LEG);
+    expect(only('bone')).toBe(true);
+    app.setTool(TOOL.CARVE);
+    expect(only('sculpt')).toBe(true);
+    app.setTool(TOOL.STAMP);
+    expect(only('stamp')).toBe(true);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('that is most of the panel it used to be', () => {
+    app.setMode('edit');
+    app.setTool(TOOL.SELECT);
+    const focused = app.ui.leftPanel.scrollHeight;
+    for (const sec of app.ui.toolSections) sec.classList.remove('hidden');
+    const everything = app.ui.leftPanel.scrollHeight;
+    app.setTool(TOOL.SELECT);
+    expect(focused).toBeLessThan(everything * 0.65);
+  });
+
+  it('reaching a sculpt tool by key unfolds its buttons', () => {
+    app.setMode('edit');
+    app.ui.sculptTools.setOpen(false);
+    expect(app.ui.sculptTools.classList.contains('folded')).toBe(true);
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyX', bubbles: true }));
+    expect(app.editor.tool).toBe(TOOL.CARVE);
+    expect(app.ui.sculptTools.classList.contains('folded')).toBe(false);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('the right-hand sections fold away', () => {
+    const section = app.ui.librarySection;
+    section.setOpen(true);
+    expect(section.classList.contains('folded')).toBe(false);
+    section.querySelector('.sectionhead').click();
+    expect(section.classList.contains('folded')).toBe(true);
+    section.querySelector('.sectionhead').click();
+    expect(section.classList.contains('folded')).toBe(false);
   });
 });
 
@@ -998,6 +1406,33 @@ describe('colour', () => {
 });
 
 describe('save and load', () => {
+  it('Ctrl+S saves, and does not hand the page to the browser', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.assembly.name = 'CTRL S';
+    localStorage.removeItem('brostom.assembly.v1');
+
+    const ev = new KeyboardEvent('keydown', {
+      code: 'KeyS', ctrlKey: true, bubbles: true, cancelable: true,
+    });
+    window.dispatchEvent(ev);
+
+    expect(ev.defaultPrevented, 'the browser save dialog is suppressed').toBe(true);
+    const raw = localStorage.getItem('brostom.assembly.v1');
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw).name).toBe('CTRL S');
+    expect(app.ui.toast.textContent).toContain('保存');
+  });
+
+  it('does not fire while typing in a field', () => {
+    app.setMode('edit');
+    localStorage.removeItem('brostom.assembly.v1');
+    app.ui.nameInput.dispatchEvent(new KeyboardEvent('keydown', {
+      code: 'KeyS', ctrlKey: true, bubbles: true, cancelable: true,
+    }));
+    expect(localStorage.getItem('brostom.assembly.v1')).toBeNull();
+  });
+
   it('round-trips a build, free positions included', () => {
     app.loadPreset('bits');
     app.editor.select(app.assembly.rootId);
@@ -1058,15 +1493,19 @@ describe('field mode', () => {
 
   it('the pause menu buttons work', () => {
     app.pauseField();
-    const buttons = [...document.querySelectorAll('#pause button')];
-    expect(buttons.length).toBe(3);
+    // By label, not by index: the menu grows, and a shifted index silently
+    // leaves the field paused for every test that follows.
+    const button = (text) => [...document.querySelectorAll('#pause button')]
+      .find((b) => b.textContent.includes(text));
+    expect(button('再開')).toBeTruthy();
+    expect(button('キー設定')).toBeTruthy();
 
-    buttons[1].click();                       // respawn
+    button('リスポーン').click();
     expect(app.field.paused).toBe(false);
     expect(app.field.player.position.z).toBeCloseTo(-18, 0);
 
     app.pauseField();
-    buttons[2].click();                       // back to the editor
+    button('編集画面に戻る').click();
     expect(app.mode).toBe('edit');
     expect(document.getElementById('pause').classList.contains('hidden')).toBe(true);
     expect(document.getElementById('topbar').classList.contains('hidden')).toBe(false);
@@ -1116,6 +1555,37 @@ describe('field mode', () => {
     expect(app.field.lock.robot.hp).toBeLessThan(hp);
   });
 
+  it('keeps the chassis level on the ground, however steeply it is aiming', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.respawn();
+
+    // Park a target overhead and hold the lock while walking at it.
+    const p = app.field.player;
+    const target = app.field.enemies.find((e) => e.alive);
+    target.body.reset(new THREE.Vector3(4, 30, -10));
+    target.syncTransform();
+    app.field.lock = { robot: target, aimPoint: target.position.clone() };
+    app.field._applyLock();
+    step(60);
+
+    let steepestAim = 0;
+    let worstTilt = 0;
+    app.input.keys.add('KeyW');
+    for (let i = 0; i < 150; i++) {
+      step(1);
+      steepestAim = Math.max(steepestAim, p.body.aimForward.y);
+      if (p.body.env.grounded > 0.9) worstTilt = Math.max(worstTilt, Math.abs(p.body.forward.y));
+    }
+    app.input.keys.clear();
+
+    expect(steepestAim, 'it really was aiming up').toBeGreaterThan(0.3);
+    expect(worstTilt, 'and never tipped the chassis').toBeLessThan(0.05);
+    expect(p.body.env.grounded, 'still on its feet').toBeGreaterThan(0.9);
+  });
+
   it('closing on a locked target does not lift the machine off the ground', () => {
     app.setMode('edit');
     app.loadPreset('biped');
@@ -1159,6 +1629,602 @@ describe('field mode', () => {
       expect(Number.isFinite(app.field.player.position.y), key).toBe(true);
     }
     app.setMode('edit');
+  });
+});
+
+describe('equipment plates', () => {
+  /** Put a plate on the chest by actually clicking the chest. */
+  const stick = (type, face = 0.49) => {
+    app.setEquipType(type);
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(0, 1, 7));
+    const chest = [...app.assembly.parts.values()].find((p) => p.size?.[0] === 1.5);
+    const at = worldOf(chest.id).add(new THREE.Vector3(0, 0, face));
+    pointAt(at, { click: true });
+    return app.assembly.get(app.editor.selected);
+  };
+
+  it('the tool is armed by picking a plate, and the ghost shows it', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setEquipType(EQUIP.BEAM);
+    expect(app.editor.tool).toBe(TOOL.EQUIP);
+    expect(app.editor.equipType).toBe(EQUIP.BEAM);
+
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(0, 1, 7));
+    pointAt(core.clone().add(new THREE.Vector3(0, 0, 0.49)));
+    expect(app.editor.ghost.visible).toBe(true);
+  });
+
+  it('a click sticks a plate flat on the surface it hit', () => {
+    app.loadPreset('biped');
+    const before = app.assembly.size;
+    const e = stick(EQUIP.BEAM);
+
+    expect(app.assembly.size).toBe(before + 1);
+    expect(e.kind).toBe('equip');
+    expect(e.equipType).toBe(EQUIP.BEAM);
+    // laid on the surface: its facing is the face normal, and it has no depth
+    const up = new THREE.Vector3(0, 1, 0)
+      .applyQuaternion(new THREE.Quaternion().fromArray(e.mount.rot));
+    expect(Math.abs(up.z), 'points out of the face it was stuck to').toBeGreaterThan(0.9);
+    expect(app.editor.stats.weaponCount).toBe(1);
+  });
+
+  it('the plate really is in the scene, and it is a plate', () => {
+    app.loadPreset('biped');
+    const e = stick(EQUIP.GATLING);
+    const node = app.editor.rig.nodes.get(e.id);
+    expect(node).toBeTruthy();
+    expect(node.plate).toBeTruthy();
+    expect(node.accent).toBeTruthy();
+    expect(app.editor.rig.equipNodes).toHaveLength(1);
+    // thin: the slab is far wider than it is deep
+    const box = new THREE.Box3().setFromObject(node.plate);
+    const size = box.getSize(new THREE.Vector3());
+    expect(Math.min(size.x, size.y, size.z)).toBeLessThan(0.2);
+  });
+
+  it('picks up a plate when you click it', () => {
+    app.loadPreset('biped');
+    const e = stick(EQUIP.BEAM);
+    app.editor.clearSelection();
+    app.setTool(TOOL.SELECT);
+    pointAt(worldOf(e.id), { click: true });
+    expect(app.editor.selected).toBe(e.id);
+  });
+
+  it('swapping the type re-cuts the plate without rebuilding the world', () => {
+    app.loadPreset('biped');
+    const e = stick(EQUIP.BEAM);
+    const node = app.editor.rig.nodes.get(e.id);
+    app.editor.setEquipTypeSelected(EQUIP.BOOST);
+    expect(app.assembly.get(e.id).equipType).toBe(EQUIP.BOOST);
+    expect(app.editor.rig.nodes.get(e.id), 'same node, re-cut in place').toBe(node);
+    expect(app.editor.stats.weaponCount).toBe(0);
+    expect(app.editor.stats.dashBonus).toBeGreaterThan(0);
+  });
+
+  it('resizing a plate is undoable like anything else', () => {
+    app.loadPreset('biped');
+    const e = stick(EQUIP.BEAM);
+    app.editor.setEquipSizeSelected(1.4);
+    expect(app.assembly.get(e.id).size).toBeCloseTo(1.4, 3);
+    app.undo();
+    expect(app.assembly.get(e.id).size).toBeCloseTo(0.7, 3);
+  });
+
+  it('the bullet colour reaches the plate you can see', () => {
+    app.loadPreset('biped');
+    const e = stick(EQUIP.BEAM);
+    app.setBulletColor(0x6bff6b);
+    expect(app.assembly.get(e.id).bulletColor).toBe(0x6bff6b);
+    expect(app.editor.rig.nodes.get(e.id).accent.material.color.getHex()).toBe(0x6bff6b);
+  });
+
+  it('a blade refuses a bullet colour, and says so in the panel', () => {
+    app.loadPreset('biped');
+    const e = stick(EQUIP.BLADE);
+    expect(app.editor.setBulletColorSelected(0x6bff6b)).toBe(false);
+    expect(app.assembly.get(e.id).bulletColor).toBeNull();
+    app.ui.renderInspector(app.editor.selectedParts());
+    expect(app.ui.inspectorEl.textContent).toContain('弾の色を変えられません');
+  });
+
+  it('the panel offers the plate controls, and names the plate', () => {
+    app.loadPreset('biped');
+    stick(EQUIP.SHOT);
+    app.ui.renderInspector(app.editor.selectedParts());
+    const text = app.ui.inspectorEl.textContent;
+    expect(text).toContain('ショット');
+    expect(text).toContain('装弾');
+    expect(text).toContain('弾の色');
+  });
+
+  it('a second gravity plate is refused, with a reason', () => {
+    app.loadPreset('biped');
+    stick(EQUIP.GRAVITY);
+    expect(app.assembly.countEquip(EQUIP.GRAVITY)).toBe(1);
+    const size = app.assembly.size;
+
+    stick(EQUIP.GRAVITY);
+    expect(app.assembly.size, 'nothing was placed').toBe(size);
+    expect(app.assembly.countEquip(EQUIP.GRAVITY)).toBe(1);
+    expect(app.ui.toast.textContent).toContain('1枚');
+  });
+
+  it('symmetry mirrors a plate across the machine', () => {
+    app.loadPreset('biped');
+    app.setEquipType(EQUIP.GATLING);
+    app.editor.symmetry = true;
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(0, 5, 12));
+    pointAt(core.clone().add(new THREE.Vector3(2.5, 0, 0)), { click: true });
+    app.editor.symmetry = false;
+
+    const plates = app.assembly.equips();
+    expect(plates).toHaveLength(2);
+    const xs = plates.map((e) => e.mount.pos[0]).sort((x, y) => x - y);
+    expect(xs[0]).toBeCloseTo(-xs[1], 5);
+  });
+
+  it('plates travel with copy and paste', () => {
+    app.loadPreset('biped');
+    const e = stick(EQUIP.BEAM);
+    app.setTool(TOOL.SELECT);
+    app.editor.select(e.id);
+    app.copySelected();
+    app.pasteClipboard();
+    expect(app.assembly.equips()).toHaveLength(2);
+    expect(app.assembly.get(app.editor.selected).equipType).toBe(EQUIP.BEAM);
+  });
+
+  it('a plate survives save and load', () => {
+    app.loadPreset('biped');
+    stick(EQUIP.SHOT);
+    app.setBulletColor(0xff2fb0);
+    app.save();
+    app.loadPreset('core');
+    app.load();
+    const [e] = app.assembly.equips();
+    expect(e.equipType).toBe(EQUIP.SHOT);
+    expect(e.bulletColor).toBe(0xff2fb0);
+  });
+
+  it('deletes like any other part', () => {
+    app.loadPreset('biped');
+    const e = stick(EQUIP.BEAM);
+    app.setTool(TOOL.SELECT);
+    app.editor.select(e.id);
+    app.editor.deleteSelected();
+    expect(app.assembly.get(e.id)).toBe(undefined);
+    expect(app.editor.stats.weaponCount).toBe(0);
+  });
+});
+
+describe('weapons in the field', () => {
+  /** A biped wearing one plate of each named type, already in the field. */
+  const deploy = (...types) => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const a = app.assembly;
+    const chest = [...a.parts.values()].find((p) => p.size?.[0] === 1.5);
+    for (const t of types) a.addEquipOnFace(chest.id, 4, t);
+    app.editor.rebuild();
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.respawn();
+    return app.field.player;
+  };
+
+  const lockOn = () => forceLock();
+
+  it('builds one weapon slot per plate, in the field too', () => {
+    const p = deploy(EQUIP.BEAM, EQUIP.GATLING, EQUIP.BOOST);
+    expect(p.weapons.slots.map((s) => s.type)).toEqual([EQUIP.BEAM, EQUIP.GATLING]);
+  });
+
+  it('the trigger sends real projectiles down range', () => {
+    deploy(EQUIP.GATLING);
+    lockOn();
+    // Sample across the burst: at close range a round can be spawned and
+    // spent inside a couple of frames, so the count on any ONE frame proves
+    // nothing either way.
+    let peak = 0;
+    app.input.keys.add('Mouse0');
+    for (let i = 0; i < 30; i++) {
+      step(1);
+      peak = Math.max(peak, app.field.projectiles.liveCount);
+    }
+    app.input.keys.clear();
+    expect(peak, 'rounds were in the air').toBeGreaterThan(0);
+    expect(app.field.player.weapons.slots[0].ammo).toBeLessThan(30);
+  });
+
+  it('runs a magazine dry and reloads on the clock', () => {
+    const p = deploy(EQUIP.GATLING);
+    lockOn();
+    app.input.keys.add('Mouse0');
+    step(180);
+    app.input.keys.clear();
+    const slot = p.weapons.slots[0];
+    expect(slot.ammo === 0 || slot.reloadT > 0, 'it ran out and started reloading').toBe(true);
+    step(240);
+    expect(p.weapons.slots[0].ammo).toBeGreaterThan(0);
+  });
+
+  it('shots that connect actually hurt', () => {
+    deploy(EQUIP.GATLING, EQUIP.BEAM, EQUIP.SHOT);
+    const lock = lockOn();
+    expect(lock).toBeTruthy();
+    const hp = lock.robot.hp;
+    for (let i = 0; i < 300; i++) {
+      if (i % 24 === 0) app.input.keys.delete('Mouse0');
+      if (i % 24 === 2) app.input.keys.add('Mouse0');
+      step(1);
+    }
+    app.input.keys.clear();
+    expect(lock.robot.hp).toBeLessThan(hp);
+  });
+
+  it('a missile chases what you locked', () => {
+    const p = deploy(EQUIP.MISSILE);
+    const lock = lockOn();
+    let missile = null;
+    const spawn = app.field.projectiles.spawn.bind(app.field.projectiles);
+    app.field.projectiles.spawn = (o) => {
+      const shot = spawn(o);
+      if (o.kind === 'missile') missile = shot;
+      return shot;
+    };
+    app.input.keys.add('Mouse0');
+    step(2);
+    app.input.keys.clear();
+    app.field.projectiles.spawn = spawn;
+
+    expect(missile, 'a missile went out').toBeTruthy();
+    expect(missile.turn).toBeGreaterThan(0);
+    const start = missile.mesh.position.distanceTo(lock.robot.position);
+    step(60);
+    const now = missile.life > 0
+      ? missile.mesh.position.distanceTo(lock.robot.position)
+      : 0;
+    expect(now, 'and it closed the distance').toBeLessThan(start);
+  });
+
+  it('a blade lights the block it is stuck to while you hold the trigger', () => {
+    const p = deploy(EQUIP.BLADE);
+    const glow = p.rig.equipNodes[0].bladeGlow;
+    expect(glow, 'the shell exists').toBeTruthy();
+    expect(glow.visible).toBe(false);
+
+    app.input.keys.add('Mouse0');
+    step(30);
+    expect(p.weapons.bladeGlow).toBeGreaterThan(0.7);
+    expect(glow.visible).toBe(true);
+    expect(glow.material.opacity).toBeGreaterThan(0.1);
+
+    app.input.keys.clear();
+    step(90);
+    expect(glow.visible).toBe(false);
+  });
+
+  it('the HUD lists every plate with its magazine', () => {
+    deploy(EQUIP.BEAM, EQUIP.BLADE);
+    const rows = app.field.player.weapons.readout();
+    expect(rows.map((r) => r.label)).toEqual(['ビーム', 'ブレード']);
+    expect(rows[0].max).toBe(EQUIP_META.beam.ammo);
+    expect(rows[1].melee).toBe(true);
+    shouldNotThrow(() => step(3), 'hud with weapons');
+  });
+
+  it('a respawn reloads everything', () => {
+    const p = deploy(EQUIP.BEAM);
+    lockOn();
+    app.input.keys.add('Mouse0');
+    step(20);
+    app.input.keys.clear();
+    expect(p.weapons.slots[0].ammo).toBeLessThan(6);
+    app.field.respawn();
+    expect(app.field.player.weapons.slots[0].ammo).toBe(6);
+    expect(app.field.projectiles.liveCount).toBe(0);
+  });
+
+  it('a bare chassis still has its built-in vulcan', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.field.respawn();
+    const lock = lockOn();
+    const hp = lock.robot.hp;
+    app.input.keys.add('Mouse0');
+    step(60);
+    app.input.keys.clear();
+    expect(app.field.player.weapons.hasWeapons).toBe(false);
+    expect(lock.robot.hp).toBeLessThan(hp);
+  });
+
+  it('a gravity plate keeps the machine on the deck', () => {
+    const p = deploy(EQUIP.GRAVITY);
+    expect(p.body.noFly).toBe(true);
+    const y0 = p.position.y;
+    app.input.keys.add('Space');
+    step(180);
+    app.input.keys.clear();
+    expect(p.position.y - y0, 'it can hop, but it cannot fly').toBeLessThan(4);
+  });
+
+  it('and gives back durability for it', () => {
+    const bare = deploy();
+    const bareHp = bare.maxHp;
+    const heavy = deploy(EQUIP.GRAVITY);
+    expect(heavy.maxHp).toBeGreaterThan(bareHp * 1.3);
+  });
+
+  it('a boost plate makes the dash bite harder', () => {
+    const bare = deploy();
+    const bareDash = bare.body.dashSpeed;
+    const boosted = deploy(EQUIP.BOOST, EQUIP.BOOST);
+    expect(boosted.body.dashSpeed).toBeGreaterThan(bareDash);
+  });
+
+  it('without a boost plate, the boost key does nothing', () => {
+    const p = deploy();
+    expect(p.body.canBoost).toBe(false);
+    app.input.keys.add('KeyW');
+    app.input.keys.add('KeyE');
+    step(150);
+    app.input.keys.clear();
+    expect(p.body.boosting).toBe(false);
+    expect(p.body.boostOutput).toBe(0);
+  });
+
+  it('with one fitted, it burns and it is faster', () => {
+    // PEAK speed, not the speed at the end: the arena has furniture in it, and
+    // a machine that boosted harder is exactly the one that reaches a pillar.
+    const topSpeed = (plated) => {
+      const p = plated ? deploy(EQUIP.BOOST) : deploy();
+      let peak = 0;
+      app.input.keys.add('KeyW');
+      app.input.keys.add('KeyE');
+      for (let i = 0; i < 150; i++) {
+        step(1);
+        peak = Math.max(peak, p.body.speed);
+      }
+      app.input.keys.clear();
+      return { peak, p };
+    };
+    const bare = topSpeed(false);
+    const boosted = topSpeed(true);
+
+    expect(boosted.p.body.canBoost).toBe(true);
+    expect(boosted.p.body.boosting).toBe(true);
+    expect(boosted.peak, 'and it genuinely moves faster').toBeGreaterThan(bare.peak + 2);
+  });
+
+  it('the flame comes out of the plate itself', () => {
+    const p = deploy(EQUIP.BOOST);
+    const node = p.rig.equipNodes.find((n) => n.part.equipType === EQUIP.BOOST);
+    expect(node.boostFlare, 'the plate carries it').toBeTruthy();
+    expect(node.boostFlare.group.visible, 'dark at rest').toBe(false);
+
+    app.input.keys.add('KeyE');
+    step(60);
+    expect(p.body.boostOutput).toBeGreaterThan(0.8);
+    expect(node.boostFlare.group.visible).toBe(true);
+    expect(node.boostFlare.cone.material.opacity).toBeGreaterThan(0.2);
+    expect(node.accent.material.emissiveIntensity, 'and the plate itself glows')
+      .toBeGreaterThan(2);
+
+    app.input.keys.clear();
+    step(60);
+    expect(node.boostFlare.group.visible, 'and goes out again').toBe(false);
+  });
+
+  it('every fitted plate fires, wherever it is stuck', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const a = app.assembly;
+    const chest = [...a.parts.values()].find((x) => x.size?.[0] === 1.5);
+    a.addEquipOnFace(chest.id, 5, EQUIP.BOOST);
+    a.addEquipOnFace(chest.id, 3, EQUIP.BOOST);
+    app.editor.rebuild();
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.respawn();
+
+    app.input.keys.add('KeyE');
+    step(60);
+    const flares = app.field.player.rig.equipNodes
+      .filter((n) => n.boostFlare).map((n) => n.boostFlare.group.visible);
+    app.input.keys.clear();
+    expect(flares).toEqual([true, true]);
+  });
+});
+
+describe('key config', () => {
+  const kc = () => app.ui.keyConfig;
+  const rowFor = (label) => [...kc().rowsEl.querySelectorAll('.keyrow')]
+    .find((r) => r.querySelector('.keyaction').textContent === label);
+
+  const press = (code) => window.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true }));
+
+  it('opens from the topbar and lists every action', () => {
+    app.setMode('edit');
+    app.input.resetBindings();
+    kc().show();
+    expect(kc().el.classList.contains('hidden')).toBe(false);
+    expect(kc().rowsEl.querySelectorAll('.keyrow').length).toBe(17);
+    expect(rowFor('武器を撃つ')).toBeTruthy();
+  });
+
+  it('rebinds a key by clicking the chip and pressing one', () => {
+    app.input.resetBindings();
+    kc().show();
+    rowFor('ブースト').querySelector('.keychiplabel').click();
+    press('KeyH');
+    expect(app.input.keysFor('boost')).toEqual(['KeyH']);
+    expect(kc().noteEl.textContent).toContain('H');
+  });
+
+  it('a key can only do one job, and it says where it went', () => {
+    app.input.resetBindings();
+    kc().show();
+    rowFor('ブースト').querySelector('.keyadd').click();
+    press('KeyW');
+    expect(app.input.keysFor('boost')).toContain('KeyW');
+    expect(app.input.keysFor('forward'), 'taken off the old owner').not.toContain('KeyW');
+    expect(kc().noteEl.textContent).toContain('前進');
+  });
+
+  it('says so when an action is left with nothing', () => {
+    app.input.resetBindings();
+    kc().show();
+    rowFor('ブースト').querySelector('.keyadd').click();
+    press('Space');                            // Space was the only lift key
+    expect(app.input.keysFor('up')).toEqual([]);
+    expect(kc().noteEl.textContent).toContain('未設定');
+    expect(rowFor('上昇 / ジャンプ').classList.contains('unbound')).toBe(true);
+    expect(rowFor('上昇 / ジャンプ').textContent).toContain('未設定');
+  });
+
+  it('Escape cancels a pending rebind rather than binding Escape', () => {
+    app.input.resetBindings();
+    kc().show();
+    rowFor('ブースト').querySelector('.keychiplabel').click();
+    press('Escape');
+    expect(app.input.keysFor('boost')).toEqual(['KeyE']);
+    expect(kc().listening).toBeNull();
+  });
+
+  it('refuses to swallow the browser keys', () => {
+    app.input.resetBindings();
+    kc().show();
+    rowFor('ブースト').querySelector('.keychiplabel').click();
+    press('F5');
+    expect(app.input.keysFor('boost')).toEqual(['KeyE']);
+    expect(kc().noteEl.textContent).toContain('割り当てられません');
+    press('KeyH');                              // still listening, so this lands
+    expect(app.input.keysFor('boost')).toEqual(['KeyH']);
+  });
+
+  it('drops a spare key, but never the last one', () => {
+    app.input.resetBindings();
+    kc().show();
+    const row = () => rowFor('前進');
+    expect(row().querySelectorAll('.keychipx')).toHaveLength(2);
+    row().querySelector('.keychipx').click();
+    expect(app.input.keysFor('forward')).toEqual(['ArrowUp']);
+    expect(row().querySelectorAll('.keychipx'), 'the last chip loses its ×').toHaveLength(0);
+  });
+
+  it('the change is written through to storage, and reset clears it', () => {
+    app.input.resetBindings();
+    kc().show();
+    rowFor('ブースト').querySelector('.keychiplabel').click();
+    press('KeyH');
+    expect(JSON.parse(localStorage.getItem('brostom.keys.v1'))).toEqual({ boost: ['KeyH'] });
+
+    kc().reset();
+    expect(JSON.parse(localStorage.getItem('brostom.keys.v1'))).toEqual({});
+    expect(app.input.keysFor('boost')).toEqual(['KeyE']);
+  });
+
+  it('a rebound key really drives the machine', () => {
+    app.input.resetBindings();
+    app.input.setBinding('forward', ['KeyI']);
+    kc().close();
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.respawn();
+
+    const before = app.field.player.position.clone();
+    app.input.keys.add('KeyW');
+    step(40);
+    app.input.keys.clear();
+    expect(app.field.player.position.distanceTo(before), 'W is dead now').toBeLessThan(1);
+
+    app.input.keys.add('KeyI');
+    step(40);
+    app.input.keys.clear();
+    expect(app.field.player.position.distanceTo(before)).toBeGreaterThan(1);
+
+    app.input.resetBindings();
+    app.setMode('edit');
+  });
+
+  it('the field control strip follows the bindings', () => {
+    app.input.resetBindings();
+    app.ui.syncFieldHint();
+    expect(app.ui.fieldWeaponHint.textContent).toContain('左クリック');
+    expect(app.ui.fieldWeaponHint.textContent).toContain('武器を撃つ');
+    expect(app.ui.fieldWeaponHint.textContent).toContain('武器切替');
+
+    app.input.setBinding('fire', ['KeyJ']);
+    app.ui.syncFieldHint();
+    expect(app.ui.fieldWeaponHint.textContent).toContain('J');
+    app.input.resetBindings();
+    app.ui.syncFieldHint();
+  });
+});
+
+describe('switching weapons', () => {
+  const deploy = (...types) => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const a = app.assembly;
+    const chest = [...a.parts.values()].find((p) => p.size?.[0] === 1.5);
+    for (const t of types) a.addEquipOnFace(chest.id, 4, t);
+    app.editor.rebuild();
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.respawn();
+    return app.field.player;
+  };
+
+  const tap = (code) => {
+    window.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true }));
+    step(1);
+    window.dispatchEvent(new KeyboardEvent('keyup', { code, bubbles: true }));
+  };
+
+  it('the switch key cycles the set and names what came up', () => {
+    const p = deploy(EQUIP.BEAM, EQUIP.GATLING, EQUIP.SHOT);
+    expect(p.weapons.active.type).toBe(EQUIP.BEAM);
+
+    tap('KeyC');
+    expect(p.weapons.active.type).toBe(EQUIP.GATLING);
+    expect(app.field.hud.weaponFlashLabel).toBe('ガトリング');
+    expect(app.field.hud.weaponFlash).toBeGreaterThan(0);
+
+    tap('KeyX');
+    expect(p.weapons.active.type).toBe(EQUIP.BEAM);
+  });
+
+  it('only the selected plate spends ammo', () => {
+    const p = deploy(EQUIP.BEAM, EQUIP.GATLING);
+    p.weapons.select(1);
+    forceLock();
+    app.input.keys.add('Mouse0');
+    step(30);
+    app.input.keys.clear();
+    expect(p.weapons.slots[0].ammo, 'the beam sat it out').toBe(6);
+    expect(p.weapons.slots[1].ammo).toBeLessThan(30);
+  });
+
+  it('a rebound switch key works too', () => {
+    const p = deploy(EQUIP.BEAM, EQUIP.GATLING);
+    app.input.setBinding('weaponNext', ['KeyN']);
+    tap('KeyN');
+    expect(p.weapons.active.type).toBe(EQUIP.GATLING);
+    app.input.resetBindings();
+  });
+
+  it('one plate means nothing to switch to', () => {
+    const p = deploy(EQUIP.BEAM);
+    tap('KeyC');
+    expect(p.weapons.active.type).toBe(EQUIP.BEAM);
   });
 });
 
@@ -1218,9 +2284,7 @@ describe('field camera', () => {
 
   it('the swing does not count as aim, so it cannot shake a lock', () => {
     enterField();
-    app.input.buffer.push({ action: 'lock', t: app.input.time });
-    step(40);
-    expect(app.field.lock).toBeTruthy();
+    expect(forceLock()).toBeTruthy();
 
     window.dispatchEvent(new MouseEvent('mousedown', { button: 2, bubbles: true }));
     drag(-40, 0, 25);

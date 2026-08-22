@@ -37,6 +37,17 @@ function limitQuat(q, maxDeg) {
   return q.slerp(_q2.identity(), 1 - max / angle);
 }
 
+/** -1..1 for one cycle of `t` turns. */
+export function waveAt(wave, t) {
+  const u = ((t % 1) + 1) % 1;
+  switch (wave) {
+    case 'tri': return 1 - 4 * Math.abs(u - 0.5);
+    case 'square': return u < 0.5 ? 1 : -1;
+    case 'saw': return u * 2 - 1;
+    default: return Math.sin(u * TAU);
+  }
+}
+
 export class Animator {
   constructor(rig, stats) {
     this.rig = rig;
@@ -398,19 +409,45 @@ export class Animator {
     for (const node of this.rig.customBones) {
       const c = node.part.custom ?? {};
       const axis = c.axis === 'y' ? node.axisTwist : c.axis === 'z' ? node.axisLift : node.axisStride;
-      let drive = 1;
-      switch (c.source) {
-        case 'speed': drive = clamp01(s.planarSpeed / 18); break;
-        case 'thrust': drive = s.thrust; break;
-        case 'jerk': drive = clamp01(s.jerk / 240); break;
-        case 'aim': drive = this.aimBlend; break;
-        default: drive = 1;
+      const drive = this._customDrive(c, s);
+
+      if ((c.wave ?? 'sine') === 'saw') {
+        // A continuous turn: the drive scales the SPEED, not the angle, so
+        // easing off does not snap the joint back to where it started.
+        node.spinPhase = (node.spinPhase ?? c.phase ?? 0) + (c.freq ?? 1) * drive * dt;
+        _q.setFromAxisAngle(axis, node.spinPhase * TAU + (c.offset ?? 0) * DEG);
+        node.target.copy(_q);          // no joint limit: it is a rotation
+        continue;
       }
-      const angle = Math.sin((this.time * (c.freq ?? 1) + (c.phase ?? 0)) * TAU)
-        * (c.amp ?? 20) * DEG * drive;
+
+      const t = this.time * (c.freq ?? 1) + (c.phase ?? 0);
+      const angle = ((c.offset ?? 0) + waveAt(c.wave, t) * (c.amp ?? 20) * drive) * DEG;
       _q.setFromAxisAngle(axis, angle);
       node.target.copy(limitQuat(_q, node.part.limit));
     }
+  }
+
+  _customDrive(c, s) {
+    switch (c.source) {
+      case 'speed': return clamp01((s.planarSpeed ?? 0) / 18);
+      case 'thrust': return s.thrust ?? 0;
+      case 'jerk': return clamp01((s.jerk ?? 0) / 240);
+      case 'aim': return this.aimBlend;
+      default: return 1;
+    }
+  }
+
+  /**
+   * Run ONLY the custom bones, for the editor: tuning a motion you cannot
+   * see until you deploy is tuning blind, but faking a whole walk cycle
+   * would move everything else too.
+   */
+  updateCustomsOnly(dt) {
+    this.time += dt;
+    this._customs({ planarSpeed: 0, thrust: 0, jerk: 0 }, dt);
+    const k = clamp01(1 - Math.pow(0.0008, dt));
+    for (const node of this.rig.customBones) node.joint.quaternion.slerp(node.target, k);
+    return this;
   }
 
   /**

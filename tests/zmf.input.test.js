@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { InputManager, BINDINGS } from '../src/zmf/InputManager.js';
+import {
+  InputManager, BINDINGS, DEFAULT_BINDINGS, ACTIONS, ACTION_GROUPS, ACTION_LABEL, keyLabel,
+} from '../src/zmf/InputManager.js';
 import { installFakeDom } from './helpers/dom.js';
 
 let dom;
@@ -22,12 +24,123 @@ describe('bindings', () => {
   it('covers every action the game asks for', () => {
     for (const action of [
       'forward', 'back', 'left', 'right', 'up', 'down',
-      'boost', 'brake', 'lock', 'fire', 'layerA', 'layerB', 'layerC', 'reset', 'cycleTarget',
-      'camera',
+      'boost', 'lock', 'fire', 'layerA', 'layerB', 'layerC', 'reset', 'cycleTarget',
+      'camera', 'weaponNext', 'weaponPrev',
     ]) {
       expect(BINDINGS[action], action).toBeTruthy();
       expect(BINDINGS[action].length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('key config', () => {
+  it('every action is named and lives in exactly one group', () => {
+    const grouped = ACTION_GROUPS.flatMap((g) => g.actions);
+    expect(grouped.sort()).toEqual([...ACTIONS].sort());
+    expect(new Set(grouped).size).toBe(grouped.length);
+    for (const a of ACTIONS) expect(ACTION_LABEL[a], a).toBeTruthy();
+  });
+
+  it('reads keys back the way a person says them', () => {
+    expect(keyLabel('KeyW')).toBe('W');
+    expect(keyLabel('Digit1')).toBe('1');
+    expect(keyLabel('Space')).toBe('Space');
+    expect(keyLabel('ShiftLeft')).toBe('左Shift');
+    expect(keyLabel('Mouse0')).toBe('左クリック');
+    expect(keyLabel('Mouse2')).toBe('右クリック');
+    expect(keyLabel('ArrowUp')).toBe('↑');
+    expect(keyLabel(null)).toBe('—');
+  });
+
+  it('starts on the factory layout', () => {
+    expect(input.keysFor('forward')).toEqual(DEFAULT_BINDINGS.forward);
+    expect(input.describe('forward')).toBe('W / ↑');
+    expect(input.primary('forward')).toBe('W');
+  });
+
+  it('rebinding actually changes what the key does', () => {
+    input.setBinding('forward', ['KeyI']);
+    key('KeyW');
+    input.update(1 / 60);
+    expect(input.move.z, 'the old key is dead').toBe(0);
+
+    key('KeyW', false);
+    key('KeyI');
+    input.update(1 / 60);
+    expect(input.move.z, 'and the new one drives').toBe(1);
+  });
+
+  it('one key does one job: assigning it takes it off the old owner', () => {
+    expect(input.bind('boost', 'KeyW')).toBe('forward');
+    expect(input.keysFor('boost')).toContain('KeyW');
+    expect(input.keysFor('forward')).not.toContain('KeyW');
+    expect(input.actionFor('KeyW')).toBe('boost');
+  });
+
+  it('rebinding to a key the action already has is a no-op', () => {
+    expect(input.bind('boost', 'KeyE')).toBeNull();
+    expect(input.keysFor('boost')).toEqual(['KeyE']);
+  });
+
+  it('an action may hold several keys, but never zero', () => {
+    input.bind('boost', 'KeyH');
+    expect(input.keysFor('boost')).toEqual(['KeyE', 'KeyH']);
+    expect(input.unbind('boost', 'KeyE')).toBe(true);
+    expect(input.unbind('boost', 'KeyH'), 'the last one stays').toBe(false);
+    expect(input.keysFor('boost')).toEqual(['KeyH']);
+  });
+
+  it('refuses to bind an action it has never heard of', () => {
+    expect(input.bind('teleport', 'KeyT')).toBeNull();
+    expect(input.setBinding('teleport', ['KeyT'])).toBe(false);
+    expect(input.setBinding('boost', [])).toBe(false);
+  });
+
+  it('fires a change hook, so the UI can follow along', () => {
+    let n = 0;
+    input.onBindingsChanged = () => { n++; };
+    input.bind('boost', 'KeyH');
+    input.unbind('boost', 'KeyH');
+    input.resetBindings();
+    expect(n).toBe(3);
+  });
+
+  it('reset puts the whole scheme back', () => {
+    input.setBinding('forward', ['KeyI']);
+    input.setBinding('fire', ['KeyJ']);
+    input.resetBindings();
+    for (const a of ACTIONS) expect(input.keysFor(a), a).toEqual(DEFAULT_BINDINGS[a]);
+  });
+
+  it('saves only what the player changed', () => {
+    expect(input.bindingsToJSON()).toEqual({});
+    input.setBinding('fire', ['KeyJ']);
+    expect(input.bindingsToJSON()).toEqual({ fire: ['KeyJ'] });
+  });
+
+  it('loads a saved scheme, and survives a corrupt one', () => {
+    input.loadBindings({ fire: ['KeyJ'] });
+    expect(input.keysFor('fire')).toEqual(['KeyJ']);
+    expect(input.keysFor('forward'), 'untouched rows keep the defaults')
+      .toEqual(DEFAULT_BINDINGS.forward);
+
+    input.loadBindings({ fire: [], nonsense: ['KeyQ'], forward: [42, 'KeyI'] });
+    expect(input.keysFor('fire'), 'an empty row falls back').toEqual(DEFAULT_BINDINGS.fire);
+    expect(input.keysFor('forward'), 'junk entries are dropped').toEqual(['KeyI']);
+    expect(input.bindings.nonsense).toBe(undefined);
+  });
+
+  it('a scheme handed in at construction is honoured', () => {
+    const custom = new InputManager(dom.el, { bindings: { fire: ['KeyJ'] } });
+    expect(custom.keysFor('fire')).toEqual(['KeyJ']);
+    custom.dispose();
+  });
+
+  it('describes an action with nothing bound', () => {
+    input.bind('boost', 'Space');           // steals it off `up`
+    expect(input.keysFor('up')).toEqual([]);
+    expect(input.describe('up')).toBe('未設定');
+    expect(input.isDown('up')).toBe(false);
   });
 });
 

@@ -14,6 +14,156 @@ const worldPos = (rig, id) => {
   return rig.nodes.get(id).group.getWorldPosition(new THREE.Vector3());
 };
 
+describe('boost flares', () => {
+  const plated = (type, face = 5) => {
+    const a = Assembly.createDefault();
+    const plate = a.addEquipOnFace(a.rootId, face, type, { size: 0.7 });
+    return { a, plate, rig: new Rig(a) };
+  };
+
+  it('a boost plate carries its own flame', () => {
+    const { plate, rig } = plated('boost');
+    const node = rig.nodes.get(plate.id);
+    expect(node.boostFlare).toBeTruthy();
+    expect(node.boostFlare.group.parent, 'mounted on the plate itself').toBe(node.group);
+    expect(node.boostFlare.group.visible, 'and dark at rest').toBe(false);
+    rig.dispose();
+  });
+
+  it('no other plate does', () => {
+    for (const type of ['beam', 'gravity', 'rolling', 'blade']) {
+      const { plate, rig } = plated(type);
+      expect(rig.nodes.get(plate.id).boostFlare, type).toBeFalsy();
+      rig.dispose();
+    }
+  });
+
+  it('lights up and goes out again', () => {
+    const { plate, rig } = plated('boost');
+    const f = rig.nodes.get(plate.id).boostFlare;
+
+    rig.setBoostGlow(1);
+    expect(f.group.visible).toBe(true);
+    expect(f.cone.material.opacity).toBeGreaterThan(0.3);
+    expect(f.disc.material.opacity).toBeGreaterThan(0.5);
+
+    rig.setBoostGlow(0.5);
+    const half = f.cone.material.opacity;
+    rig.setBoostGlow(1);
+    expect(f.cone.material.opacity).toBeGreaterThan(half);
+
+    rig.setBoostGlow(0);
+    expect(f.group.visible).toBe(false);
+    rig.dispose();
+  });
+
+  it('fires along the face it is stuck to', () => {
+    const back = plated('boost', 5);          // -Z
+    back.rig.root.updateMatrixWorld(true);
+    const dir = new THREE.Vector3(0, 1, 0)
+      .applyQuaternion(back.rig.nodes.get(back.plate.id).group.getWorldQuaternion(new THREE.Quaternion()));
+    expect(dir.z, 'a plate on the back throws its flame backwards').toBeLessThan(-0.9);
+    back.rig.dispose();
+
+    const belly = plated('boost', 3);         // -Y
+    belly.rig.root.updateMatrixWorld(true);
+    const down = new THREE.Vector3(0, 1, 0)
+      .applyQuaternion(belly.rig.nodes.get(belly.plate.id).group.getWorldQuaternion(new THREE.Quaternion()));
+    expect(down.y).toBeLessThan(-0.9);
+    belly.rig.dispose();
+  });
+
+  it('every fitted plate lights together', () => {
+    const a = Assembly.createDefault();
+    const one = a.addEquipOnFace(a.rootId, 5, 'boost');
+    const two = a.addEquipOnFace(a.rootId, 3, 'boost');
+    const rig = new Rig(a);
+    rig.setBoostGlow(1);
+    for (const id of [one.id, two.id]) {
+      expect(rig.nodes.get(id).boostFlare.group.visible, id).toBe(true);
+    }
+    rig.dispose();
+  });
+});
+
+describe('rolling blocks', () => {
+  /** A block with a ROLLING plate on the named face. */
+  const rolling = (face = 2, spin = undefined) => {
+    const a = Assembly.createDefault();
+    const block = a.addBlockOnFace(a.rootId, 2, 3, { size: [1, 0.5, 1] });
+    const plate = a.addEquipOnFace(block.id, face, 'rolling', { spin });
+    return { a, block, plate, rig: new Rig(a) };
+  };
+
+  it('gives the block a group that is free to turn', () => {
+    const { block, rig } = rolling();
+    expect(rig.rollers).toHaveLength(1);
+    expect(rig.nodes.get(block.id).spin).toBeTruthy();
+    expect(rig.nodes.get(block.id).mesh.parent).toBe(rig.nodes.get(block.id).spin);
+    rig.dispose();
+  });
+
+  it('never turns the core: the whole machine would go with it', () => {
+    const a = Assembly.createDefault();
+    a.addEquipOnFace(a.rootId, 2, 'rolling');
+    const rig = new Rig(a);
+    expect(rig.rollers).toHaveLength(0);
+    expect(rig.nodes.get(a.rootId).spin).toBeFalsy();
+    rig.dispose();
+  });
+
+  it('a plate on a bone spins nothing', () => {
+    const a = Assembly.createDefault();
+    const bone = a.addBoneOnFace(a.rootId, 3, BONE.LEG, { length: 2 });
+    a.addEquip(bone.id, { pos: [0.2, 1, 0] }, 'rolling');
+    const rig = new Rig(a);
+    expect(rig.rollers).toHaveLength(0);
+    rig.dispose();
+  });
+
+  it('turns at the rate it was given, in the direction it was given', () => {
+    const { rig } = rolling(2, { dir: 1, rpm: 60 });   // one turn a second
+    rig.updateRollers(0.25);
+    expect(rig.rollers[0].angle).toBeCloseTo(Math.PI / 2, 4);
+    rig.updateRollers(0.25);
+    expect(rig.rollers[0].angle).toBeCloseTo(Math.PI, 4);
+    rig.dispose();
+
+    const back = rolling(2, { dir: -1, rpm: 60 });
+    back.rig.updateRollers(0.25);
+    expect(back.rig.rollers[0].angle).toBeCloseTo(-Math.PI / 2, 4);
+    back.rig.dispose();
+  });
+
+  it('the face it is stuck to decides the axis', () => {
+    const top = rolling(2);       // +Y
+    expect(Math.abs(top.rig.rollers[0].axis.y)).toBeCloseTo(1, 5);
+    top.rig.dispose();
+
+    const side = rolling(0);      // +X
+    expect(Math.abs(side.rig.rollers[0].axis.x)).toBeCloseTo(1, 5);
+    side.rig.dispose();
+  });
+
+  it('carries whatever is mounted on the block round with it', () => {
+    const { a, block, rig } = rolling();
+    rig.dispose();
+
+    const rider = a.addBlockOnFace(block.id, 4, 6, { size: [0.5, 0.5, 0.5] });
+    const rig2 = new Rig(a);
+    const node = rig2.nodes.get(block.id);
+    expect(rig2.nodes.get(rider.id).group.parent).toBe(node.spin);
+
+    rig2.root.updateMatrixWorld(true);
+    const before = rig2.nodes.get(rider.id).group.getWorldPosition(new THREE.Vector3());
+    rig2.updateRollers(0.25);
+    rig2.root.updateMatrixWorld(true);
+    const after = rig2.nodes.get(rider.id).group.getWorldPosition(new THREE.Vector3());
+    expect(before.distanceTo(after)).toBeGreaterThan(0.2);
+    rig2.dispose();
+  });
+});
+
 describe('Rig hierarchy', () => {
   it('builds a node for every part', () => {
     const asm = PRESETS.biped.build();

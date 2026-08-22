@@ -4,7 +4,9 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { Rig, ridesFarHalf } from '../core/Rig.js';
 import { Assembly, computeStats, faceAnchor, alignYToFace } from '../core/Assembly.js';
 import { Animator } from '../anim/Animator.js';
-import { SIZE_STEP } from '../core/constants.js';
+import {
+  SIZE_STEP, EQUIP, EQUIP_META, EQUIP_THICKNESS, EQUIP_SIZE_DEFAULT,
+} from '../core/constants.js';
 
 // ============================================================
 //  Editor : place parts anywhere, drag them anywhere, carve them.
@@ -29,10 +31,12 @@ const _m = new THREE.Matrix4();
 const _delta = new THREE.Matrix4();
 const _next = new THREE.Matrix4();
 const _plane = new THREE.Plane();
+const UP_VEC = new THREE.Vector3(0, 1, 0);
 
 export const TOOL = {
   SELECT: 'select',
   STAMP: 'stamp',
+  EQUIP: 'equip',
   BLOCK: 'block',
   BONE_LEG: 'leg',
   BONE_ARM: 'arm',
@@ -45,7 +49,8 @@ export const TOOL = {
 
 const SCULPT_TOOLS = new Set([TOOL.CARVE, TOOL.ADD, TOOL.PAINT]);
 const PART_TOOLS = new Set([
-  TOOL.BLOCK, TOOL.BONE_LEG, TOOL.BONE_ARM, TOOL.BONE_FACE, TOOL.BONE_CUSTOM, TOOL.STAMP,
+  TOOL.BLOCK, TOOL.BONE_LEG, TOOL.BONE_ARM, TOOL.BONE_FACE, TOOL.BONE_CUSTOM,
+  TOOL.STAMP, TOOL.EQUIP,
 ]);
 const BONE_TOOLS = new Set([TOOL.BONE_LEG, TOOL.BONE_ARM, TOOL.BONE_FACE, TOOL.BONE_CUSTOM]);
 
@@ -99,13 +104,20 @@ export class EditorScene {
      * step — the editor itself stays ignorant of history.
      */
     this.onBeforeChange = () => {};
+    /** Fired when an edit is refused, with a reason worth showing the player. */
+    this.onReject = () => {};
 
     /** Armed by the part library: the document a STAMP click will graft in. */
     this.stampSource = null;
+
+    /** What the EQUIP tool will stick on next. */
+    this.equipType = EQUIP.BEAM;
+    this.newEquipSize = EQUIP_SIZE_DEFAULT;
     this.stampSize = [1, 1, 1];
 
     this._buildEnvironment();
     this._buildOverlays();
+    this._buildJointGizmo();
     this._buildGizmo();
     this._bindPointer();
     this._syncCameraButtons();
@@ -221,6 +233,96 @@ export class EditorScene {
     this.voxCursor.visible = false;
     this.voxCursor.renderOrder = 11;
     this.scene.add(this.voxCursor);
+  }
+
+  /**
+   * The joint read-out for a selected bone. Three lines answer the three
+   * questions the bone format keeps raising:
+   *
+   *   arc   how far it swings, and about which axis
+   *   axis  the hinge itself, through the midpoint
+   *   far   which half actually moves
+   *
+   * Without it you have to deploy to the field to find out whether a limb
+   * bends the way you meant.
+   */
+  _buildJointGizmo() {
+    const line = (color, count, width = 1) => {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+      const mat = new THREE.LineBasicMaterial({
+        color, transparent: true, opacity: 1, depthTest: false, linewidth: width,
+      });
+      const l = new THREE.Line(geo, mat);
+      l.frustumCulled = false;
+      l.renderOrder = 12;
+      return l;
+    };
+
+    this.jointArc = line(0x4fd2ff, 33);
+    this.jointAxis = line(0xffd166, 2);
+    this.jointFar = line(0x8effc9, 2);
+    this.jointGizmo = new THREE.Group();
+    this.jointGizmo.add(this.jointArc, this.jointAxis, this.jointFar);
+    this.jointGizmo.visible = false;
+    this.scene.add(this.jointGizmo);
+  }
+
+  /** Point the joint read-out at whatever single bone is selected. */
+  _syncJointGizmo() {
+    const parts = this.selectedParts();
+    const bone = parts.length === 1 && parts[0].kind === 'bone' ? parts[0] : null;
+    const node = bone ? this.rig.nodes.get(bone.id) : null;
+    if (!node) {
+      this.jointGizmo.visible = false;
+      if (this.jointGizmo.parent !== this.scene) this.scene.add(this.jointGizmo);
+      return;
+    }
+
+    // Ride the bone's own group, so it tracks the machine for free.
+    if (this.jointGizmo.parent !== node.group) node.group.add(this.jointGizmo);
+    this.jointGizmo.visible = true;
+    this.jointGizmo.position.set(0, 0, 0);
+    this.jointGizmo.quaternion.identity();
+
+    const L = bone.length;
+    const mid = L / 2;
+    const r = Math.max(0.42, L * 0.5);
+    const axis = this._swingAxis(node);
+    const lim = THREE.MathUtils.degToRad(
+      bone.custom && bone.boneType === 'custom' && (bone.custom.wave === 'saw')
+        ? 180 : Math.min(179, bone.limit),
+    );
+
+    const arc = this.jointArc.geometry.attributes.position;
+    const n = arc.count - 1;
+    for (let i = 0; i <= n; i++) {
+      const t = -lim + (2 * lim * i) / n;
+      _v.set(0, r, 0).applyQuaternion(_q.setFromAxisAngle(axis, t));
+      arc.setXYZ(i, _v.x, _v.y + mid, _v.z);
+    }
+    arc.needsUpdate = true;
+
+    const ax = this.jointAxis.geometry.attributes.position;
+    _v.copy(axis).multiplyScalar(r * 0.75);
+    ax.setXYZ(0, -_v.x, mid - _v.y, -_v.z);
+    ax.setXYZ(1, _v.x, mid + _v.y, _v.z);
+    ax.needsUpdate = true;
+
+    const far = this.jointFar.geometry.attributes.position;
+    far.setXYZ(0, 0, mid, 0);
+    far.setXYZ(1, 0, L, 0);
+    far.needsUpdate = true;
+  }
+
+  /** The axis this bone actually swings about, matching the animator. */
+  _swingAxis(node) {
+    if (node.part.boneType === 'custom') {
+      const a = node.part.custom?.axis;
+      if (a === 'y') return node.axisTwist ?? UP_VEC;
+      if (a === 'z') return node.axisLift ?? UP_VEC;
+    }
+    return node.axisStride ?? new THREE.Vector3(1, 0, 0);
   }
 
   _buildGizmo() {
@@ -381,6 +483,13 @@ export class EditorScene {
       out.scale.set(r * 3.4, L * 1.02, r * 3.4);
       out.position.copy(node.group.localToWorld(_v.set(0, L / 2, 0)));
       out.quaternion.copy(node.group.getWorldQuaternion(_q));
+    } else if (part.kind === 'equip') {
+      // A plate's box hugs the slab, and sits on the surface like the slab does.
+      const d = part.size;
+      out.scale.set(d * 1.08, EQUIP_THICKNESS * 1.6, d * 1.08);
+      node.group.updateMatrixWorld(true);
+      out.position.copy(node.group.localToWorld(_v.set(0, EQUIP_THICKNESS / 2, 0)));
+      out.quaternion.copy(node.group.getWorldQuaternion(_q));
     } else {
       const [sx, sy, sz] = part.size;
       out.scale.set(sx * 1.04, sy * 1.04, sz * 1.04);
@@ -403,6 +512,7 @@ export class EditorScene {
     if (!ids.length) {
       this.gizmo.detach();
       this._syncLinkLines();
+      this._syncJointGizmo();
       return;
     }
 
@@ -429,6 +539,7 @@ export class EditorScene {
     // Last: _syncLinkLines reuses the shared temporaries the centroid was
     // accumulated in, so it must not run before the pivot has been read out.
     this._syncLinkLines();
+    this._syncJointGizmo();
   }
 
   /** Draw a line from each selected part to whatever it is connected to. */
@@ -721,6 +832,94 @@ export class EditorScene {
     return true;
   }
 
+  /** Swap the fitted plate for another type, in place. */
+  setEquipTypeSelected(type) {
+    const id = this.selected;
+    const part = this.assembly.get(id);
+    if (!part || part.kind !== 'equip') return false;
+    this.onBeforeChange('装備変更');
+    if (!this.assembly.setEquipType(id, type)) {
+      this.onReject?.(`${EQUIP_META[type]?.label ?? type}は1枚しか付けられません`);
+      return false;
+    }
+    if (!this.rig.refreshEquip(id)) this.rebuild();
+    this.refreshStats();
+    this._syncSelectionVisuals();
+    return true;
+  }
+
+  setEquipSizeSelected(size) {
+    const id = this.selected;
+    const part = this.assembly.get(id);
+    if (!part || part.kind !== 'equip') return false;
+    this.onBeforeChange('装備の大きさ');
+    this.assembly.setEquipSize(id, size);
+    if (!this.rig.refreshEquip(id)) this.rebuild();
+    this.refreshStats();
+    this._syncSelectionVisuals();
+    return true;
+  }
+
+  /** Which way and how fast a ROLLING plate turns. */
+  setEquipSpinSelected(spin) {
+    const id = this.selected;
+    const part = this.assembly.get(id);
+    if (!part || part.kind !== 'equip' || !part.spin) return false;
+    this.onBeforeChange('回転設定');
+    this.assembly.setEquipSpin(id, spin);
+    this.refreshStats();
+    return true;
+  }
+
+  /** Bullet colour, for the plates whose meta allows it. */
+  setBulletColorSelected(hex) {
+    let changed = false;
+    for (const p of this.selectedParts()) {
+      if (p.kind !== 'equip') continue;
+      if (!changed) this.onBeforeChange('弾の色');
+      if (this.assembly.setBulletColor(p.id, hex)) {
+        this.rig.refreshEquip(p.id);
+        changed = true;
+      }
+    }
+    if (changed) this.onSelect(this.selectedParts());
+    return changed;
+  }
+
+  /**
+   * Chain another bone off the far tip of the selected one. Building a leg
+   * used to mean clicking exactly on the tip of a rod that is often a few
+   * pixels wide.
+   */
+  addBoneOnTipSelected(opts = {}) {
+    const id = this.selected;
+    const bone = this.assembly.get(id);
+    if (!bone || bone.kind !== 'bone') return false;
+    this.onBeforeChange('ボーン追加');
+    const made = this.assembly.addBoneOnTip(id, opts.boneType ?? bone.boneType, {
+      ...this.boneOpts, ...opts,
+    });
+    if (!made) return false;
+    this.rebuild();
+    this.select(made.id);
+    return true;
+  }
+
+  /**
+   * Slide a bone's child along the shaft. `t` is 0..1 of the length, so the
+   * caller can say "the tip" or "the root" without knowing the number —
+   * which half a child rides on is otherwise a fiddly drag.
+   */
+  slideAlongBone(t) {
+    const id = this.selected;
+    const part = this.assembly.get(id);
+    const parent = part?.parent ? this.assembly.get(part.parent) : null;
+    if (!part || parent?.kind !== 'bone') return false;
+    const pos = [...part.mount.pos];
+    pos[1] = parent.length * Math.min(1, Math.max(0, t));
+    return this.setMountSelected({ pos });
+  }
+
   setBoneShapeSelected(shape) {
     const id = this.selected;
     if (!id) return false;
@@ -769,6 +968,10 @@ export class EditorScene {
         copy = this.assembly.addBone(p.parent, mount, p.boneType, {
           length: p.length, radius: p.radius, limit: p.limit, invert: p.invert,
           custom: { ...p.custom },
+        });
+      } else if (p.kind === 'equip') {
+        copy = this.assembly.addEquip(p.parent, mount, p.equipType, {
+          size: p.size, bulletColor: p.bulletColor,
         });
       } else {
         copy = this.assembly.addBlock(p.parent, mount, this.colorIndex, { size: [...p.size] });
@@ -845,8 +1048,14 @@ export class EditorScene {
   /** Where would a new part land, given the current ray? */
   proposePlacement() {
     const forBone = BONE_TOOLS.has(this.tool);
+    const forEquip = this.tool === TOOL.EQUIP;
+    // A plate is placed like a bone — by its facing, not by its bulk — so it
+    // takes no room in the flush-mount calculation.
+    const alignY = forBone || forEquip;
+    const d = this.newEquipSize;
     const size = forBone ? [0.4, 0.4, 0.4]
-      : (this.tool === TOOL.STAMP ? this.stampSize : this.newBlockSize);
+      : forEquip ? [d, EQUIP_THICKNESS, d]
+        : (this.tool === TOOL.STAMP ? this.stampSize : this.newBlockSize);
     const hits = _ray.intersectObjects(this.rig.pickables, false);
 
     if (hits.length) {
@@ -857,11 +1066,26 @@ export class EditorScene {
       if (!parent || !node) return null;
 
       if (parent.kind === 'bone') {
-        // thread it onto the shaft at the height that was clicked
         node.group.updateMatrixWorld(true);
         _v.copy(hit.point);
         node.group.worldToLocal(_v);
         const t = this._snapValue(THREE.MathUtils.clamp(_v.y, 0, parent.length));
+
+        if (forEquip) {
+          // A sticker on a rod sits on the SURFACE of the rod, facing out —
+          // not buried in the middle of it like a threaded block.
+          const rl = Math.hypot(_v.x, _v.z);
+          const nx = rl > 1e-5 ? _v.x / rl : 1;
+          const nz = rl > 1e-5 ? _v.z / rl : 0;
+          _q.setFromUnitVectors(UP_VEC, _v.set(nx, 0, nz));
+          return {
+            parentId,
+            mount: { pos: [nx * parent.radius, t, nz * parent.radius], rot: _q.toArray() },
+            size,
+          };
+        }
+
+        // thread it onto the shaft at the height that was clicked
         return {
           parentId,
           mount: { pos: [0, t, 0], rot: forBone ? alignYToFace(2) : [0, 0, 0, 1] },
@@ -877,8 +1101,8 @@ export class EditorScene {
       return {
         parentId,
         mount: {
-          pos: faceAnchor(parent, face, forBone ? [0, 0, 0] : size),
-          rot: forBone ? alignYToFace(face) : [0, 0, 0, 1],
+          pos: faceAnchor(parent, face, alignY ? [0, 0, 0] : size),
+          rot: alignY ? alignYToFace(face) : [0, 0, 0, 1],
         },
         size,
       };
@@ -932,6 +1156,9 @@ export class EditorScene {
       const L = this.boneOpts.length;
       this.ghost.scale.set(this.boneOpts.radius * 3, L, this.boneOpts.radius * 3);
       this.ghost.translateY(L / 2);
+    } else if (this.tool === TOOL.EQUIP) {
+      this.ghost.scale.fromArray(plan.size);
+      this.ghost.translateY(EQUIP_THICKNESS / 2);
     } else {
       this.ghost.scale.fromArray(plan.size);
     }
@@ -945,7 +1172,7 @@ export class EditorScene {
     this.hoverVoxel = null;
     const id = this.selected;
     const node = id ? this.rig.nodes.get(id) : null;
-    if (!node || node.part.kind === 'bone') return;
+    if (!node || !node.part.vox) return;
 
     const hits = _ray.intersectObject(node.mesh, false);
     if (!hits.length) return;
@@ -1013,7 +1240,7 @@ export class EditorScene {
   _applySculpt() {
     const id = this.selected;
     const node = id ? this.rig.nodes.get(id) : null;
-    if (!node || node.part.kind === 'bone' || !this.hoverVoxel) return;
+    if (!node || !node.part.vox || !this.hoverVoxel) return;
     const { x, y, z } = this.hoverVoxel;
     const vox = node.part.vox;
     const r = this.brushRadiusCells(vox);
@@ -1051,11 +1278,22 @@ export class EditorScene {
       const plan = this.pendingPlacement ?? this.proposePlacement();
       if (!plan) return;
       if (this.tool === TOOL.STAMP && !this.stampSource) return;
-      this.onBeforeChange(this.tool === TOOL.STAMP ? 'パーツ配置' : '配置');
+      if (this.tool === TOOL.EQUIP && !this.assembly.canAddEquip(this.equipType)) {
+        this.onReject?.(`${EQUIP_META[this.equipType].label}は1枚しか付けられません`);
+        return;
+      }
+      this.onBeforeChange(
+        this.tool === TOOL.STAMP ? 'パーツ配置'
+          : this.tool === TOOL.EQUIP ? '装備配置' : '配置',
+      );
 
       let added;
       if (this.tool === TOOL.STAMP) {
         added = this.assembly.graft(this.stampSource, plan.parentId, plan.mount);
+      } else if (this.tool === TOOL.EQUIP) {
+        added = this.assembly.addEquip(plan.parentId, plan.mount, this.equipType, {
+          size: this.newEquipSize,
+        });
       } else if (this.tool === TOOL.BLOCK) {
         added = this.assembly.addBlock(plan.parentId, plan.mount, this.colorIndex, { size: plan.size });
       } else {
@@ -1097,6 +1335,15 @@ export class EditorScene {
       if (twin) twin.custom = { ...part.custom };
       return twin;
     }
+    if (part.kind === 'equip') {
+      // A unique plate simply has no twin, which is the rule doing its job.
+      // A mirrored roller turns the other way, like a mirrored propeller.
+      return this.assembly.addEquip(part.parent, mount, part.equipType, {
+        size: part.size,
+        bulletColor: part.bulletColor,
+        spin: part.spin ? { dir: -part.spin.dir, rpm: part.spin.rpm } : null,
+      });
+    }
     const twin = this.assembly.addBlock(part.parent, mount, this.colorIndex, { size: [...part.size] });
     if (twin) twin.vox = part.vox.clone();
     return twin;
@@ -1133,6 +1380,8 @@ export class EditorScene {
 
     if (this.painting) this._applySculpt();
 
+    this.rig.updateRollers(dt);
+
     if (this.previewMotion && this.animator) {
       // Fake a walk so gaits can be judged without leaving the editor.
       const speed = 6.5;
@@ -1144,9 +1393,18 @@ export class EditorScene {
       });
       this.rig.root.position.y = this.groundOffset + this.animator.bodyBob;
     } else if (this.animator) {
-      // Idle: settle to rest so the silhouette is honest.
+      // Idle: settle to rest so the silhouette is honest — except that
+      // selecting a custom bone runs its motion, because every slider in
+      // that panel is meaningless until you can see what it does.
+      const previewCustom = this.selectedParts().some(
+        (p) => p.kind === 'bone' && p.boneType === 'custom',
+      );
       const k = 1 - Math.pow(0.001, dt);
-      for (const j of this.rig.joints) j.joint.quaternion.slerp(_q.identity(), k);
+      for (const j of this.rig.joints) {
+        if (previewCustom && j.part.boneType === 'custom') continue;
+        j.joint.quaternion.slerp(_q.identity(), k);
+      }
+      if (previewCustom) this.animator.updateCustomsOnly(dt);
       this.rig.root.position.y = this.groundOffset;
       this.rig.root.rotation.set(0, 0, 0);
     }
@@ -1163,6 +1421,10 @@ export class EditorScene {
   }
 
   dispose() {
+    for (const l of [this.jointArc, this.jointAxis, this.jointFar]) {
+      l.geometry.dispose();
+      l.material.dispose();
+    }
     this.canvas.removeEventListener('pointermove', this._move);
     this.canvas.removeEventListener('pointerdown', this._down);
     this.canvas.removeEventListener('contextmenu', this._context);

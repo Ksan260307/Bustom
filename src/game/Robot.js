@@ -4,6 +4,7 @@ import { computeStats } from '../core/Assembly.js';
 import { ZMFBody } from '../zmf/ZMFBody.js';
 import { Animator } from '../anim/Animator.js';
 import { clamp01, damp } from '../zmf/math.js';
+import { WeaponSystem } from './Weapons.js';
 
 // ============================================================
 //  Robot : assembly -> rig -> ZMF body -> animator, in one object.
@@ -11,30 +12,6 @@ import { clamp01, damp } from '../zmf/math.js';
 
 const _v = new THREE.Vector3();
 const _aim = new THREE.Vector3();
-
-/** Soft radial falloff. A Sprite with no map is a hard white square. */
-let _glowTexture = null;
-function glowTexture() {
-  if (_glowTexture) return _glowTexture;
-  // Headless (tests, tooling): no canvas, so the sprite just goes untextured.
-  if (typeof document === 'undefined') return null;
-  const size = 128;
-  const c = document.createElement('canvas');
-  if (!c.getContext) return null;
-  c.width = c.height = size;
-  const g = c.getContext('2d');
-  if (!g) return null;
-  const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  grad.addColorStop(0.0, 'rgba(255,255,255,1)');
-  grad.addColorStop(0.25, 'rgba(190,235,255,0.72)');
-  grad.addColorStop(0.6, 'rgba(120,200,255,0.18)');
-  grad.addColorStop(1.0, 'rgba(80,170,255,0)');
-  g.fillStyle = grad;
-  g.fillRect(0, 0, size, size);
-  _glowTexture = new THREE.CanvasTexture(c);
-  _glowTexture.colorSpace = THREE.SRGBColorSpace;
-  return _glowTexture;
-}
 
 export class Robot {
   /**
@@ -57,8 +34,10 @@ export class Robot {
     this.body = new ZMFBody(this.stats, world, { rideHeight });
     this.animator = new Animator(this.rig, this.stats);
 
-    this.hp = 100 + this.stats.blockCount * 8;
+    // Durability follows the chassis, then whatever the plates add to it.
+    this.hp = (100 + this.stats.blockCount * 8) * (1 + (this.stats.hpBonus ?? 0));
     this.maxHp = this.hp;
+    this.weapons = new WeaponSystem(this);
     this.alive = true;
     this.radius = Math.max(1.0, this.stats.extent * 0.8);
 
@@ -88,15 +67,11 @@ export class Robot {
     this.rig.root.add(plume);
     this.plume = plume;
 
-    const glowMat = new THREE.SpriteMaterial({
-      map: glowTexture(), color: 0xbfefff, transparent: true, opacity: 0,
-      blending: THREE.AdditiveBlending, depthWrite: false,
-    });
-    const glow = new THREE.Sprite(glowMat);
-    glow.scale.setScalar(0.5 * k);
-    glow.position.set(0, 0, -0.7 * k);
-    this.rig.root.add(glow);
-    this.glow = glow;
+    // There used to be a soft radial sprite here as well, sitting on the
+    // machine's origin. It read as "the core block is glowing", which is not
+    // what a thruster does — and now that BOOST plates throw their own flame,
+    // a second nondescript bloom in the middle of the chassis only muddied
+    // which parts were actually doing something. The plume is the exhaust.
   }
 
   setTarget(robot) {
@@ -151,21 +126,27 @@ export class Robot {
       jerk: b.inertia.jerkMag,
     });
 
+    this.rig.updateRollers(dt);
+
     // Bob and lean are visual carriage only — the physics body never moves.
     this.rig.root.position.set(0, this.animator.bodyBob, 0);
     this.rig.root.rotation.set(this.animator.bodyLean.x, 0, this.animator.bodyLean.y);
   }
 
   _updateFx(dt) {
+    // The boost flame belongs to the plates that produce it, not to the
+    // machine's general exhaust.
+    this.rig.setBoostGlow(this.body.boostOutput ?? 0, Math.sin(this.body.time * 47) * 0.5 + 0.5);
+
     const out = this.body.inertia.thrustOutput;
     const fwd = Math.max(0, this.body.inertia.spool.z);
     const amt = clamp01(out * 0.6 + fwd * 0.9);
-    const k = this.fxScale;
     this.plume.material.opacity = damp(this.plume.material.opacity, amt * 0.42, 0.05, dt);
     this.plume.scale.set(0.7 + amt * 0.4, 0.7 + amt * 0.4, 0.6 + amt * 1.4);
-    this.glow.material.opacity = damp(this.glow.material.opacity, amt * 0.38, 0.05, dt);
-    this.glow.scale.setScalar(k * (1.1 + amt * 2.2));
   }
+
+  /** Reload every magazine and drop the blades. Used on respawn. */
+  rearm() { this.weapons.reset(); return this; }
 
   damage(n) {
     this.hp = Math.max(0, this.hp - n);

@@ -24,6 +24,17 @@ export class Hud {
     this.lockProgress = 0;   // 0..1 acquisition animation
     this.lockPulse = 0;
     this.visible = true;
+
+    /** Seconds left on the "you just switched to X" banner. */
+    this.weaponFlash = 0;
+    this.weaponFlashLabel = '';
+  }
+
+  /** Call it when the player cycles the set: the name pops, then fades. */
+  flashWeapon(label) {
+    this.weaponFlashLabel = label;
+    this.weaponFlash = 1.1;
+    return this;
   }
 
   resize(w, h) {
@@ -60,12 +71,96 @@ export class Hud {
 
     this.lockProgress = damp(this.lockProgress, s.lock ? 1 : 0, s.lock ? 0.07 : 0.05, dt);
     this.lockPulse = (this.lockPulse + dt * 0.35) % 1;
+    this.weaponFlash = Math.max(0, this.weaponFlash - dt);
 
     this._drawSpeedLines(s, ctx);
     this._drawCandidates(s, ctx);
     if (s.lock) this._drawLock(s, ctx);
     this._drawCrosshair(s, ctx);
     this._drawTelemetry(s, ctx);
+    this._drawWeapons(s, ctx);
+  }
+
+  /**
+   * One row per fitted plate: name, magazine, and the reload creeping back.
+   * Drawn in each weapon's own bullet colour, so the row you are watching is
+   * the one whose tracers you can see.
+   */
+  _drawWeapons(s, ctx) {
+    const list = s.weapons ?? [];
+    if (!list.length) return;
+
+    const pad = 22;
+    const rowH = 20;
+    const x = pad;
+    const top = this.h - pad - 96 - list.length * rowH;
+    let y = top;
+
+    ctx.save();
+    ctx.font = '600 10px ui-monospace, Menlo, Consolas, monospace';
+    ctx.textAlign = 'left';
+
+    for (const w of list) {
+      const css = `#${w.color.toString(16).padStart(6, '0')}`;
+      // Only one plate is wired to the trigger; the rest are a menu.
+      const on = w.active;
+      const fade = on ? 1 : 0.42;
+
+      if (on) {
+        ctx.globalAlpha = 0.12;
+        ctx.fillStyle = css;
+        ctx.fillRect(x - 5, y - 13, 168, rowH - 2);
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = css;
+        ctx.fillText('\u25B8', x - 6, y);
+      }
+
+      ctx.globalAlpha = 0.9 * fade;
+      ctx.fillStyle = css;
+      ctx.beginPath();
+      ctx.arc(x + 8, y - 3, on ? 3.5 : 2.6, 0, TAU);
+      ctx.fill();
+
+      ctx.globalAlpha = (on ? 0.95 : 0.55) * 1;
+      ctx.fillStyle = '#dff0ff';
+      ctx.fillText(w.label, x + 18, y);
+
+      if (w.melee) {
+        ctx.globalAlpha = 0.45 * fade;
+        ctx.fillText('接触', x + 100, y);
+      } else if (w.reloading) {
+        // The bar IS the wait: no number, just the thing filling back up.
+        const bw = 62;
+        ctx.globalAlpha = 0.2 * fade;
+        ctx.fillStyle = '#dff0ff';
+        ctx.fillRect(x + 100, y - 7, bw, 5);
+        ctx.globalAlpha = 0.9 * fade;
+        ctx.fillStyle = css;
+        ctx.fillRect(x + 100, y - 7, bw * clamp01(w.reloadFrac), 5);
+      } else {
+        ctx.globalAlpha = 0.95 * fade;
+        ctx.fillStyle = w.ammo > 0 ? '#dff0ff' : '#ff8a5c';
+        ctx.fillText(`${w.ammo}`.padStart(2, ' '), x + 100, y);
+        ctx.globalAlpha = 0.4 * fade;
+        ctx.fillText(`/${w.max}`, x + 116, y);
+      }
+      y += rowH;
+    }
+
+    // ---- the switch banner, over the middle of the screen where the eyes are
+    if (this.weaponFlash > 0 && this.weaponFlashLabel) {
+      const a = clamp01(this.weaponFlash / 0.5);
+      ctx.globalAlpha = a * 0.9;
+      ctx.textAlign = 'center';
+      ctx.font = '700 15px ui-monospace, Menlo, Consolas, monospace';
+      ctx.fillStyle = '#dff0ff';
+      ctx.fillText(this.weaponFlashLabel, this.w / 2, this.h * 0.62);
+      ctx.globalAlpha = a * 0.4;
+      ctx.font = '600 9px ui-monospace, Menlo, Consolas, monospace';
+      ctx.fillText('WEAPON', this.w / 2, this.h * 0.62 - 16);
+    }
+
+    ctx.restore();
   }
 
   // ---------------------------------------------------------- reticle

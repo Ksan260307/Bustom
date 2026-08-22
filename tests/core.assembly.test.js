@@ -4,7 +4,11 @@ import {
   Assembly, computeStats, gaitFor, countLimbs, PRESETS,
   defaultMount, faceAnchor, boneAnchor, alignYToFace, _resetIds,
 } from '../src/core/Assembly.js';
-import { BONE, SIZE_MIN, SIZE_MAX, BONE_LENGTH_MAX, BONE_RADIUS_MAX } from '../src/core/constants.js';
+import {
+  BONE, SIZE_MIN, SIZE_MAX, BONE_LENGTH_MAX, BONE_RADIUS_MAX,
+  EQUIP, EQUIP_META, EQUIP_SIZE_MIN, EQUIP_SIZE_MAX, equipShape,
+  SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT,
+} from '../src/core/constants.js';
 import { STANDARD_COLORS } from '../src/core/Palette.js';
 
 let a;
@@ -350,6 +354,228 @@ describe('graft', () => {
   });
 });
 
+describe('equipment plates', () => {
+  it('sticks a plate on a face, lying flat with its facing outward', () => {
+    const e = a.addEquipOnFace(a.rootId, 2, EQUIP.BEAM);
+    expect(e.kind).toBe('equip');
+    expect(e.equipType).toBe(EQUIP.BEAM);
+    expect(e.parent).toBe(a.rootId);
+    expect(e.mount.pos, 'flush, with no bulk of its own').toEqual([0, 0.5, 0]);
+
+    // its local +Y is the face normal, so the slab lies ON the surface
+    const up = new THREE.Vector3(0, 1, 0)
+      .applyQuaternion(new THREE.Quaternion().fromArray(e.mount.rot));
+    expect(up.y).toBeCloseTo(1, 6);
+  });
+
+  it('every weapon is round and every system is square', () => {
+    for (const [type, meta] of Object.entries(EQUIP_META)) {
+      expect(equipShape(type), type).toBe(meta.category === 'weapon' ? 'round' : 'square');
+    }
+  });
+
+  it('clamps the plate size into the legal range', () => {
+    expect(a.addEquipOnFace(a.rootId, 2, EQUIP.BEAM, { size: 99 }).size).toBe(EQUIP_SIZE_MAX);
+    expect(a.addEquipOnFace(a.rootId, 3, EQUIP.BEAM, { size: -4 }).size).toBe(EQUIP_SIZE_MIN);
+  });
+
+  it('refuses an equip type it does not know', () => {
+    expect(a.addEquipOnFace(a.rootId, 2, 'railgun')).toBeNull();
+  });
+
+  it('gives recolourable weapons a bullet colour and the rest none', () => {
+    expect(a.addEquipOnFace(a.rootId, 2, EQUIP.BEAM).bulletColor).toBe(EQUIP_META.beam.bullet);
+    expect(a.addEquipOnFace(a.rootId, 3, EQUIP.BLADE).bulletColor).toBeNull();
+    expect(a.addEquipOnFace(a.rootId, 0, EQUIP.MISSILE).bulletColor).toBeNull();
+  });
+
+  it('only recolours the weapons whose table says it may', () => {
+    const beam = a.addEquipOnFace(a.rootId, 2, EQUIP.BEAM);
+    const blade = a.addEquipOnFace(a.rootId, 3, EQUIP.BLADE);
+    expect(a.setBulletColor(beam.id, 0x6bff6b)).toBe(true);
+    expect(beam.bulletColor).toBe(0x6bff6b);
+    expect(a.setBulletColor(blade.id, 0x6bff6b)).toBe(false);
+    expect(blade.bulletColor).toBeNull();
+    expect(a.setBulletColor(a.rootId, 0x6bff6b), 'a block has no bullets').toBe(false);
+  });
+
+  it('swaps type in place, and drops the colour when the new type cannot use it', () => {
+    const e = a.addEquipOnFace(a.rootId, 2, EQUIP.BEAM, { bulletColor: 0x123456 });
+    expect(a.setEquipType(e.id, EQUIP.BLADE)).toBe(true);
+    expect(e.equipType).toBe(EQUIP.BLADE);
+    expect(e.bulletColor).toBeNull();
+    a.setEquipType(e.id, EQUIP.SHOT);
+    expect(e.bulletColor).toBe(EQUIP_META.shot.bullet);
+  });
+
+  it('resizes a plate but leaves it alone through setSize', () => {
+    const e = a.addEquipOnFace(a.rootId, 2, EQUIP.BEAM);
+    expect(a.setEquipSize(e.id, 1.2)).toBe(true);
+    expect(e.size).toBeCloseTo(1.2, 6);
+    expect(a.setSize(e.id, [2, 2, 2]), 'a plate is not a box').toBe(false);
+    expect(e.size).toBeCloseTo(1.2, 6);
+  });
+
+  it('allows exactly one gravity plate', () => {
+    expect(a.canAddEquip(EQUIP.GRAVITY)).toBe(true);
+    expect(a.addEquipOnFace(a.rootId, 2, EQUIP.GRAVITY)).toBeTruthy();
+    expect(a.canAddEquip(EQUIP.GRAVITY)).toBe(false);
+    expect(a.addEquipOnFace(a.rootId, 3, EQUIP.GRAVITY)).toBeNull();
+    expect(a.countEquip(EQUIP.GRAVITY)).toBe(1);
+
+    // and you cannot sneak a second one in by swapping a type either
+    const other = a.addEquipOnFace(a.rootId, 0, EQUIP.BOOST);
+    expect(a.setEquipType(other.id, EQUIP.GRAVITY)).toBe(false);
+    expect(other.equipType).toBe(EQUIP.BOOST);
+  });
+
+  it('stacks as many boosts as you like', () => {
+    for (let i = 0; i < 4; i++) expect(a.addEquipOnFace(a.rootId, i, EQUIP.BOOST)).toBeTruthy();
+    expect(a.countEquip(EQUIP.BOOST)).toBe(4);
+  });
+
+  it('lists what is fitted, in tree order', () => {
+    a.addEquipOnFace(a.rootId, 2, EQUIP.BEAM);
+    const b = a.addBlockOnFace(a.rootId, 4);
+    a.addEquipOnFace(b.id, 4, EQUIP.GATLING);
+    expect(a.equips().map((e) => e.equipType)).toEqual([EQUIP.BEAM, EQUIP.GATLING]);
+  });
+
+  it('has no voxels, and never trips the colour walks', () => {
+    a.addEquipOnFace(a.rootId, 2, EQUIP.BEAM);
+    const e = a.equips()[0];
+    expect(e.vox).toBe(undefined);
+    expect(() => a.usedColors()).not.toThrow();
+    expect(() => a.prunePalette()).not.toThrow();
+    expect(() => a.setVoxResolution(16)).not.toThrow();
+  });
+
+  it('round-trips through JSON', () => {
+    a.addEquipOnFace(a.rootId, 2, EQUIP.SHOT, { size: 1.1, bulletColor: 0x6bff6b });
+    a.addEquipOnFace(a.rootId, 3, EQUIP.GRAVITY);
+    const copy = Assembly.fromJSON(JSON.parse(JSON.stringify(a.toJSON())));
+    const [shot, grav] = copy.equips();
+    expect(shot.equipType).toBe(EQUIP.SHOT);
+    expect(shot.size).toBeCloseTo(1.1, 6);
+    expect(shot.bulletColor).toBe(0x6bff6b);
+    expect(grav.equipType).toBe(EQUIP.GRAVITY);
+    expect(grav.bulletColor).toBeNull();
+  });
+
+  it('a document naming an unknown plate loads as something sane', () => {
+    a.addEquipOnFace(a.rootId, 2, EQUIP.BEAM);
+    const json = a.toJSON();
+    json.parts.find((x) => x.kind === 'equip').equipType = 'plasma-cannon-9000';
+    const copy = Assembly.fromJSON(JSON.parse(JSON.stringify(json)));
+    expect(copy.equips()[0].equipType).toBe(EQUIP.BEAM);
+  });
+
+  it('travels through extract and graft with the plate intact', () => {
+    const arm = a.addBlockOnFace(a.rootId, 0);
+    a.addEquipOnFace(arm.id, 2, EQUIP.GATLING, { size: 0.9, bulletColor: 0x6bff6b });
+
+    const doc = a.extract(arm.id);
+    expect(doc.equips()).toHaveLength(1);
+
+    const copy = a.graft(doc, a.rootId, { pos: [0, 2, 0] });
+    const grafted = a.get(copy.children[0]);
+    expect(grafted.kind).toBe('equip');
+    expect(grafted.equipType).toBe(EQUIP.GATLING);
+    expect(grafted.size).toBeCloseTo(0.9, 6);
+    expect(grafted.bulletColor).toBe(0x6bff6b);
+  });
+
+  it('grafting a unique plate the machine already carries drops it', () => {
+    const pod = a.addBlockOnFace(a.rootId, 0);
+    a.addEquipOnFace(pod.id, 2, EQUIP.GRAVITY);
+    const doc = a.extract(pod.id);
+
+    const copy = a.graft(doc, a.rootId, { pos: [0, 2, 0] });
+    expect(copy, 'the block still lands').toBeTruthy();
+    expect(copy.children, 'but without a second gravity plate').toHaveLength(0);
+    expect(a.countEquip(EQUIP.GRAVITY)).toBe(1);
+  });
+});
+
+describe('the rolling plate', () => {
+  it('comes with a direction and a speed; the others carry none', () => {
+    const r = a.addEquipOnFace(a.rootId, 2, EQUIP.ROLLING);
+    expect(r.spin).toEqual({ dir: 1, rpm: EQUIP_META.rolling.rpm });
+    expect(a.addEquipOnFace(a.rootId, 3, EQUIP.BOOST).spin).toBeNull();
+    expect(a.addEquipOnFace(a.rootId, 0, EQUIP.BEAM).spin).toBeNull();
+  });
+
+  it('takes the direction and speed it is given, within reason', () => {
+    const r = a.addEquipOnFace(a.rootId, 2, EQUIP.ROLLING, { spin: { dir: -1, rpm: 90 } });
+    expect(r.spin).toEqual({ dir: -1, rpm: 90 });
+
+    a.setEquipSpin(r.id, { rpm: 99999 });
+    expect(r.spin.rpm).toBe(SPIN_RPM_MAX);
+    a.setEquipSpin(r.id, { rpm: 0 });
+    expect(r.spin.rpm).toBe(SPIN_RPM_MIN);
+    a.setEquipSpin(r.id, { dir: 0 });
+    expect(r.spin.dir, 'there is no standing still').toBe(1);
+  });
+
+  it('refuses a spin on a plate that does not turn', () => {
+    const b = a.addEquipOnFace(a.rootId, 2, EQUIP.BOOST);
+    expect(a.setEquipSpin(b.id, { rpm: 200 })).toBe(false);
+    expect(a.setEquipSpin(a.rootId, { rpm: 200 })).toBe(false);
+  });
+
+  it('gains its spin when swapped in, and loses it when swapped out', () => {
+    const e = a.addEquipOnFace(a.rootId, 2, EQUIP.BOOST);
+    a.setEquipType(e.id, EQUIP.ROLLING);
+    expect(e.spin).toEqual({ dir: 1, rpm: EQUIP_META.rolling.rpm });
+    a.setEquipType(e.id, EQUIP.GRAVITY);
+    expect(e.spin).toBeNull();
+  });
+
+  it('is a system plate, so it is square and has no bullets', () => {
+    expect(equipShape(EQUIP.ROLLING)).toBe('square');
+    expect(EQUIP_META.rolling.category).toBe('system');
+    expect(a.addEquipOnFace(a.rootId, 2, EQUIP.ROLLING).bulletColor).toBeNull();
+  });
+
+  it('round-trips, and survives a nonsense saved spin', () => {
+    a.addEquipOnFace(a.rootId, 2, EQUIP.ROLLING, { spin: { dir: -1, rpm: 150 } });
+    const json = a.toJSON();
+    expect(Assembly.fromJSON(JSON.parse(JSON.stringify(json))).equips()[0].spin)
+      .toEqual({ dir: -1, rpm: 150 });
+
+    json.parts.find((x) => x.kind === 'equip').spin = { dir: 'left', rpm: 'fast' };
+    const broken = Assembly.fromJSON(JSON.parse(JSON.stringify(json)));
+    expect(broken.equips()[0].spin.dir).toBe(1);
+    expect(Number.isFinite(broken.equips()[0].spin.rpm)).toBe(true);
+  });
+
+  it('carries its spin through extract and graft', () => {
+    const pod = a.addBlockOnFace(a.rootId, 0);
+    a.addEquipOnFace(pod.id, 2, EQUIP.ROLLING, { spin: { dir: -1, rpm: 240 } });
+    const copy = a.graft(a.extract(pod.id), a.rootId, { pos: [0, 2, 0] });
+    expect(a.get(copy.children[0]).spin).toEqual({ dir: -1, rpm: 240 });
+  });
+});
+
+describe('custom bone defaults', () => {
+  it('a new custom bone has every knob the panel expects', () => {
+    const n = a.addBoneOnFace(a.rootId, 2, BONE.CUSTOM);
+    expect(n.custom).toEqual(CUSTOM_DEFAULT);
+  });
+
+  it('an older save missing the new knobs gets them filled in', () => {
+    const n = a.addBoneOnFace(a.rootId, 2, BONE.CUSTOM);
+    const json = a.toJSON();
+    json.parts.find((x) => x.id === n.id).custom = { axis: 'z', amp: 45 };
+    const copy = Assembly.fromJSON(JSON.parse(JSON.stringify(json)));
+    const c = copy.get(n.id).custom;
+    expect(c.axis, 'what was saved is kept').toBe('z');
+    expect(c.amp).toBe(45);
+    expect(c.wave, 'what was missing is defaulted').toBe(CUSTOM_DEFAULT.wave);
+    expect(c.offset).toBe(0);
+  });
+});
+
 describe('sizing', () => {
   it('setSize snaps and rejects bones', () => {
     const b = a.addBlock(a.rootId, at(0, 1, 0));
@@ -436,7 +662,7 @@ describe('serialisation', () => {
   it('declares its format', () => {
     const json = a.toJSON();
     expect(json.format).toBe('brostom.assembly');
-    expect(json.version).toBe(3);
+    expect(json.version).toBe(4);
   });
 
   it('preserves a free-floating position through a save', () => {

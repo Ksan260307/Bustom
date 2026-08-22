@@ -76,7 +76,18 @@ export class ZMFBody {
     this.jumpPower = legs === 0 ? 6 : legs === 1 ? 15.5 : legs === 2 ? 12 : 9.5;
     this.groundSpeedCap = 8 + legs * 2.2 + stats.agility * 9;
     this.airSpeedCap = 16 + stats.agility * 24;
-    this.dashSpeed = 11 + stats.agility * 11;
+    // BOOST plates make a dash bite harder. They stack, deliberately gently.
+    this.dashSpeed = (11 + stats.agility * 11) * (1 + (stats.dashBonus ?? 0));
+    /**
+     * The boost thruster is a fitted part, not a birthright: a machine with
+     * no BOOST plate has nothing to light.
+     */
+    this.canBoost = (stats.boostPlates ?? 0) > 0;
+    this.boosting = false;
+    /** 0..1 smoothed, for the flare on the plates. */
+    this.boostOutput = 0;
+    /** A GRAVITY plate trades sustained flight for durability. */
+    this.noFly = !!stats.noFly;
   }
 
   reset(position = new THREE.Vector3(0, this.rideHeight, 0)) {
@@ -94,6 +105,8 @@ export class ZMFBody {
   get speed() { return this.inertia.velocity.length(); }
   get grounded() { return this.env.grounded; }
   get forward() { return this.angular.forward; }
+  /** Where the machine is aiming, which on the ground is not where it faces. */
+  get aimForward() { return this.angular.aimForward; }
 
   setTarget(t) {
     if (t !== this.target) this.assist.estimator.reset();
@@ -129,11 +142,15 @@ export class ZMFBody {
     this.space.update(this.position, dt);
 
     // ---------------------------------------------- flight commitment
-    const wantsLift = input.isDown('up') && this.energy > 0.02;
+    // A gravity plate does not stop you jumping — it stops you HOVERING.
+    // The lift key still fires a legged machine off the floor; what it no
+    // longer does is buy back gravity and hold you up there.
+    const wantsLift = input.isDown('up') && this.energy > 0.02 && !this.noFly;
+    const wantsJump = input.isDown('up') && this.energy > 0.02;
     const wantsDown = input.isDown('down');
     const groundedNow = this.env.grounded;
 
-    if (wantsLift && groundedNow > 0.6 && this.jumpCooldown <= 0 && this.stats.legs > 0) {
+    if (wantsJump && groundedNow > 0.6 && this.jumpCooldown <= 0 && this.stats.legs > 0) {
       // A legged machine leaves the ground by pushing, not by thrusting.
       this.inertia.velocity.y = Math.max(this.inertia.velocity.y, this.jumpPower);
       this.jumpCooldown = 0.22;
@@ -151,7 +168,10 @@ export class ZMFBody {
     // ---------------------------------------------- energy
     // Decide whether the boost actually fires BEFORE billing for it: an empty
     // tank should not keep charging you for thrust you are not getting.
-    const boosting = input.isDown('boost') && this.energy > 0.04;
+    const boosting = this.canBoost && input.isDown('boost') && this.energy > 0.04;
+    this.boosting = boosting;
+    // Lights fast, dies slowly: a thruster that snaps off looks switched, not spent.
+    this.boostOutput = damp(this.boostOutput, boosting ? 1 : 0, boosting ? 0.035 : 0.09, dt);
     const burn = this.hover * 0.30 + this.inertia.thrustOutput * 0.11 + (boosting ? 0.4 : 0);
     const regen = groundedNow > 0.5 ? 0.55 : 0.10;
     this.energy = clamp01(this.energy + (regen - burn) * dt);
@@ -328,6 +348,8 @@ export class ZMFBody {
       closing: this.assist.closingRate,
       frameLock: this.space.blend,
       dash: this.dashFlash,
+      boost: this.boostOutput,
+      canBoost: this.canBoost,
       relief: this.inertia.approachRelief ?? 0,
       impact: this.env.impactImpulse,
     };
