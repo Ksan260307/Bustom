@@ -173,6 +173,12 @@ export class Debris {
     return this;
   }
 
+  /**
+   * A flash on its own, with no wreck behind it — what a grenade leaves.
+   * Same effect the destruction burst uses, so explosions all read alike.
+   */
+  blast(at, scale = 1) { return this._blast(at, scale); }
+
   _blast(at, scale) {
     const b = this.blasts.find((x) => x.life <= 0) ?? this.blasts[0];
     b.life = 0.55;

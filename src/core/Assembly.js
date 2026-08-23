@@ -3,10 +3,12 @@ import {
   BONE, BONE_GAUGE, FACE_NORMAL, FACE_AXIS, DEFAULT_VOX, snapSize,
   BONE_LENGTH_MIN, BONE_LENGTH_MAX, BONE_RADIUS_MIN, BONE_RADIUS_MAX,
   EQUIP, EQUIP_META, EQUIP_SIZE_DEFAULT, snapEquipSize,
+  CIRCLE_RADIUS_DEFAULT, snapCircleRadius,
   SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, SIZE_STEP, SIZE_MAX,
   BONE_GAIN_MAX, BONE_LAG_MAX, BONE_MOTION_DEFAULT,
 } from './constants.js';
 import { VoxelBlock } from './VoxelBlock.js';
+import { SHAPE, SHAPE_DEFAULT, isShape } from './Shapes.js';
 import { Palette } from './Palette.js';
 
 // ============================================================
@@ -113,6 +115,7 @@ export class Assembly {
       mount: null,
       children: [],
       size: [1, 1, 1],
+      shape: SHAPE_DEFAULT,
       vox: new VoxelBlock(a.voxRes, colorIndex),
       label: 'PART',
     };
@@ -132,7 +135,8 @@ export class Assembly {
       mount: null,
       children: [],
       size: [1, 1, 1],
-      vox: new VoxelBlock(this.voxRes, 0).bevel(0.22), // silver, chamfered
+      shape: SHAPE.BEVEL,
+      vox: new VoxelBlock(this.voxRes, 0).fillShape(SHAPE.BEVEL, 0), // silver, chamfered
       label: 'CORE',
     };
     this.parts.set(core.id, core);
@@ -155,9 +159,12 @@ export class Assembly {
       mount: defaultMount(mount),
       children: [],
       size: (opts.size ?? [1, 1, 1]).map(snapSize),
+      /** Which pattern the voxel grid was cut to. Sculpting works on top. */
+      shape: isShape(opts.shape) ? opts.shape : SHAPE_DEFAULT,
       vox: new VoxelBlock(this.voxRes, colorIndex),
       label: 'BLOCK',
     };
+    if (part.shape !== SHAPE_DEFAULT) part.vox.fillShape(part.shape, colorIndex);
     this.parts.set(part.id, part);
     parent.children.push(part.id);
     return part;
@@ -200,7 +207,7 @@ export class Assembly {
     const parent = this.parts.get(parentId);
     const meta = EQUIP_META[equipType];
     if (!parent || !meta) return null;
-    if (meta.unique && this.countEquip(equipType) >= 1) return null;
+    if (this.blockedBy(equipType)) return null;
 
     const part = {
       id: nextId('e'),
@@ -214,6 +221,10 @@ export class Assembly {
       bulletColor: meta.colorable ? (opts.bulletColor ?? meta.bullet) : null,
       /** Rotation, for plates that spin what they are stuck to. */
       spin: meta.spins ? normaliseSpin(opts.spin, meta) : null,
+      /** How wide a ring the plate turns, for the ones that turn a ring. */
+      ringRadius: meta.ring
+        ? snapCircleRadius(opts.ringRadius ?? CIRCLE_RADIUS_DEFAULT)
+        : null,
       label: 'EQUIP',
     };
     this.parts.set(part.id, part);
@@ -240,9 +251,23 @@ export class Assembly {
 
   /** Would adding this type be legal right now? */
   canAddEquip(type) {
+    return !this.blockedBy(type);
+  }
+
+  /**
+   * Why this plate cannot be fitted, as something worth showing the player.
+   * Some plates argue with each other — a machine cannot both refuse to
+   * leave the ground and never touch it — so saying which one is in the way
+   * beats silently doing nothing.
+   */
+  blockedBy(type) {
     const meta = EQUIP_META[type];
-    if (!meta) return false;
-    return !meta.unique || this.countEquip(type) < 1;
+    if (!meta) return 'unknown';
+    if (meta.unique && this.countEquip(type) >= 1) return 'unique';
+    for (const other of meta.conflicts ?? []) {
+      if (this.countEquip(other) > 0) return other;
+    }
+    return null;
   }
 
   /** Every equip plate, in stable tree order. */
@@ -257,10 +282,13 @@ export class Assembly {
     const meta = EQUIP_META[type];
     if (!part || part.kind !== 'equip' || !meta) return false;
     if (part.equipType === type) return true;
-    if (meta.unique && this.countEquip(type) >= 1) return false;
+    if (this.blockedBy(type)) return false;
     part.equipType = type;
     part.bulletColor = meta.colorable ? (part.bulletColor ?? meta.bullet) : null;
     part.spin = meta.spins ? normaliseSpin(part.spin, meta) : null;
+    part.ringRadius = meta.ring
+      ? snapCircleRadius(part.ringRadius ?? CIRCLE_RADIUS_DEFAULT)
+      : null;
     return true;
   }
 
@@ -281,6 +309,14 @@ export class Assembly {
   }
 
   /** Only bites on plates whose meta says they may be recoloured. */
+  /** How wide a ring a CIRCLE plate turns. */
+  setEquipRing(id, radius) {
+    const part = this.parts.get(id);
+    if (!part || part.kind !== 'equip' || !EQUIP_META[part.equipType]?.ring) return false;
+    part.ringRadius = snapCircleRadius(Number(radius) || CIRCLE_RADIUS_DEFAULT);
+    return true;
+  }
+
   setBulletColor(id, hex) {
     const part = this.parts.get(id);
     if (!part || part.kind !== 'equip') return false;
@@ -458,6 +494,21 @@ export class Assembly {
     return true;
   }
 
+  /**
+   * Re-cut a block to a named shape.
+   *
+   * This REPLACES the contents: a shape is the block's material, not a
+   * modifier laid over it, so anything carved here goes with it. That is
+   * worth one undo step rather than a confusing partial merge.
+   */
+  setBlockShape(id, shape, colorIndex = null) {
+    const part = this.parts.get(id);
+    if (!part || !part.vox || !isShape(shape)) return false;
+    part.shape = shape;
+    part.vox.fillShape(shape, colorIndex ?? part.vox.mainColor());
+    return true;
+  }
+
   /** How much of its attribute's motion a bone takes, and when. */
   setBoneMotion(id, { gain, lag } = {}) {
     const part = this.parts.get(id);
@@ -471,7 +522,18 @@ export class Assembly {
   setVoxResolution(n) {
     if (this.voxRes === n) return false;
     this.voxRes = n;
-    this.walk((p) => { if (p.vox) p.vox.setResolution(n, true); });
+    this.walk((p) => {
+      if (!p.vox) return;
+      // A block nobody has carved is re-CUT at the new resolution rather than
+      // resampled: resampling a sphere just enlarges its existing steps,
+      // where re-cutting actually makes it rounder, which is the whole point
+      // of turning the resolution up.
+      const shape = p.shape ?? SHAPE_DEFAULT;
+      const pristine = p.vox.isPristine(shape);
+      const colour = pristine ? p.vox.mainColor() : 0;
+      p.vox.setResolution(n, !pristine);
+      if (pristine) p.vox.fillShape(shape, colour);
+    });
     return true;
   }
 
@@ -516,10 +578,11 @@ export class Assembly {
       } else if (p.kind === 'equip') {
         Object.assign(copy, {
           equipType: p.equipType, size: p.size, bulletColor: p.bulletColor,
-          spin: p.spin ? { ...p.spin } : null,
+          spin: p.spin ? { ...p.spin } : null, ringRadius: p.ringRadius,
         });
       } else {
         copy.size = [...p.size];
+        copy.shape = p.shape ?? SHAPE_DEFAULT;
         copy.vox = p.vox.clone();
         const remap = new Map();
         for (const c of copy.vox.usedColors()) remap.set(c, mapColor(c));
@@ -576,9 +639,12 @@ export class Assembly {
         // than quietly becoming a second one.
         copy = this.addEquip(destParent, m, p.equipType, {
           size: p.size, bulletColor: p.bulletColor, spin: p.spin,
+          ringRadius: p.ringRadius,
         });
       } else {
-        copy = this.addBlock(destParent, m, 0, { size: [...p.size] });
+        copy = this.addBlock(destParent, m, 0, {
+          size: [...p.size], shape: p.shape ?? SHAPE_DEFAULT,
+        });
         copy.vox = p.vox.clone();
         // The destination document owns the resolution.
         if (copy.vox.n !== this.voxRes) copy.vox.setResolution(this.voxRes, true);
@@ -651,10 +717,11 @@ export class Assembly {
       } else if (p.kind === 'equip') {
         Object.assign(o, {
           equipType: p.equipType, size: p.size, bulletColor: p.bulletColor,
-          spin: p.spin,
+          spin: p.spin, ringRadius: p.ringRadius,
         });
       } else {
         o.size = p.size;
+        o.shape = p.shape ?? SHAPE_DEFAULT;
         o.vox = p.vox.encode();
       }
       parts.push(o);
@@ -701,8 +768,14 @@ export class Assembly {
           ? (o.bulletColor ?? EQUIP_META[type].bullet)
           : null;
         part.spin = EQUIP_META[type].spins ? normaliseSpin(o.spin, EQUIP_META[type]) : null;
+        part.ringRadius = EQUIP_META[type].ring
+          ? snapCircleRadius(o.ringRadius ?? CIRCLE_RADIUS_DEFAULT)
+          : null;
       } else {
         part.size = (o.size ?? [1, 1, 1]).map(snapSize);
+        // Builds saved before shapes existed are all boxes, which is what
+        // they were, so nothing needs re-cutting on load.
+        part.shape = isShape(o.shape) ? o.shape : SHAPE_DEFAULT;
         part.vox = VoxelBlock.decode(a.voxRes, o.vox);
       }
       part.mount = o.mount ? upgradeMount(o, raw) : null;
@@ -871,6 +944,8 @@ export function summariseEquipment(equips) {
   const weapons = [];
   let boostPlates = 0;
   let gravityPlates = 0;
+  let floatPlates = 0;
+  let circlePlates = 0;
 
   for (const p of equips) {
     const meta = EQUIP_META[p.equipType];
@@ -878,9 +953,15 @@ export function summariseEquipment(equips) {
     if (meta.category === 'weapon') { weapons.push(p); continue; }
     if (p.equipType === EQUIP.BOOST) boostPlates++;
     if (p.equipType === EQUIP.GRAVITY) gravityPlates++;
+    if (p.equipType === EQUIP.FLOAT) floatPlates++;
+    if (p.equipType === EQUIP.CIRCLE) circlePlates++;
   }
 
   const gravity = gravityPlates > 0;
+  // Gravity and float are mutually exclusive when fitted, but a build loaded
+  // from an older file could still carry both. Gravity is the one that says
+  // "you do not leave the ground", so it wins.
+  const floating = floatPlates > 0 && !gravity;
   return {
     equipCount: equips.length,
     weapons,
@@ -893,6 +974,10 @@ export function summariseEquipment(equips) {
     noFly: gravity,
     /** Extra durability, as a fraction of base HP. */
     hpBonus: gravity ? EQUIP_META[EQUIP.GRAVITY].hpBonus : 0,
+    floatPlates: Math.min(1, floatPlates),
+    circlePlates,
+    /** How far off the floor the machine rests. 0 means it stands on it. */
+    hoverHeight: floating ? EQUIP_META[EQUIP.FLOAT].hover : 0,
   };
 }
 

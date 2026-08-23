@@ -1,6 +1,6 @@
 import qrcode from 'qrcode-generator';
 import jsQR from 'jsqr';
-import { h } from './dom.js';
+import { h, resizable } from './dom.js';
 import { measureShare, decodeShare, isShareCode, QR_BYTE_LIMIT } from '../core/Share.js';
 
 // ============================================================
@@ -93,8 +93,7 @@ export class ShareDialog {
       onChange: (e) => this._readFile(e.target.files?.[0]),
     });
 
-    this.el = h('div', { id: 'sharedlg', class: 'hidden' },
-      h('div', { class: 'keybox sharebox' },
+    this.box = h('div', { class: 'keybox sharebox' },
         h('div', { class: 'keyhead' },
           h('div', { class: 'brand' }, 'SHARE', h('small', {}, 'QR CODE')),
           h('div', { class: 'spacer' }),
@@ -140,8 +139,9 @@ export class ShareDialog {
 
         this.noteEl,
         this.fileInput,
-      ),
     );
+    resizable(this.box, { key: 'sharedlg', edges: 'es', minW: 360, minH: 260, speed: 2 });
+    this.el = h('div', { id: 'sharedlg', class: 'hidden' }, this.box);
   }
 
   // ---------------------------------------------------------- open / close

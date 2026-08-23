@@ -34,6 +34,7 @@ export const DEFAULT_BINDINGS = {
   weaponNext: ['KeyC'],
   weaponPrev: ['KeyX'],
   lock: ['KeyF'],
+  scope: ['KeyQ'],
   cycleTarget: ['Tab'],
   layerA: ['Digit1'],
   layerB: ['Digit2'],
@@ -46,7 +47,7 @@ export const DEFAULT_BINDINGS = {
 /** How the key-config screen groups and names them. */
 export const ACTION_GROUPS = [
   { label: '移動', actions: ['forward', 'back', 'left', 'right', 'up', 'down', 'boost'] },
-  { label: '戦闘', actions: ['fire', 'weaponNext', 'weaponPrev', 'lock', 'cycleTarget'] },
+  { label: '戦闘', actions: ['fire', 'weaponNext', 'weaponPrev', 'scope', 'lock', 'cycleTarget'] },
   { label: 'カメラ', actions: ['camera'] },
   { label: 'システム', actions: ['layerA', 'layerB', 'layerC', 'reset'] },
 ];
@@ -62,6 +63,7 @@ export const ACTION_LABEL = {
   fire: '武器を撃つ',
   weaponNext: '武器を次に切替',
   weaponPrev: '武器を前に切替',
+  scope: 'スコープ (押しながら)',
   lock: 'ロックオン',
   cycleTarget: 'ターゲット切替',
   camera: 'カメラを回す (押しながら)',

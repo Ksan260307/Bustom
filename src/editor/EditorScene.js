@@ -4,6 +4,10 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { Rig, ridesFarHalf } from '../core/Rig.js';
 import { Assembly, computeStats, faceAnchor, alignYToFace } from '../core/Assembly.js';
 import { Animator } from '../anim/Animator.js';
+import { SHAPE_DEFAULT } from '../core/Shapes.js';
+import { makeSky, EDITOR_SKY } from '../game/Sky.js';
+import { PostFX } from '../game/PostFX.js';
+import { VoxelBlock } from '../core/VoxelBlock.js';
 import {
   SIZE_STEP, SIZE_MAX, EQUIP, EQUIP_META, EQUIP_THICKNESS, EQUIP_SIZE_DEFAULT,
 } from '../core/constants.js';
@@ -65,8 +69,10 @@ function dominantFace(n) {
 }
 
 export class EditorScene {
-  constructor({ renderer, canvas }) {
+  constructor({ renderer, canvas, post = null }) {
     this.renderer = renderer;
+    /** Shared with every other scene: one HDR target for the whole app. */
+    this.post = post;
     this.canvas = canvas;
 
     this.scene = new THREE.Scene();
@@ -86,6 +92,7 @@ export class EditorScene {
     /** Brush radius as a percentage of the block edge — resolution-independent. */
     this.brushPercent = 6;
     this.newBlockSize = [1, 1, 1];
+    this.newBlockShape = SHAPE_DEFAULT;
     this.boneOpts = { length: 3, radius: 0.22, limit: 70, invert: false };
 
     /** @type {Set<string>} every selected part id. */
@@ -134,7 +141,15 @@ export class EditorScene {
   // ---------------------------------------------------------- setup
 
   _buildEnvironment() {
-    const hemi = new THREE.HemisphereLight(0xbcd8ff, 0x3c4964, 1.55);
+    // The workbench gets the same kind of sky the arena has, a shade
+    // lighter. It is mostly here for what it does to the metal: bone shafts
+    // and plate accents have nothing to reflect without it.
+    this.sky = makeSky(this.renderer, EDITOR_SKY);
+    this.scene.background = this.sky.texture;
+    this.scene.backgroundIntensity = 0.4;
+    this.scene.environment = this.sky.environment;
+
+    const hemi = new THREE.HemisphereLight(0xbcd8ff, 0x3c4964, 0.8);
     this.scene.add(hemi);
 
     const key = new THREE.DirectionalLight(0xfff4e6, 2.15);
@@ -151,24 +166,38 @@ export class EditorScene {
     fill.position.set(-9, 4, 8);
     this.scene.add(fill);
 
-    const rim = new THREE.DirectionalLight(0xffd9a8, 0.65);
+    const rim = new THREE.DirectionalLight(0xffe0bd, 0.38);
     rim.position.set(2, 5, -12);
     this.scene.add(rim);
 
     const floor = new THREE.Mesh(
       new THREE.CircleGeometry(14, 64),
-      new THREE.MeshStandardMaterial({ color: 0x1b222e, roughness: 0.95, metalness: 0.05 }),
+      new THREE.MeshStandardMaterial({
+        color: 0x141b25, roughness: 0.58, metalness: 0.2, envMapIntensity: 0.55,
+      }),
     );
     floor.rotation.x = -Math.PI / 2;
     floor.position.y = -0.001;
     floor.receiveShadow = true;
     this.scene.add(floor);
 
-    const grid = new THREE.GridHelper(24, 24, 0x3d6f92, 0x232f3d);
+    const grid = new THREE.GridHelper(24, 24, 0x4f9fd0, 0x232f3d);
     grid.material.transparent = true;
     grid.material.opacity = 0.6;
     this.scene.add(grid);
     this.grid = grid;
+
+    // A lit ring at the edge of the pad, matching the arena's.
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(13.6, 14, 96),
+      new THREE.MeshBasicMaterial({
+        color: 0x5fc8ff, transparent: true, opacity: 0.5,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      }),
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.004;
+    this.scene.add(ring);
 
     // Front marker: the core's +Z is the direction of travel, and the
     // builder needs to see that at all times.
@@ -210,8 +239,11 @@ export class EditorScene {
     this.scene.add(this.linkLines);
 
     // Ghost of the part about to be placed.
+    this.ghostBox = new THREE.BoxGeometry(1, 1, 1);
+    /** Ghost bodies for each block shape, cut once and kept. */
+    this.ghostShapes = new Map();
     this.ghost = new THREE.Mesh(
-      new THREE.BoxGeometry(1, 1, 1),
+      this.ghostBox,
       new THREE.MeshBasicMaterial({
         color: 0x4fd2ff, transparent: true, opacity: 0.22, depthWrite: false,
       }),
@@ -1014,6 +1046,34 @@ export class EditorScene {
     return true;
   }
 
+  /**
+   * Re-cut every selected block to a shape. Bones and plates in the
+   * selection are simply skipped rather than refusing the whole action.
+   */
+  setBlockShapeSelected(shape) {
+    const ids = [...this.selection].filter((id) => this.assembly.get(id)?.vox);
+    if (!ids.length) return false;
+    this.onBeforeChange('形状');
+    let changed = false;
+    for (const id of ids) if (this.assembly.setBlockShape(id, shape)) changed = true;
+    if (!changed) return false;
+    for (const id of ids) this.rig.refreshBlock(id);
+    this.refreshStats();
+    return true;
+  }
+
+  /** How wide a ring the selected CIRCLE plate turns. */
+  setEquipRingSelected(radius) {
+    const id = this.selected;
+    if (!id) return false;
+    this.onBeforeChange('サークル半径');
+    if (!this.assembly.setEquipRing(id, radius)) return false;
+    // Which parts ride the ring is decided when the rig is built, so the
+    // scene graph has to be rebuilt for a new radius to mean anything.
+    this.rebuild();
+    return true;
+  }
+
   /** How much of its attribute's motion the selected bone takes, and when. */
   setBoneMotionSelected(motion) {
     const id = this.selected;
@@ -1069,7 +1129,9 @@ export class EditorScene {
           size: p.size, bulletColor: p.bulletColor,
         });
       } else {
-        copy = this.assembly.addBlock(p.parent, mount, this.colorIndex, { size: [...p.size] });
+        copy = this.assembly.addBlock(p.parent, mount, this.colorIndex, {
+          size: [...p.size], shape: p.shape,
+        });
         copy.vox = p.vox.clone();
       }
       if (copy) made.push(copy.id);
@@ -1257,8 +1319,35 @@ export class EditorScene {
     } else {
       this.ghost.scale.fromArray(plan.size);
     }
+    // The preview shows the SHAPE that is armed, not a stand-in box: picking
+    // "球" and being shown a cube is the cursor telling you the wrong thing.
+    this.ghost.geometry = this.tool === TOOL.BLOCK
+      ? this._ghostGeometry(this.newBlockShape)
+      : this.ghostBox;
     if (this.tool === TOOL.STAMP && !this.stampSource) this.ghost.visible = false;
     this.ghost.visible = true;
+  }
+
+  /**
+   * A ghost body for one shape, in the same centred unit cube the box ghost
+   * uses. Cut through the real VoxelBlock and mesher, so the preview is made
+   * the same way the block will be — but capped at 1/32, because nobody can
+   * see the difference through a translucent overlay and a 1/100 grid is a
+   * million cells to chew through on a mouse move.
+   */
+  _ghostGeometry(shape) {
+    if (!shape || shape === SHAPE_DEFAULT) return this.ghostBox;
+    const n = Math.min(32, this.assembly.voxRes);
+    const key = `${shape}:${n}`;
+    let geo = this.ghostShapes.get(key);
+    if (!geo) {
+      const vox = new VoxelBlock(n, 0).fillShape(shape, 0);
+      geo = vox.geometry(this.assembly.palette).clone();
+      geo.translate(-0.5, -0.5, -0.5);   // block meshes are 0..1; the ghost is centred
+      vox.disposeGeometry();
+      this.ghostShapes.set(key, geo);
+    }
+    return geo;
   }
 
   // ---------------------------------------------------------- sculpting
@@ -1432,9 +1521,15 @@ export class EditorScene {
       const plan = this.pendingPlacement ?? this.proposePlacement();
       if (!plan) return;
       if (this.tool === TOOL.STAMP && !this.stampSource) return;
-      if (this.tool === TOOL.EQUIP && !this.assembly.canAddEquip(this.equipType)) {
-        this.onReject?.(`${EQUIP_META[this.equipType].label}は1枚しか付けられません`);
-        return;
+      if (this.tool === TOOL.EQUIP) {
+        const blocked = this.assembly.blockedBy(this.equipType);
+        if (blocked) {
+          const label = EQUIP_META[this.equipType].label;
+          this.onReject?.(blocked === 'unique'
+            ? `${label}は1枚しか付けられません`
+            : `${label}は${EQUIP_META[blocked]?.label ?? blocked}と一緒には付けられません`);
+          return;
+        }
       }
       this.onBeforeChange(
         this.tool === TOOL.STAMP ? 'パーツ配置'
@@ -1449,7 +1544,9 @@ export class EditorScene {
           size: this.newEquipSize,
         });
       } else if (this.tool === TOOL.BLOCK) {
-        added = this.assembly.addBlock(plan.parentId, plan.mount, this.colorIndex, { size: plan.size });
+        added = this.assembly.addBlock(plan.parentId, plan.mount, this.colorIndex, {
+          size: plan.size, shape: this.newBlockShape,
+        });
       } else {
         added = this.assembly.addBone(plan.parentId, plan.mount, this.tool, { ...this.boneOpts });
       }
@@ -1498,7 +1595,9 @@ export class EditorScene {
         spin: part.spin ? { dir: -part.spin.dir, rpm: part.spin.rpm } : null,
       });
     }
-    const twin = this.assembly.addBlock(part.parent, mount, this.colorIndex, { size: [...part.size] });
+    const twin = this.assembly.addBlock(part.parent, mount, this.colorIndex, {
+      size: [...part.size], shape: part.shape,
+    });
     if (twin) twin.vox = part.vox.clone();
     return twin;
   }
@@ -1571,11 +1670,22 @@ export class EditorScene {
   }
 
   render() {
+    // The workbench gets bloom and the antialiased target too. It shows the
+    // same machines the arena does, and a plate that glows in the fight but
+    // not while you are fitting it is a plate you cannot judge.
+    if (this.post) {
+      this.post.set({ chroma: 0, lines: 0, noise: 0, flash: 0 }, 0);
+      this.post.render(this.scene, this.camera);
+      return;
+    }
     this.renderer.setRenderTarget(null);
     this.renderer.render(this.scene, this.camera);
   }
 
   dispose() {
+    for (const geo of this.ghostShapes.values()) geo.dispose();
+    this.ghostShapes.clear();
+    this.ghostBox.dispose();
     for (const l of [this.jointArc, this.jointAxis, this.jointFar]) {
       l.geometry.dispose();
       l.material.dispose();

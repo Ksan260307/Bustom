@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Animator, waveAt } from '../src/anim/Animator.js';
 import { Rig } from '../src/core/Rig.js';
 import { Assembly, PRESETS, computeStats } from '../src/core/Assembly.js';
-import { BONE } from '../src/core/constants.js';
+import { BONE, EQUIP } from '../src/core/constants.js';
 
 const IDENTITY = new THREE.Quaternion();
 
@@ -603,5 +603,152 @@ describe('a waist driven by the stride', () => {
     expect(a.gait).toBeCloseTo(b.gait, 6);
     expect(a.q.angleTo(b.q), 'and so they end up somewhere different')
       .toBeGreaterThan(0.02);
+  });
+});
+
+// ============================================================
+//  Legs with nothing under them
+// ============================================================
+
+describe('floating legs', () => {
+  /**
+   * The named preset, wearing a FLOAT plate. Any gravity plate comes off
+   * first — the two cannot share a machine, and a preset that already has
+   * one would otherwise silently refuse the float and test nothing.
+   */
+  const hovering = (preset) => {
+    const a = PRESETS[preset].build();
+    for (const e of a.equips()) if (e.equipType === EQUIP.GRAVITY) a.remove(e.id);
+    const plate = a.addEquipOnFace(a.core.id, 4, EQUIP.FLOAT, { size: 0.6 });
+    expect(plate, `${preset} took the float plate`).toBeTruthy();
+    const rigged = makeAnimator(a);
+    expect(rigged.stats.hoverHeight, `${preset} is actually floating`).toBeGreaterThan(0);
+    return rigged;
+  };
+
+  const grounded = (preset) => makeAnimator(PRESETS[preset].build());
+
+  /** Drive the machine at a fixed body-local velocity for a while. */
+  const fly = (rigged, { vz = 0, vx = 0, frames = 120, thrust = 0.4 } = {}) => {
+    const s = {
+      dt: 1 / 60, speed: Math.hypot(vx, vz), planarSpeed: Math.hypot(vx, vz),
+      grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(vx, 0, vz), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 0, thrust, jerk: 0,
+    };
+    for (let i = 0; i < frames; i++) rigged.animator.update(s);
+    return rigged;
+  };
+
+  /**
+   * Where the far END of a limb has ended up. The joint is the thing that
+   * rotates, so the tip has to be measured from inside it — the group above
+   * it never moves however the leg is posed.
+   */
+  const tipOf = (rigged, limb) => {
+    rigged.rig.root.updateMatrixWorld(true);
+    const node = limb.chain[limb.chain.length - 1];
+    return node.joint.localToWorld(new THREE.Vector3(0, node.part.length / 2, 0));
+  };
+
+  it('a hovering machine does not run a walk cycle', () => {
+    const air = fly(hovering('biped'), { vz: 9 });
+    const ground = fly(grounded('biped'), { vz: 9 });
+    expect(ground.animator.gaitFreq, 'the one on the floor is striding')
+      .toBeGreaterThan(1);
+    expect(air.animator.gaitFreq, 'the one in the air is not').toBeLessThan(0.05);
+    expect(Math.abs(air.animator.bodyBob), 'and it does not bob to a gait it has not got')
+      .toBeLessThan(1e-3);
+  });
+
+  it('one leg just hangs, and inertia decides where', () => {
+    const forward = fly(hovering('hopper'), { vz: 10 });
+    const backward = fly(hovering('hopper'), { vz: -10 });
+    const still = fly(hovering('hopper'), { vz: 0, thrust: 0 });
+
+    const z = (r) => tipOf(r, r.rig.limbs[0]).z - r.rig.root.position.z;
+    expect(z(forward), 'travelling forward, the foot trails behind')
+      .toBeLessThan(z(still));
+    expect(z(backward), 'and the other way when it goes backwards')
+      .toBeGreaterThan(z(still));
+  });
+
+  it('the swing lags rather than snapping to the new speed', () => {
+    // Cut the throttle and the leg keeps going for a moment. That delay is
+    // the whole reason it reads as hanging instead of being held.
+    const r = fly(hovering('hopper'), { vz: 12 });
+    const moving = r.animator.legSway.y;
+    fly(r, { vz: 0, frames: 2, thrust: 0 });
+    expect(Math.abs(r.animator.legSway.y), 'still swung, two frames later')
+      .toBeGreaterThan(Math.abs(moving) * 0.5);
+    fly(r, { vz: 0, frames: 200, thrust: 0 });
+    expect(Math.abs(r.animator.legSway.y), 'and settles eventually').toBeLessThan(0.05);
+  });
+
+  it('two legs hang together instead of stepping apart', () => {
+    const air = fly(hovering('biped'), { vz: 6 });
+    const walking = fly(grounded('biped'), { vz: 6 });
+
+    const spread = (r) => {
+      const [a, b] = r.rig.limbs.map((l) => tipOf(r, l).z);
+      return Math.abs(a - b);
+    };
+    expect(spread(air), 'both feet hang the same way').toBeLessThan(0.35);
+    expect(spread(walking), 'where a walk has one foot in front of the other')
+      .toBeGreaterThan(spread(air));
+  });
+
+  it('two legs trail behind the body rather than hanging straight down', () => {
+    const air = fly(hovering('biped'), { vz: 8 });
+    const still = fly(hovering('biped'), { vz: 0, thrust: 0 });
+    const z = (r) => r.rig.limbs.reduce((n, l) => n + tipOf(r, l).z, 0) / r.rig.limbs.length;
+    expect(z(air)).toBeLessThan(z(still) - 0.15);
+  });
+
+  it('four legs curl in under the body', () => {
+    const air = fly(hovering('multileg'), { vz: 4 });
+    const ground = fly(grounded('multileg'), { vz: 4 });
+
+    // How far out to the sides the feet sit: curled in means narrower.
+    const width = (r) => Math.max(...r.rig.limbs.map((l) => Math.abs(tipOf(r, l).x)));
+    expect(width(air), 'drawn in toward the centre line')
+      .toBeLessThan(width(ground) * 0.85);
+  });
+
+  it('front legs fold forward and back legs trail, so they do not all pile up', () => {
+    const r = fly(hovering('multileg'), { vz: 0, thrust: 0 });
+    r.rig.root.updateMatrixWorld(true);
+    // Split the way the animator does: a leg mounted at the middle counts
+    // as a front one, so a four-legger with a pair at z=0 still folds two
+    // one way and two the other.
+    const foreOf = (l) => Math.sign(Number(l.root.restPos.z.toFixed(3))) || 1;
+    const front = r.rig.limbs.filter((l) => foreOf(l) > 0);
+    const back = r.rig.limbs.filter((l) => foreOf(l) < 0);
+    expect(front.length, 'the preset really has legs at both ends').toBeGreaterThan(0);
+    expect(back.length).toBeGreaterThan(0);
+
+    const mid = (list) => list.reduce((n, l) => n + tipOf(r, l).z, 0) / list.length;
+    expect(mid(front), 'the front pair reaches forward of the back pair')
+      .toBeGreaterThan(mid(back));
+  });
+
+  it('a dead joint stays dead while floating too', () => {
+    const rigged = hovering('multileg');
+    for (const node of rigged.rig.joints) {
+      if (node.part.boneType === 'leg') node.part.gain = 0;
+    }
+    fly(rigged, { vz: 8 });
+    for (const node of rigged.rig.joints) {
+      if (node.part.boneType !== 'leg') continue;
+      expect(node.joint.quaternion.angleTo(IDENTITY), node.part.id).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('a machine with no legs at all is untouched by any of this', () => {
+    const a = Assembly.createDefault();
+    a.addEquipOnFace(a.core.id, 4, EQUIP.FLOAT);
+    const rigged = makeAnimator(a);
+    expect(() => fly(rigged, { vz: 8 })).not.toThrow();
+    expect(rigged.rig.limbs).toHaveLength(0);
   });
 });

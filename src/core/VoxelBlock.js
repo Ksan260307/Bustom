@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { DEFAULT_VOX, VOX_LEVELS, chunkSizeFor } from './constants.js';
+import { shapeMask } from './Shapes.js';
 
 // ============================================================
 //  VoxelBlock : the carveable interior of one block.
@@ -208,6 +209,76 @@ export class VoxelBlock {
     this.solid = 0;
     this.markAllDirty();
     return this;
+  }
+
+  /**
+   * Cut the grid to a named shape. Coordinates handed to the mask run -1..1
+   * on every axis, so the shape always fills the block's box however the box
+   * has been stretched.
+   *
+   * Whatever was sculpted here is gone: a shape IS the contents, not a
+   * modifier on top of them.
+   */
+  fillShape(shape, colorIndex = 0) {
+    const mask = shapeMask(shape);
+    const n = this.n;
+    const v = colorIndex + 1;
+    const step = 2 / n;
+    let solid = 0;
+    for (let z = 0; z < n; z++) {
+      const cz = (z + 0.5) * step - 1;
+      for (let y = 0; y < n; y++) {
+        const cy = (y + 0.5) * step - 1;
+        for (let x = 0; x < n; x++) {
+          const cx = (x + 0.5) * step - 1;
+          const on = mask(cx, cy, cz) ? 1 : 0;
+          this.data[x + y * n + z * n * n] = on ? v : 0;
+          solid += on;
+        }
+      }
+    }
+    // A shape too fine for the grid would leave an invisible block, which is
+    // a worse answer than ignoring the request.
+    if (solid === 0) return this.fill(colorIndex);
+    this.solid = solid;
+    this.markAllDirty();
+    return this;
+  }
+
+  /**
+   * Is this grid still exactly the shape it was cut to, untouched by hand?
+   *
+   * Colour is ignored: repainting a sphere leaves it a sphere. Only which
+   * cells are solid decides.
+   */
+  isPristine(shape) {
+    const mask = shapeMask(shape);
+    const n = this.n;
+    const step = 2 / n;
+    for (let z = 0; z < n; z++) {
+      const cz = (z + 0.5) * step - 1;
+      for (let y = 0; y < n; y++) {
+        const cy = (y + 0.5) * step - 1;
+        for (let x = 0; x < n; x++) {
+          const cx = (x + 0.5) * step - 1;
+          const want = mask(cx, cy, cz);
+          if (want !== !!this.data[x + y * n + z * n * n]) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  /** The palette index most of this block is made of. */
+  mainColor() {
+    const tally = new Map();
+    for (let i = 0; i < this.data.length; i++) {
+      const v = this.data[i];
+      if (v) tally.set(v, (tally.get(v) ?? 0) + 1);
+    }
+    let best = 1, bestN = 0;
+    for (const [v, count] of tally) if (count > bestN) { best = v; bestN = count; }
+    return best - 1;
   }
 
   /**

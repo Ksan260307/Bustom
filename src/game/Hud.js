@@ -37,6 +37,27 @@ export class Hud {
     return this;
   }
 
+  /**
+   * The right-hand diagnostics, as data. Pulled out of the draw call so the
+   * contents can be asked about without reading pixels back off a canvas.
+   * Takes the same state bag `draw` does, and nothing more: the HUD has
+   * never needed the whole machine to say what it is showing.
+   */
+  debugRows(s) {
+    const t = s.telemetry;
+    const rows = [
+      ['MASS', `${t.mass.toFixed(2)}`],
+      ['ZETA', `${t.zeta.toFixed(2)}`],
+      ['JERK', `${t.jerk.toFixed(0)}`],
+      ['ASSIST', `${(t.assist * 100).toFixed(0)}%`],
+      ['GROUND', `${(t.grounded * 100).toFixed(0)}%`],
+      ['FRAME', `${(t.frameLock * 100).toFixed(0)}%`],
+    ];
+    // A legless machine has no gait to report.
+    if ((s.legs ?? 0) > 0) rows.push(['GAIT', s.gait.toUpperCase()]);
+    return rows;
+  }
+
   resize(w, h) {
     this.w = w; this.h = h;
     this.canvas.width = Math.floor(w * this.dpr);
@@ -404,15 +425,7 @@ export class Hud {
     // ---- right-hand diagnostics
     ctx.textAlign = 'right';
     const rx = this.w - pad;
-    const rows = [
-      ['MASS', `${t.mass.toFixed(2)}`],
-      ['ZETA', `${t.zeta.toFixed(2)}`],
-      ['JERK', `${t.jerk.toFixed(0)}`],
-      ['ASSIST', `${(t.assist * 100).toFixed(0)}%`],
-      ['GROUND', `${(t.grounded * 100).toFixed(0)}%`],
-      ['FRAME', `${(t.frameLock * 100).toFixed(0)}%`],
-      ['GAIT', s.gait.toUpperCase()],
-    ];
+    const rows = this.debugRows(s);
     ctx.font = '600 10px ui-monospace, Menlo, Consolas, monospace';
     rows.forEach(([k, v], i) => {
       const y = bottom - (rows.length - 1 - i) * 15;

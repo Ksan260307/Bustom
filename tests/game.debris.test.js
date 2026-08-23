@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Debris } from '../src/game/Debris.js';
 import { Robot } from '../src/game/Robot.js';
 import { Assembly, PRESETS, computeStats, _resetIds } from '../src/core/Assembly.js';
-import { EQUIP } from '../src/core/constants.js';
+import { EQUIP, EQUIP_META } from '../src/core/constants.js';
 import { testWorld, stripEquips } from './helpers/dom.js';
 
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -119,7 +119,7 @@ describe('a machine that loses', () => {
     armed.weapons.slots[0].ammo = 1;
     armed.damage(9999);
     armed.revive(V());
-    expect(armed.weapons.slots[0].ammo).toBe(6);
+    expect(armed.weapons.slots[0].ammo).toBe(EQUIP_META.beam.ammo);
   });
 
   it('revive with no position leaves it where it was', () => {

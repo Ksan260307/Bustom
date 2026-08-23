@@ -6,15 +6,18 @@ import {
   EQUIP_META, WEAPON_TYPES, SYSTEM_TYPES,
   EQUIP_SIZE_MIN, EQUIP_SIZE_MAX, EQUIP_SIZE_STEP,
   SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_WAVES, CUSTOM_SOURCES,
+  CIRCLE_RADIUS_MIN, CIRCLE_RADIUS_MAX, CIRCLE_RADIUS_STEP, EQUIP,
   BONE_GAIN_MAX, BONE_LAG_MAX,
 } from '../core/constants.js';
 import { PRESETS } from '../core/Assembly.js';
+import { SHAPES, SHAPE_GROUPS, SHAPE_DEFAULT } from '../core/Shapes.js';
 import { STANDARD_COLORS, hexToCss } from '../core/Palette.js';
 import { TOOL } from '../editor/EditorScene.js';
 import { ColorWheel } from './ColorWheel.js';
-import { h, slider, vectorField, collapsible, toolSection } from './dom.js';
+import { h, slider, vectorField, collapsible, toolSection, resizable, append } from './dom.js';
 import { KeyConfig } from './KeyConfig.js';
 import { ShareDialog } from './ShareDialog.js';
+import { Help } from './Help.js';
 
 export { h, slider, vectorField };
 
@@ -28,7 +31,7 @@ export { h, slider, vectorField };
  * hang limbs off it head-downward, then drop in a saved part. The bones read
  * face -> arm -> leg -> custom because that is the order they sit on a robot.
  */
-const ASSEMBLE_TOOLS = [
+export const ASSEMBLE_TOOLS = [
   { group: '選ぶ' },
   { tool: TOOL.SELECT, label: '選択 / 移動', key: 'V', color: '#ffd166' },
   { group: '組む' },
@@ -43,7 +46,7 @@ const ASSEMBLE_TOOLS = [
   { tool: TOOL.STAMP, label: 'パーツ配置', key: '—', color: '#8effc9' },
 ];
 
-const SCULPT_LIST = [
+export const SCULPT_LIST = [
   { tool: TOOL.CARVE, label: '削る', key: 'X', color: '#ff6a5c' },
   { tool: TOOL.ADD, label: '盛る', key: 'Z', color: '#8effc9' },
   { tool: TOOL.PAINT, label: '塗る', key: 'P', color: '#4fd2ff' },
@@ -103,6 +106,9 @@ export class EditorUI {
       h('div', { class: 'sep' }),
       this.undoBtn,
       this.redoBtn,
+      h('button', {
+        class: 'icon', title: '使い方 (F1)', onClick: () => this.help.toggle(),
+      }, '？'),
       h('button', { class: 'icon', title: 'キー設定', onClick: () => this.keyConfig.show() }, '⌨'),
       h('button', { class: 'icon', title: 'QRで共有 / 読み込み', onClick: () => this.share.show() }, '⧉'),
       h('div', { class: 'sep' }),
@@ -193,7 +199,18 @@ export class EditorUI {
       min: SIZE_MIN, max: SIZE_MAX, step: SIZE_STEP, value: 1, fixed: 2,
     }, (v) => { app.editor.newBlockSize[i] = v; }));
 
-    this.blockBox = h('div', {}, ...this.newSizeSliders);
+    this.newShapeButtons = new Map();
+    this.blockBox = h('div', {},
+      h('h3', { class: 'inline' }, '形'),
+      ...this._shapeGrid(
+        () => app.editor.newBlockShape,
+        (id) => app.setNewBlockShape(id),
+        this.newShapeButtons,
+      ),
+      h('div', { class: 'note' }, 'この形で新しいブロックを置きます。あとから変えられます。'),
+      h('h3', { class: 'inline' }, '寸法'),
+      ...this.newSizeSliders,
+    );
 
     // --- equipment: pick a plate, then click the machine to stick it on
     this.equipButtons = new Map();
@@ -296,16 +313,22 @@ export class EditorUI {
     this.sculptTools = collapsible('加工 (上級)',
       h('div', { class: 'body' }, ...SCULPT_LIST.map(mkTool)), { open: false });
 
-    this.leftPanel = h('div', { class: 'panel', id: 'leftpanel' },
-      h('h3', {}, '組み立て'),
-      h('div', { class: 'body' }, ...ASSEMBLE_TOOLS.map(mkTool)),
-      this.sculptTools,
-      h('h3', {}, 'ツール設定'),
-      h('div', { class: 'body' },
-        ...this.toolSections,
-        h('label', { class: 'checkline' }, this.symmetryToggle, '左右対称でつける'),
-        h('label', { class: 'checkline' }, this.previewToggle, '歩行プレビュー'),
+    this.leftScroll = h('div', { class: 'panelscroll' });
+    this.leftPanel = resizable(
+      h('div', { class: 'panel', id: 'leftpanel' },
+        append(this.leftScroll,
+          h('h3', {}, '組み立て'),
+          h('div', { class: 'body' }, ...ASSEMBLE_TOOLS.map(mkTool)),
+          this.sculptTools,
+          h('h3', {}, 'ツール設定'),
+          h('div', { class: 'body' },
+            ...this.toolSections,
+            h('label', { class: 'checkline' }, this.symmetryToggle, '左右対称でつける'),
+            h('label', { class: 'checkline' }, this.previewToggle, '歩行プレビュー'),
+          ),
+        ),
       ),
+      { key: 'leftpanel', edges: 'es', minW: 168 },
     );
 
     // ---------------------------------------------------- right panel
@@ -328,17 +351,25 @@ export class EditorUI {
     this.libraryEl = h('div', { class: 'body' });
     this.librarySection = collapsible('パーツ庫', this.libraryEl, { open: false });
 
-    this.rightPanel = h('div', { class: 'panel', id: 'rightpanel' },
-      this.librarySection,
-      collapsible('色', h('div', { class: 'body' },
-        this.paletteEl,
-        h('h3', { class: 'inline' }, 'カスタム色'),
-        this.customEl,
-        this.wheelToggle,
-        this.wheelWrap,
-      ), { open: false }),
-      collapsible('インスペクタ', this.inspectorEl),
-      collapsible('スペック', this.statsEl, { open: false }),
+    // Anchored to the right, so its width grip is on the LEFT edge: that is
+    // the side that actually moves when the panel gets wider.
+    this.rightScroll = h('div', { class: 'panelscroll' });
+    this.rightPanel = resizable(
+      h('div', { class: 'panel', id: 'rightpanel' },
+        append(this.rightScroll,
+          this.librarySection,
+          collapsible('色', h('div', { class: 'body' },
+            this.paletteEl,
+            h('h3', { class: 'inline' }, 'カスタム色'),
+            this.customEl,
+            this.wheelToggle,
+            this.wheelWrap,
+          ), { open: false }),
+          collapsible('インスペクタ', this.inspectorEl),
+          collapsible('スペック', this.statsEl, { open: false }),
+        ),
+      ),
+      { key: 'rightpanel', edges: 'ws', minW: 186 },
     );
 
     // ---------------------------------------------------- hints
@@ -369,6 +400,7 @@ export class EditorUI {
       this.fieldMoveHint,
       h('div', { class: 'spacer' }),
       h('button', { onClick: () => this.keyConfig.show() }, 'キー設定'),
+      h('button', { onClick: () => this.help.show('field') }, '使い方'),
     );
 
     this.pauseMenu = h('div', { id: 'pause', class: 'hidden' },
@@ -378,6 +410,7 @@ export class EditorUI {
         h('button', { class: 'primary wide', onClick: () => app.resumeField() }, '▶ 再開する'),
         h('button', { class: 'wide', onClick: () => app.restartField() }, '⟲ リスポーン'),
         h('button', { class: 'wide', onClick: () => this.keyConfig.show() }, '⌨ キー設定'),
+        h('button', { class: 'wide', onClick: () => this.help.show('field') }, '？ 使い方'),
         h('button', { class: 'wide', onClick: () => app.setMode('edit') }, '← 編集画面に戻る'),
       ),
     );
@@ -388,10 +421,12 @@ export class EditorUI {
       onChange: () => { app.saveBindings(); this.syncFieldHint(); },
     });
     this.share = new ShareDialog(app);
+    this.help = new Help(app);
 
     this.root.append(
       this.topbar, this.partBar, this.leftPanel, this.rightPanel, this.hint,
-      this.fieldBar, this.pauseMenu, this.keyConfig.el, this.share.el, this.toast,
+      this.fieldBar, this.pauseMenu, this.keyConfig.el, this.share.el,
+      this.help.el, this.toast,
     );
 
     this.renderPalette();
@@ -746,9 +781,25 @@ export class EditorUI {
         rows.push(slider('速さ', {
           min: SPIN_RPM_MIN, max: SPIN_RPM_MAX, step: 5, value: part.spin.rpm, unit: ' rpm',
         }, (v) => app.editor.setEquipSpinSelected({ rpm: v })));
-        rows.push(h('div', { class: 'note' },
-          '貼った面の向きが回転軸になります。ブロックごと、載っているものも一緒に回ります。'));
-        if (parent?.kind === 'bone') {
+        if (meta.ring) {
+          rows.push(slider('半径', {
+            min: CIRCLE_RADIUS_MIN, max: CIRCLE_RADIUS_MAX, step: CIRCLE_RADIUS_STEP,
+            value: part.ringRadius, fixed: 2, unit: ' m',
+          }, (v) => app.editor.setEquipRingSelected(v)));
+          const riders = app.editor.rig.nodes.get(part.id)?.ring?.members?.length ?? 0;
+          rows.push(h('div', { class: 'stat' },
+            h('span', { class: 'k' }, '回るパーツ'),
+            h('span', { class: `v ${riders ? 'good' : 'warn'}` }, `${riders}`)));
+          rows.push(h('div', { class: 'note' },
+            '貼った場所を中心に、この半径の円に入っている',
+            h('b', {}, '同じブロックの上のパーツ'), 'がまとめて回ります。',
+            h('br'), '判定は軸に対して横方向の距離だけなので、',
+            h('br'), '高く伸びたパーツも円の中に入っていれば一緒に回ります。'));
+        } else {
+          rows.push(h('div', { class: 'note' },
+            '貼った面の向きが回転軸になります。ブロックごと、載っているものも一緒に回ります。'));
+        }
+        if (parent?.kind === 'bone' && !meta.ring) {
           rows.push(h('div', { class: 'inspector-empty warn' },
             'ボーンに貼っても回りません。ブロックに貼ってください。'));
         } else if (part.parent === app.assembly.rootId) {
@@ -793,6 +844,18 @@ export class EditorUI {
         h('button', { onClick: () => app.uniformSize(0.5) }, '0.5'),
       ));
 
+      rows.push(h('h3', { class: 'inline' }, '形'));
+      rows.push(...this._shapeGrid(
+        () => part.shape ?? SHAPE_DEFAULT,
+        (id) => {
+          app.editor.setBlockShapeSelected(id);
+          this.renderInspector(app.editor.selectedParts());
+        },
+      ));
+      rows.push(h('div', { class: 'note' },
+        '形を変えると、そのブロックの中身は作り直されます（彫った跡は消えます）。',
+        h('br'), '寸法を変えれば、球は楕円に、円柱は角柱のように潰れます。'));
+
       rows.push(h('h3', { class: 'inline' }, '中身'));
       const vox = part.vox;
       rows.push(h('div', { class: 'stat' },
@@ -832,6 +895,32 @@ export class EditorUI {
    * swing; a hip is the leg bone at the root of the chain; a waist is a
    * custom bone twisting on Y off the stride.
    */
+  /**
+   * The 20 shapes, five to a row, grouped the way they are in the table.
+   *
+   * `current` is a getter rather than a value so the same rows can be reused
+   * by the tool panel, which outlives any one selection.
+   */
+  /** Light up the shape the block tool is armed with. */
+  syncBlockShape(shape) {
+    for (const [id, btn] of this.newShapeButtons) btn.classList.toggle('active', id === shape);
+  }
+
+  _shapeGrid(current, onPick, registry = null) {
+    const now = current();
+    return SHAPE_GROUPS.map((row) => h('div', { class: 'shapegrid' },
+      ...row.ids.map((id) => {
+        const btn = h('button', {
+          class: id === now ? 'active' : '',
+          title: `${SHAPES[id].group} / ${SHAPES[id].label}`,
+          onClick: () => onPick(id),
+        }, SHAPES[id].label);
+        registry?.set(id, btn);
+        return btn;
+      }),
+    ));
+  }
+
   _boneMotion(part) {
     const app = this.app;
     const rows = [h('h3', { class: 'inline' }, '関節の効き')];
@@ -920,8 +1009,12 @@ export class EditorUI {
     const pct = (v) => `${Math.round(v * 100)}%`;
 
     this.statsEl.replaceChildren(
-      h('div', { style: 'margin-bottom:8px' },
-        h('span', { class: 'gaitbadge' }, GAIT_LABEL[stats.gait] ?? stats.gait)),
+      // No legs, no gait: "ホバー" is not a walking style, it is the absence
+      // of one, and showing it invites you to tune a walk that cannot exist.
+      stats.legs > 0
+        ? h('div', { style: 'margin-bottom:8px' },
+          h('span', { class: 'gaitbadge' }, GAIT_LABEL[stats.gait] ?? stats.gait))
+        : null,
 
       h('div', { class: 'stat' }, h('span', { class: 'k' }, '質量'),
         h('span', { class: 'v' }, stats.mass.toFixed(2))),

@@ -33,6 +33,7 @@ describe('share codes', () => {
     const rollId = a.addEquipOnFace(chest.id, 2, EQUIP.ROLLING, {
       spin: { dir: -1, rpm: 210 },
     }).id;
+    const ball = a.addBlockOnFace(chest.id, 5, 5, { shape: 'sphere', size: [1, 1, 1] });
     const custom = a.addBoneOnFace(chest.id, 0, 'custom', { length: 2 });
     Object.assign(custom.custom, { wave: 'saw', freq: 2.5, offset: 30 });
     a.core.vox.brush(8, 8, 8, 4, 0);
@@ -46,7 +47,10 @@ describe('share codes', () => {
     expect(shot.size).toBeCloseTo(0.9, 6);
     expect(roll.spin).toEqual({ dir: -1, rpm: 210 });
     expect(back.get(custom.id).custom).toMatchObject({ wave: 'saw', freq: 2.5, offset: 30 });
+    expect(back.get(ball.id).shape).toBe('sphere');
+    expect(back.get(ball.id).vox.solid).toBe(ball.vox.solid);
     expect(back.core.size).toEqual([1.5, 1.5, 1.5]);
+    expect(back.core.shape, 'the core is still chamfered').toBe(a.core.shape);
     expect(back.core.vox.solid).toBe(a.core.vox.solid);
   });
 

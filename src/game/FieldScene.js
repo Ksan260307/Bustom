@@ -22,17 +22,19 @@ const _dir = new THREE.Vector3();
 const _screenDir = new THREE.Vector2();
 
 export class FieldScene {
-  constructor({ renderer, hudCanvas, input, feedback }) {
+  constructor({ renderer, hudCanvas, input, feedback, post = null }) {
     this.renderer = renderer;
     this.input = input;
     this.feedback = feedback;
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(62, 1, 0.1, 900);
-    this.world = new World(this.scene);
+    this.world = new World(this.scene, renderer);
     this.cameraRig = new CameraDynamics(this.camera);
     this.hud = new Hud(hudCanvas);
-    this.post = new PostFX(renderer);
+    /** Shared with the editors when the app supplies one. */
+    this.post = post ?? new PostFX(renderer);
+    this._ownsPost = !post;
 
     this.enemies = [];
     this.ais = [];
@@ -41,6 +43,7 @@ export class FieldScene {
     this.fireCooldown = 0;
     /** Decaying kick from landing a shot, folded into the feedback bus. */
     this.hitPulse = 0;
+    this.shieldBubbles = new Map();
     this.time = 0;
     this.active = false;
     this.paused = false;
@@ -114,6 +117,9 @@ export class FieldScene {
   exit() {
     this.active = false;
     this.paused = false;
+    // Leaving the field takes the barriers with it, the way it takes the
+    // debris: nothing that belongs to a fight should survive it.
+    for (const b of this.shieldBubbles.values()) b.visible = false;
     this.input.setEnabled(false);
     this.input.exitPointerLock();
     this.feedback.suspend();
@@ -135,7 +141,10 @@ export class FieldScene {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.hud.resize(w, h);
-    this.post.setSize(w, h);
+    // Only if it is ours: the app sizes the shared one itself, and doing it
+    // twice is harmless but tells the next reader the wrong thing about who
+    // owns it.
+    if (this._ownsPost) this.post.setSize(w, h);
   }
 
   // ---------------------------------------------------------- lock-on
@@ -236,6 +245,7 @@ export class FieldScene {
 
     p.weapons.update({
       firing,
+      scoping: this.input.isDown('scope'),
       aimPoint: this.lock && p.body.assist.hasTarget ? p.body.assist.aimPoint : null,
       projectiles: this.projectiles,
       targets: this.enemies,
@@ -243,6 +253,54 @@ export class FieldScene {
     }, dt);
 
     if (!p.weapons.hasWeapons) this._fireDefault(dt);
+  }
+
+  /**
+   * The scope. Narrowing the field of view IS the zoom — it magnifies what
+   * the sniper is pointed at without moving the camera, so the machine stays
+   * where the player left it.
+   */
+  _updateScope() {
+    this.cameraRig.scope = this.player.alive ? (this.player.weapons.scopeZoom ?? 1) : 1;
+    return this;
+  }
+
+  /** What the view is worth without a scope on it — the rig decides. */
+  get baseFov() { return this.cameraRig.baseFov; }
+
+  /** A bubble around anything carrying a live barrier. */
+  _updateShields(dt) {
+    // Hide everything first: the machines get rebuilt whenever the player
+    // edits, and a bubble left over from a Robot that no longer exists would
+    // hang in the arena forever.
+    for (const b of this.shieldBubbles.values()) b.visible = false;
+
+    for (const robot of [this.player, ...this.enemies]) {
+      const sh = robot.alive ? robot.shield : null;
+      let bubble = this.shieldBubbles.get(robot);
+      if (!sh) continue;
+      if (!bubble) {
+        const geo = new THREE.IcosahedronGeometry(1, 2);
+        const mat = new THREE.MeshBasicMaterial({
+          color: sh.color, transparent: true, opacity: 0.2, wireframe: true,
+          blending: THREE.AdditiveBlending, depthWrite: false,
+        });
+        bubble = new THREE.Mesh(geo, mat);
+        bubble.frustumCulled = false;
+        this.scene.add(bubble);
+        this.shieldBubbles.set(robot, bubble);
+      }
+      bubble.visible = true;
+      bubble.material.color.setHex(sh.color);
+      bubble.position.copy(robot.position);
+      bubble.scale.setScalar(robot.radius + sh.reach);
+      bubble.rotation.y += dt * 0.6;
+      // Thins out as it is worn down, and flickers as it runs out of time.
+      const wear = sh.hp / Math.max(1, sh.maxHp);
+      const fade = sh.t < 1.2 ? 0.5 + Math.sin(sh.t * 22) * 0.5 : 1;
+      bubble.material.opacity = (0.08 + wear * 0.22) * fade;
+    }
+    return this;
   }
 
   // ---------------------------------------------------------- destruction
@@ -394,7 +452,16 @@ export class FieldScene {
       // does 30, so an unscaled ratio here drove the post-process flash to
       // full and swallowed the frame you actually wanted to see.
       if (hit.robot) this.hitPulse = Math.max(this.hitPulse, clamp01(hit.damage / 26) * 0.4);
+      // A grenade going off is worth seeing from further away than the round
+      // that carried it.
+      if (hit.blast) {
+        this.debris.blast?.(hit.position, hit.blast * 0.45);
+        this.hitPulse = Math.max(this.hitPulse, 0.5);
+      }
     }
+
+    this._updateScope();
+    this._updateShields(dt);
 
     // ---- camera
     const tel = p.body.telemetry();
@@ -454,6 +521,7 @@ export class FieldScene {
       lock: this.lock,
       telemetry: p.body.telemetry(),
       gait: p.stats.gait,
+      legs: p.stats.legs,
       weapons: p.weapons.readout(),
     }, dt);
   }

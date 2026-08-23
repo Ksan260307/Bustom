@@ -40,6 +40,8 @@ export class Robot {
     this.hp = this.maxHp;
     this.weapons = new WeaponSystem(this);
     this.alive = true;
+    /** The barrier a SHIELD plate puts up, while it lasts. */
+    this.shield = null;
     this.radius = Math.max(1.0, this.stats.extent * 0.8);
 
     this._buildThrusterFx();
@@ -152,12 +154,23 @@ export class Robot {
 
   damage(n) {
     if (!this.alive) return;
+    // A raised barrier takes the hit first, and only what it cannot absorb
+    // reaches the machine. It breaks when it runs out rather than lingering
+    // at zero, so "the shield is up" always means it is doing something.
+    if (this.shield && n > 0) {
+      const taken = Math.min(this.shield.hp, n);
+      this.shield.hp -= taken;
+      n -= taken;
+      if (this.shield.hp <= 0) this.shield = null;
+      if (n <= 0) return;
+    }
     this.hp = Math.max(0, this.hp - n);
     if (this.hp <= 0) {
       this.alive = false;
       // The wreck is produced by the caller, which owns the debris pool; all
       // this has to do is stop being a machine.
       this.object3D.visible = false;
+      this.shield = null;
       this.weapons.reset();
       this.rig.setBoostGlow?.(0);
       this.rig.setBladeGlow?.(0);

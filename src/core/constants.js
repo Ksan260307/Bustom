@@ -72,10 +72,22 @@ export const BONE = {
 };
 
 export const BONE_META = {
-  [BONE.LEG]:    { label: 'レッグボーン', color: 0x6fe3ff, mass: 1.4, torque: 26 },
-  [BONE.ARM]:    { label: 'アームボーン', color: 0xffc861, mass: 1.0, torque: 18 },
-  [BONE.FACE]:   { label: 'フェイスボーン', color: 0xff7ba6, mass: 0.6, torque: 12 },
-  [BONE.CUSTOM]: { label: 'カスタムボーン', color: 0xb98cff, mass: 0.9, torque: 15 },
+  [BONE.LEG]: {
+    label: 'レッグボーン', color: 0x6fe3ff, mass: 1.4, torque: 26,
+    blurb: '脚。本数で歩き方が決まります（1本=跳ぶ、2本=歩く、3本以上=多脚）',
+  },
+  [BONE.ARM]: {
+    label: 'アームボーン', color: 0xffc861, mass: 1.0, torque: 18,
+    blurb: '腕。移動中は歩調と逆に振り、ロックオン中は狙った方を向きます',
+  },
+  [BONE.FACE]: {
+    label: 'フェイスボーン', color: 0xff7ba6, mass: 0.6, torque: 12,
+    blurb: '顔。進行方向に傾き、ロックオン中はターゲットを見ます',
+  },
+  [BONE.CUSTOM]: {
+    label: 'カスタムボーン', color: 0xb98cff, mass: 0.9, torque: 15,
+    blurb: '自作の動き。軸・波形・速さ・何で駆動するかを自分で決めます',
+  },
 };
 
 /**
@@ -137,10 +149,29 @@ export const EQUIP = {
   SHOT: 'shot',
   BLADE: 'blade',
   MISSILE: 'missile',
+  SNIPER: 'sniper',
+  LASER: 'laser',
+  SPREAD: 'spread',
+  MAGNUM: 'magnum',
+  GRENADE: 'grenade',
+  SHIELD: 'shield',
   BOOST: 'boost',
   GRAVITY: 'gravity',
   ROLLING: 'rolling',
+  FLOAT: 'float',
+  CIRCLE: 'circle',
 };
+
+/** How wide a CIRCLE plate's turning ring can be, in metres. */
+export const CIRCLE_RADIUS_MIN = 0.5;
+export const CIRCLE_RADIUS_MAX = 6;
+export const CIRCLE_RADIUS_STEP = 0.25;
+export const CIRCLE_RADIUS_DEFAULT = 2;
+
+export const snapCircleRadius = (v) => Math.min(
+  CIRCLE_RADIUS_MAX,
+  Math.max(CIRCLE_RADIUS_MIN, Math.round(v / CIRCLE_RADIUS_STEP) * CIRCLE_RADIUS_STEP),
+);
 
 /** Plate thickness. Fixed: this is what makes every equip read as a sticker. */
 export const EQUIP_THICKNESS = 0.09;
@@ -170,9 +201,13 @@ export const EQUIP_META = {
   [EQUIP.BEAM]: {
     label: 'ビーム', category: 'weapon', plate: 0x2b3a49, accent: 0x7fd4ff,
     colorable: true, bullet: 0x7fd4ff,
-    ammo: 6, reload: 1.0, interval: 0.24, auto: false,
-    shots: 1, spread: 0, speed: 145, damage: 15, life: 2.2, radius: 0.28, mass: 0.55,
-    blurb: '単発のビーム。6発でリロード1秒',
+    // A rifle: one heavy shot at a time, drawn as a long thin line. The slow
+    // interval is the price of the damage, and it is what stops the beam
+    // from being the gatling with better numbers.
+    ammo: 5, reload: 1.4, interval: 0.55, auto: false,
+    shots: 1, spread: 0, speed: 320, damage: 26, life: 2.2, radius: 0.14, mass: 0.55,
+    shape: 'beam', streak: 14,
+    blurb: '長く細い一線を撃つビームライフル。連射は効かない',
   },
   [EQUIP.GATLING]: {
     label: 'ガトリング', category: 'weapon', plate: 0x2b3a49, accent: 0xffd166,
@@ -197,12 +232,66 @@ export const EQUIP_META = {
   },
   [EQUIP.MISSILE]: {
     label: 'ミサイル', category: 'weapon', plate: 0x2b3a49, accent: 0xb98cff,
-    colorable: false, bullet: 0xffd8a8,
-    ammo: 3, reload: 3.0, interval: 0.4, auto: false,
-    shots: 1, spread: 0.05, speed: 34, damage: 30, life: 6, radius: 0.3, mass: 0.9,
-    turn: 3.1,                     // homing authority, rad/s
-    blurb: '単発の誘導ミサイル。3発でリロード3秒',
+    colorable: false, bullet: 0xe8e2ff,
+    // Five small ones thrown wide, each homing back in: the spread is what
+    // makes a salvo read as a salvo rather than one fat round.
+    ammo: 2, reload: 3.4, interval: 0.5, auto: false,
+    shots: 5, spread: 0.34, speed: 38, damage: 9, life: 6, radius: 0.17, mass: 0.9,
+    turn: 2.6,                     // homing authority, rad/s
+    shape: 'missile', trail: 0xffffff, scatter: 0.55,
+    blurb: '小型ミサイルを5発ばらまく。白い航跡を引いて追尾する',
   },
+  [EQUIP.SNIPER]: {
+    label: 'スナイパー', category: 'weapon', plate: 0x2b3a49, accent: 0x9fffe0,
+    colorable: true, bullet: 0x9fffe0,
+    ammo: 3, reload: 2.6, interval: 1.1, auto: false,
+    shots: 1, spread: 0, speed: 620, damage: 52, life: 3.2, radius: 0.1, mass: 0.9,
+    shape: 'beam', streak: 26, scope: 0.42,      // FOV multiplier while scoped
+    blurb: '超長射程の一撃。スコープ（Q）で狙える',
+  },
+  [EQUIP.LASER]: {
+    label: 'レーザー', category: 'weapon', plate: 0x2b3a49, accent: 0xff5ce0,
+    colorable: true, bullet: 0xff5ce0,
+    // No magazine: it burns a charge while held, and needs to cool down.
+    ammo: 0, reload: 2.2, interval: 0, auto: true,
+    beam: { dps: 46, range: 90, width: 0.55, drain: 0.42 },
+    speed: 0, mass: 1.0,
+    blurb: '押している間、太いレーザーを撃ち続ける。撃ち続けると過熱する',
+  },
+  [EQUIP.SPREAD]: {
+    label: 'スプレッド', category: 'weapon', plate: 0x2b3a49, accent: 0xffe066,
+    colorable: true, bullet: 0xffe066,
+    ammo: 8, reload: 2.4, interval: 0.5, auto: false,
+    shots: 9, spread: 0.30, speed: 95, damage: 5, life: 0.9, radius: 0.16, mass: 0.75,
+    streak: 1.1,                   // pellets, not tracers
+    blurb: '9発を大きく拡散。近ければ全弾当たる',
+  },
+  [EQUIP.MAGNUM]: {
+    label: 'マグナム', category: 'weapon', plate: 0x2b3a49, accent: 0xff8a3d,
+    colorable: true, bullet: 0xff8a3d,
+    // Short life is the range limit: the round simply stops existing.
+    ammo: 4, reload: 2.0, interval: 0.7, auto: false,
+    shots: 1, spread: 0.01, speed: 130, damage: 44, life: 0.28, radius: 0.34, mass: 0.85,
+    streak: 1.6,                   // a fat slug
+    blurb: '至近距離用の一撃。射程は短いが非常に重い',
+  },
+  [EQUIP.GRENADE]: {
+    label: 'グレネード', category: 'weapon', plate: 0x2b3a49, accent: 0x8effc9,
+    colorable: true, bullet: 0x8effc9,
+    ammo: 3, reload: 2.8, interval: 0.8, auto: false,
+    shots: 1, spread: 0.02, speed: 46, damage: 16, life: 4, radius: 0.3, mass: 0.95,
+    shape: 'grenade', gravity: 14, blast: { radius: 7, damage: 34 },
+    blurb: '山なりに飛ぶ爆弾。着弾点で小爆発を起こす',
+  },
+  [EQUIP.SHIELD]: {
+    label: 'シールド', category: 'weapon', plate: 0x2b3a49, accent: 0x6fb7ff,
+    colorable: true, bullet: 0x6fb7ff,
+    ammo: 2, reload: 5.0, interval: 1.2, auto: false,
+    speed: 0, mass: 1.2,
+    shield: { hp: 90, seconds: 7, ram: 26, reach: 1.1 },
+    blurb: '機体を覆うバリアを張る。体当たりでダメージ、時間で消える',
+  },
+
   [EQUIP.BOOST]: {
     label: 'ブースト', category: 'system', plate: 0x243a34, accent: 0x8effc9,
     colorable: false,
@@ -217,9 +306,21 @@ export const EQUIP_META = {
   },
   [EQUIP.GRAVITY]: {
     label: 'グラビティ', category: 'system', plate: 0x3a2a24, accent: 0xff7043,
-    colorable: false, unique: true,
+    colorable: false, unique: true, conflicts: [EQUIP.FLOAT],
     hpBonus: 0.45, noFly: true, mass: 1.6,
     blurb: '空中浮遊不可、その代わり耐久アップ（1枚のみ）',
+  },
+  [EQUIP.FLOAT]: {
+    label: 'フロート', category: 'system', plate: 0x243044, accent: 0xa8c8ff,
+    colorable: false, unique: true, conflicts: [EQUIP.GRAVITY],
+    hover: 1.4, mass: 1.1,
+    blurb: '常に地面から少し浮く。脚は接地しない（1枚のみ）',
+  },
+  [EQUIP.CIRCLE]: {
+    label: 'サークル', category: 'system', plate: 0x223a34, accent: 0x7fffd4,
+    colorable: false, spins: true, ring: true,
+    rpm: 40, mass: 0.7,
+    blurb: '貼った場所を中心に、決めた半径の中にあるパーツをまとめて回す',
   },
 };
 

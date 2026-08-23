@@ -29,6 +29,13 @@ export class CameraDynamics {
 
     this.baseFov = 62;
     this.fov = this.baseFov;
+    /**
+     * Scope factor. The camera owns the field of view — it pumps it with
+     * speed and thrust every frame — so a weapon that wants to zoom has to
+     * ask HERE rather than writing cam.fov behind the rig's back, or the two
+     * fight and the rig wins on the next frame.
+     */
+    this.scope = 1;
     this.roll = 0;
     this.shake = new THREE.Vector3();
     this.shakeAmount = 0;
@@ -254,7 +261,7 @@ export class CameraDynamics {
 
     // ---------------------------------------------------- FOV pumping
     const pump = clamp01(p.jerk / 260);
-    const fovTarget = this.baseFov + speedN * 9 + p.thrust * 4.5 + pump * 5.5;
+    const fovTarget = (this.baseFov + speedN * 9 + p.thrust * 4.5 + pump * 5.5) * this.scope;
     this.fov = damp(this.fov, fovTarget, 0.14, dt);
 
     // ---------------------------------------------------- shake

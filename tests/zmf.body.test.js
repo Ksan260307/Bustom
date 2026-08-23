@@ -5,6 +5,7 @@ import { SyntheticInput, Robot, SimpleAI } from '../src/game/Robot.js';
 import { Assembly, PRESETS, computeStats } from '../src/core/Assembly.js';
 import { Rig } from '../src/core/Rig.js';
 import { testWorld, stripEquips } from './helpers/dom.js';
+import { EQUIP_META } from '../src/core/constants.js';
 
 const STATS = computeStats(stripEquips(PRESETS.biped.build()));
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -511,6 +512,37 @@ describe('frame locking on the ground', () => {
 describe('equipment on the body', () => {
   const plated = platedStats;
 
+  it('a float plate parks the machine above the floor', () => {
+    const bare = makeBody();
+    const afloat = makeBody(plated('float'));
+    run(bare, input, 2.5);
+    run(afloat, input, 2.5);
+
+    expect(afloat.floating).toBe(true);
+    expect(bare.floating).toBe(false);
+    expect(afloat.rideHeight - bare.rideHeight).toBeCloseTo(EQUIP_META.float.hover, 5);
+    expect(afloat.position.y - bare.position.y, 'and it really rests that much higher')
+      .toBeCloseTo(EQUIP_META.float.hover, 1);
+  });
+
+  it('a floating machine still counts as standing on something', () => {
+    // It hovers, but it is not "in the air": the legs still walk, the
+    // ground-steering frame still applies, and the tank still refills.
+    const b = makeBody(plated('float'));
+    run(b, input, 2);
+    expect(b.env.grounded).toBeGreaterThan(0.9);
+  });
+
+  it('turning a float plate on and off does not stack the hover', () => {
+    const b = makeBody(plated('float'));
+    const once = b.rideHeight;
+    b.setStats(plated('float'));
+    b.setStats(plated('float'));
+    expect(b.rideHeight, 'still one plate high').toBeCloseTo(once, 6);
+    b.setStats(computeStats(stripEquips(PRESETS.biped.build())));
+    expect(b.rideHeight, 'and back down when it comes off').toBeCloseTo(b.baseRideHeight, 6);
+  });
+
   it('a boost plate makes the dash bite harder', () => {
     const bare = makeBody(computeStats(stripEquips(PRESETS.biped.build())));
     const boosted = makeBody(plated('boost', 'boost'));
@@ -556,6 +588,40 @@ describe('equipment on the body', () => {
       return body.energy;
     };
     expect(drain(true)).toBeLessThan(drain(false));
+  });
+
+  it('the boost is a step change, not a nudge', () => {
+    // The thruster has to take the machine somewhere its cruise cannot, or
+    // there is no reason to spend the tank on it.
+    const b = makeBody(plated('boost'));
+    const peak = (boost) => {
+      const inp = new SyntheticInput();
+      inp.move.set(0, 0, 1);
+      inp.intensity = 1;
+      inp.hold('boost', boost);
+      b.reset(V(0, 2, 0));
+      let top = 0;
+      for (let i = 0; i < 300; i++) { b.update(inp, 1 / 60); inp.endFrame(); top = Math.max(top, b.speed); }
+      return top;
+    };
+    const cruise = peak(false);
+    expect(peak(true) / cruise, 'well over half again as fast').toBeGreaterThan(1.5);
+  });
+
+  it('a dash actually throws the machine', () => {
+    const b = makeBody(plated('boost'));
+    expect(b.dashSpeed).toBeGreaterThan(25);
+    expect(b.dashCooldown).toBe(0);
+
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    b.reset(V(0, 2, 0));
+    run(b, input, 0.2);
+    const before = b.speed;
+    input.dash = { dir: new THREE.Vector3(0, 0, 1), t: 0 };
+    run(b, input, 0.1);
+    expect(b.speed, 'the impulse lands immediately').toBeGreaterThan(before + 8);
+    expect(b.dashCooldown, 'and you get another one soon').toBeLessThan(0.3);
   });
 
   it('boosting really is faster than not boosting', () => {

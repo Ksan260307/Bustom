@@ -4,6 +4,7 @@ import { EditorScene, TOOL } from './editor/EditorScene.js';
 import { History } from './editor/History.js';
 import { PartLibrary } from './editor/PartLibrary.js';
 import { FieldScene } from './game/FieldScene.js';
+import { PostFX } from './game/PostFX.js';
 import { EditorUI } from './ui/EditorUI.js';
 import { InputManager, DEFAULT_BINDINGS } from './zmf/InputManager.js';
 import { KineticFeedback } from './zmf/KineticFeedback.js';
@@ -84,6 +85,14 @@ export class App {
 
     this.mode = 'edit';
 
+    /**
+     * One post chain for the whole app. Every screen draws through the same
+     * antialiased HDR target and the same bloom, so a machine looks the same
+     * on the bench as it does in the arena — and there is one buffer to pay
+     * for rather than three.
+     */
+    this.post = new PostFX(this.renderer);
+
     // ---- the machine document
     this.mainAssembly = this._loadInitial();
     this.mainEditor = this._makeEditor();
@@ -104,6 +113,7 @@ export class App {
       hudCanvas: this.hudCanvas,
       input: this.input,
       feedback: this.feedback,
+      post: this.post,
     });
 
     this.ui = new EditorUI(this.overlay, this);
@@ -125,7 +135,7 @@ export class App {
   }
 
   _makeEditor() {
-    const ed = new EditorScene({ renderer: this.renderer, canvas: this.canvas });
+    const ed = new EditorScene({ renderer: this.renderer, canvas: this.canvas, post: this.post });
     ed.onChange = (stats) => this.ui?.renderStats(stats);
     ed.onSelect = (parts) => this.ui?.renderInspector(parts);
     ed.onBeforeChange = (label) => this.pushHistory(label);
@@ -391,6 +401,21 @@ export class App {
     }
   }
 
+  /**
+   * Arm the block tool with a shape. If a block is already selected, re-cut
+   * that one too: picking a shape while looking at a block almost always
+   * means "make this one a sphere", not "make the NEXT one a sphere".
+   */
+  setNewBlockShape(shape) {
+    this.editor.newBlockShape = shape;
+    this.ui.syncBlockShape(shape);
+    const sel = this.editor.selectedParts();
+    if (sel.some((p) => p.vox)) {
+      this.editor.setBlockShapeSelected(shape);
+      this.ui.renderInspector(this.editor.selectedParts());
+    }
+  }
+
   setNewEquipSize(v) {
     this.editor.newEquipSize = v;
     const sel = this.editor.selectedParts();
@@ -598,7 +623,15 @@ export class App {
       if (e.target && /input|textarea|select/i.test(e.target.tagName)) return;
       const editing = EDIT_MODES.has(this.mode);
 
+      // F1 anywhere, and "?" where it is not being typed into something.
+      if (e.code === 'F1' || (e.code === 'Slash' && e.shiftKey)) {
+        e.preventDefault();
+        this.ui.help.toggle();
+        return;
+      }
+
       if (e.code === 'Escape') {
+        if (this.ui.help.open) { this.ui.help.close(); return; }
         if (this.ui.share.open) { this.ui.share.close(); return; }
         if (this.ui.keyConfig.open) { this.ui.keyConfig.close(); return; }
         if (this.mode === 'field') {
@@ -677,6 +710,7 @@ export class App {
     const w = Math.max(1, window.innerWidth);
     const h = Math.max(1, window.innerHeight);
     this.renderer.setSize(w, h, false);
+    this.post.setSize(w, h);
     this.mainEditor.resize(w, h);
     this.partEditor.resize(w, h);
     this.field.resize(w, h);
@@ -703,6 +737,7 @@ export class App {
     document.removeEventListener('pointerlockchange', this._onLock);
     this.mainEditor.dispose();
     this.partEditor.dispose();
+    this.post.dispose();
     this.input.dispose();
     this.renderer.dispose();
   }

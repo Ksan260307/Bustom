@@ -1,4 +1,4 @@
-import { h } from './dom.js';
+import { h, resizable } from './dom.js';
 import { ACTION_GROUPS, ACTION_LABEL, keyLabel } from '../zmf/InputManager.js';
 
 // ============================================================
@@ -28,8 +28,7 @@ export class KeyConfig {
     this.rowsEl = h('div', { class: 'keyrows' });
     this.noteEl = h('div', { class: 'keynote' }, '');
 
-    this.el = h('div', { id: 'keyconfig', class: 'hidden' },
-      h('div', { class: 'keybox' },
+    this.box = h('div', { class: 'keybox' },
         h('div', { class: 'keyhead' },
           h('div', { class: 'brand' }, 'KEY', h('small', {}, 'CONFIG')),
           h('div', { class: 'spacer' }),
@@ -42,8 +41,11 @@ export class KeyConfig {
           h('div', { class: 'spacer' }),
           h('button', { class: 'primary', onClick: () => this.close() }, '閉じる'),
         ),
-      ),
     );
+    // Centred on screen, so one pixel of drag only moves its edge half a
+    // pixel: `speed` is what keeps the grip under the pointer.
+    resizable(this.box, { key: 'keyconfig', edges: 'es', minW: 320, minH: 220, speed: 2 });
+    this.el = h('div', { id: 'keyconfig', class: 'hidden' }, this.box);
 
     // Capture phase, so a rebind beats every other handler on the page.
     this._onKey = (e) => this._capture(e, e.code);

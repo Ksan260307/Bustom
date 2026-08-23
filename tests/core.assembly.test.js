@@ -10,6 +10,7 @@ import {
   SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, BONE_GAIN_MAX, BONE_LAG_MAX,
 } from '../src/core/constants.js';
 import { STANDARD_COLORS } from '../src/core/Palette.js';
+import { SHAPE, SHAPE_DEFAULT } from '../src/core/Shapes.js';
 
 let a;
 beforeEach(() => {
@@ -894,6 +895,108 @@ describe('stats', () => {
     expect(s.gait).toBe('hover');
     expect(s.mass).toBeLessThan(1.5);
     expect(s.thrustToMass).toBeGreaterThan(30);
+  });
+});
+
+describe('block shapes', () => {
+  let a;
+  beforeEach(() => { a = Assembly.createDefault(); });
+
+  const solidRatio = (part) => part.vox.solid / part.vox.total;
+
+  it('a new block is a box unless you ask for something else', () => {
+    const plain = a.addBlockOnFace(a.rootId, 2, 5);
+    expect(plain.shape).toBe(SHAPE_DEFAULT);
+    expect(solidRatio(plain)).toBe(1);
+
+    const ball = a.addBlockOnFace(a.rootId, 4, 5, { shape: SHAPE.SPHERE });
+    expect(ball.shape).toBe(SHAPE.SPHERE);
+    expect(solidRatio(ball)).toBeLessThan(0.6);
+  });
+
+  it('an unknown shape is quietly a box, not a broken block', () => {
+    const p = a.addBlockOnFace(a.rootId, 2, 5, { shape: 'banana' });
+    expect(p.shape).toBe(SHAPE_DEFAULT);
+    expect(solidRatio(p)).toBe(1);
+  });
+
+  it('re-cutting replaces the contents and keeps the colour', () => {
+    const p = a.addBlockOnFace(a.rootId, 2, 7);
+    p.vox.brush(8, 8, 8, 4, 0);
+    expect(a.setBlockShape(p.id, SHAPE.CYLINDER)).toBe(true);
+    expect(p.shape).toBe(SHAPE.CYLINDER);
+    expect([...p.vox.usedColors()], 'still the colour it was').toEqual([7]);
+    expect(p.vox.isPristine(SHAPE.CYLINDER)).toBe(true);
+  });
+
+  it('refuses a shape it does not know, and things without voxels', () => {
+    const p = a.addBlockOnFace(a.rootId, 2, 5);
+    expect(a.setBlockShape(p.id, 'banana')).toBe(false);
+    expect(p.shape).toBe(SHAPE_DEFAULT);
+    const bone = a.addBoneOnFace(a.rootId, 3, BONE.LEG, { length: 1 });
+    expect(a.setBlockShape(bone.id, SHAPE.SPHERE)).toBe(false);
+  });
+
+  it('a hollow shape weighs less than the box it fits in', () => {
+    const box = Assembly.createDefault();
+    box.addBlockOnFace(box.rootId, 2, 5, { size: [2, 2, 2] });
+    const ball = Assembly.createDefault();
+    ball.addBlockOnFace(ball.rootId, 2, 5, { size: [2, 2, 2], shape: SHAPE.SPHERE });
+    // Mass already counts solid cells, so this falls out with no extra rule.
+    expect(computeStats(ball).mass).toBeLessThan(computeStats(box).mass);
+  });
+
+  it('the core wears the chamfer as a shape', () => {
+    expect(a.core.shape).toBe(SHAPE.BEVEL);
+    expect(a.core.vox.isPristine(SHAPE.BEVEL)).toBe(true);
+  });
+
+  it('survives a save and load', () => {
+    const p = a.addBlockOnFace(a.rootId, 2, 5, { shape: SHAPE.TORUS });
+    const back = Assembly.fromJSON(a.toJSON());
+    expect(back.get(p.id).shape).toBe(SHAPE.TORUS);
+    expect(back.get(p.id).vox.solid).toBe(p.vox.solid);
+  });
+
+  it('a build saved before shapes existed loads as boxes', () => {
+    a.addBlockOnFace(a.rootId, 2, 5);
+    const json = a.toJSON();
+    for (const o of json.parts) delete o.shape;
+    const back = Assembly.fromJSON(json);
+    back.walk((p) => { if (p.vox) expect(p.shape, p.id).toBe(SHAPE_DEFAULT); });
+  });
+
+  it('travels with copy and paste', () => {
+    const p = a.addBlockOnFace(a.rootId, 2, 5, { shape: SHAPE.CONE });
+    const doc = a.extract(p.id);
+    expect(doc.core.shape).toBe(SHAPE.CONE);
+
+    const dest = Assembly.createDefault();
+    const landed = dest.graft(doc, dest.rootId, { pos: [0, 2, 0] });
+    expect(landed.shape).toBe(SHAPE.CONE);
+    expect(landed.vox.solid).toBe(p.vox.solid);
+  });
+
+  it('turning the resolution up re-cuts a shape rather than magnifying its steps', () => {
+    const p = a.addBlockOnFace(a.rootId, 2, 5, { shape: SHAPE.SPHERE });
+    a.setVoxResolution(16);
+    const coarse = p.vox.solid / p.vox.total;
+    a.setVoxResolution(100);
+    expect(p.vox.n).toBe(100);
+    expect(p.vox.isPristine(SHAPE.SPHERE), 'cut fresh at the new grid').toBe(true);
+    // A resample could only ever reproduce the coarse ratio; a re-cut lands
+    // closer to the real volume of a sphere.
+    expect(Math.abs(p.vox.solid / p.vox.total - Math.PI / 6))
+      .toBeLessThan(Math.abs(coarse - Math.PI / 6));
+  });
+
+  it('but a block someone carved is resampled, not thrown away', () => {
+    const p = a.addBlockOnFace(a.rootId, 2, 5, { shape: SHAPE.SPHERE });
+    p.vox.brush(8, 8, 8, 5, 0);
+    const before = p.vox.solid / p.vox.total;
+    a.setVoxResolution(16);
+    expect(p.vox.isPristine(SHAPE.SPHERE), 'the carving is still there').toBe(false);
+    expect(p.vox.solid / p.vox.total).toBeCloseTo(before, 1);
   });
 });
 

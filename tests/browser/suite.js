@@ -3,10 +3,17 @@ import { describe, it, expect, shouldNotThrow, run } from './runner.js';
 import { App } from '../../src/main.js';
 import { TOOL } from '../../src/editor/EditorScene.js';
 import { Assembly, PRESETS, computeStats } from '../../src/core/Assembly.js';
+import { SHAPE, SHAPE_IDS, SHAPES } from '../../src/core/Shapes.js';
 import { STANDARD_COLORS, hexToCss } from '../../src/core/Palette.js';
-import { VOX_LEVELS, EQUIP, EQUIP_META, SIZE_MAX } from '../../src/core/constants.js';
+import {
+  VOX_LEVELS, EQUIP, EQUIP_META, SIZE_MAX, WEAPON_TYPES, SYSTEM_TYPES,
+} from '../../src/core/constants.js';
 import { ColorWheel } from '../../src/ui/ColorWheel.js';
 import { Hud } from '../../src/game/Hud.js';
+import * as PostFXModule from '../../src/game/PostFX.js';
+import { ACTIONS } from '../../src/zmf/InputManager.js';
+
+window.__postfxModule = PostFXModule;
 
 // ============================================================
 //  Browser suite: everything that needs WebGL, a 2D canvas or the DOM.
@@ -958,9 +965,11 @@ describe('tool settings panel', () => {
   it('that is most of the panel it used to be', () => {
     app.setMode('edit');
     app.setTool(TOOL.SELECT);
-    const focused = app.ui.leftPanel.scrollHeight;
+    // The panel shell is clipped now that it can be resized, so the length
+    // of the contents is the scroller's business.
+    const focused = app.ui.leftScroll.scrollHeight;
     for (const sec of app.ui.toolSections) sec.classList.remove('hidden');
-    const everything = app.ui.leftPanel.scrollHeight;
+    const everything = app.ui.leftScroll.scrollHeight;
     app.setTool(TOOL.SELECT);
     expect(focused).toBeLessThan(everything * 0.65);
   });
@@ -1524,6 +1533,919 @@ describe('resizing parts', () => {
   });
 });
 
+describe('resizing the windows', () => {
+  const left = () => document.getElementById('leftpanel');
+  const right = () => document.getElementById('rightpanel');
+
+  /** The test harness renders the app scaled down in a corner. */
+  const scaleOf = (el) => el.getBoundingClientRect().width / el.offsetWidth;
+
+  /**
+   * Drag a grip. `dx`/`dy` are in the window's OWN pixels, converted to the
+   * screen pixels a pointer would actually travel.
+   */
+  const dragGrip = (el, cls, dx, dy) => {
+    const grip = el.querySelector(cls);
+    expect(grip, cls).toBeTruthy();
+    const k = scaleOf(el);
+    const r = grip.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    grip.dispatchEvent(new PointerEvent('pointerdown', { clientX: x, clientY: y, bubbles: true, pointerId: 1 }));
+    grip.dispatchEvent(new PointerEvent('pointermove', {
+      clientX: x + dx * k, clientY: y + dy * k, bubbles: true, pointerId: 1,
+    }));
+    grip.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }));
+    return grip;
+  };
+
+  const forget = () => {
+    localStorage.removeItem('brostom.ui.size.v1');
+    for (const el of [left(), right()]) el.resetSize();
+  };
+
+  it('both side panels carry grips, and the shell itself does not scroll', () => {
+    app.setMode('edit');
+    for (const el of [left(), right()]) {
+      expect(el.querySelectorAll('.grip').length, el.id).toBe(3);
+      expect(el.querySelectorAll('.panelscroll').length, el.id).toBe(1);
+      // The grips are pinned to the panel; if the shell scrolled they would
+      // slide away with the content.
+      expect(getComputedStyle(el).overflow).toBe('hidden');
+      expect(getComputedStyle(el.querySelector('.panelscroll')).overflowY).toBe('auto');
+    }
+  });
+
+  it('dragging the inner edge makes a panel wider', () => {
+    forget();
+    const el = left();
+    const before = el.offsetWidth;
+    dragGrip(el, '.grip-e', 80, 0);
+    expect(el.offsetWidth).toBe(before + 80);
+    forget();
+  });
+
+  it('the drag keeps up with the pointer even when the view is scaled', () => {
+    // The suite runs the app at 42%; a window that ignored that would move
+    // at less than half the speed of the hand dragging it.
+    forget();
+    const el = left();
+    expect(scaleOf(el), 'the harness really is scaled').toBeLessThan(0.9);
+    const before = el.offsetWidth;
+    dragGrip(el, '.grip-e', 40, 0);
+    expect(el.offsetWidth).toBe(before + 40);
+    forget();
+  });
+
+  it('the right panel grows inward, keeping its outer edge where it was', () => {
+    forget();
+    const el = right();
+    const before = el.offsetWidth;
+    const edge = el.getBoundingClientRect().right;
+    dragGrip(el, '.grip-w', -70, 0);
+    expect(el.offsetWidth).toBe(before + 70);
+    expect(Math.abs(el.getBoundingClientRect().right - edge), 'still pinned to the edge')
+      .toBeLessThan(1.5);
+    forget();
+  });
+
+  it('the bottom edge sets the height', () => {
+    forget();
+    const el = left();
+    const before = el.offsetHeight;
+    dragGrip(el, '.grip-s', 0, -60);
+    expect(el.offsetHeight).toBe(before - 60);
+    forget();
+  });
+
+  it('refuses to grow past the screen, or shrink to nothing', () => {
+    forget();
+    const el = left();
+    dragGrip(el, '.grip-e', 9000, 0);
+    expect(el.offsetWidth).toBeLessThan(Math.round(window.innerWidth * 0.6) + 2);
+
+    dragGrip(el, '.grip-e', -9000, 0);
+    expect(el.offsetWidth, 'and stays usable at the small end').toBeGreaterThan(150);
+    forget();
+  });
+
+  it('remembers the size, and gives it back on a double click', () => {
+    forget();
+    const el = left();
+    const original = el.offsetWidth;
+    dragGrip(el, '.grip-e', 60, 0);
+    const stored = JSON.parse(localStorage.getItem('brostom.ui.size.v1'));
+    expect(stored.leftpanel.w).toBe(original + 60);
+
+    el.querySelector('.grip-e').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    expect(el.offsetWidth, 'back to the stylesheet width').toBe(original);
+    const after = JSON.parse(localStorage.getItem('brostom.ui.size.v1'));
+    expect(after.leftpanel === undefined, 'and forgets it').toBe(true);
+    forget();
+  });
+
+  it('the corner does both at once', () => {
+    forget();
+    const el = left();
+    const w = el.offsetWidth;
+    const hh = el.offsetHeight;
+    dragGrip(el, '.grip-se', 50, -70);
+    expect(el.offsetWidth).toBe(w + 50);
+    expect(el.offsetHeight).toBe(hh - 70);
+    forget();
+  });
+
+  it('the pop-up windows resize too, and stay centred', () => {
+    app.setMode('edit');
+    app.ui.keyConfig.show();
+    const box = document.querySelector('#keyconfig .keybox');
+    try {
+      expect(box.querySelectorAll('.grip').length).toBe(3);
+      const before = box.offsetWidth;
+      const mid = () => {
+        const r = box.getBoundingClientRect();
+        return (r.left + r.right) / 2;
+      };
+      const centre = mid();
+      dragGrip(box, '.grip-e', 60, 0);
+      // A centred window only moves half an edge per pixel dragged, so it is
+      // driven at double gain to stay under the pointer.
+      expect(box.offsetWidth).toBe(before + 120);
+      expect(Math.abs(mid() - centre), 'and it is still centred').toBeLessThan(1.5);
+    } finally {
+      box.resetSize();
+      app.ui.keyConfig.close();
+      forget();
+    }
+  });
+
+  it('the share window resizes as well', async () => {
+    app.setMode('edit');
+    const dlg = await app.ui.share.show();
+    try {
+      expect(dlg.box.querySelectorAll('.grip').length).toBe(3);
+      // Grow, not shrink: the share window already sits at its minimum, and
+      // a window that refused to get smaller than useful is behaving.
+      const before = dlg.box.offsetHeight;
+      dragGrip(dlg.box, '.grip-s', 0, 40);
+      expect(dlg.box.offsetHeight).toBe(before + 80);
+    } finally {
+      dlg.box.resetSize();
+      dlg.close();
+      forget();
+    }
+  });
+});
+
+describe('block shapes', () => {
+  const fill = (part) => part.vox.solid / part.vox.total;
+
+  it('the panel offers all twenty, five to a row', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.setTool(TOOL.BLOCK);
+    const rows = [...document.querySelectorAll('.shapegrid')];
+    expect(rows.length, 'four rows in the tool panel').toBe(4);
+    const labels = rows.flatMap((r) => [...r.querySelectorAll('button')].map((b) => b.textContent));
+    expect(labels).toHaveLength(20);
+    expect(labels).toContain('球');
+    expect(labels).toContain('アーチ');
+    for (const r of rows) expect(r.querySelectorAll('button')).toHaveLength(5);
+  });
+
+  it('picking a shape re-cuts the block you are looking at', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.ui.renderInspector(app.editor.selectedParts());
+
+    const btn = [...app.ui.inspectorEl.querySelectorAll('.shapegrid button')]
+      .find((b) => b.textContent === '球');
+    expect(btn).toBeTruthy();
+    btn.click();
+
+    expect(app.assembly.core.shape).toBe(SHAPE.SPHERE);
+    expect(fill(app.assembly.core), 'a ball is about half a box').toBeLessThan(0.6);
+    expect(app.editor.rig.nodes.get(app.assembly.rootId).mesh.geometry.getAttribute('position').count,
+      'and the mesh was rebuilt').toBeGreaterThan(0);
+  });
+
+  it('the block tool places what it is armed with', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.clearSelection();
+    app.setNewBlockShape(SHAPE.CONE);
+    expect(app.editor.newBlockShape).toBe(SHAPE.CONE);
+    app.setTool(TOOL.BLOCK);
+
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(6, 0, 0));
+    pointAt(core.clone().add(new THREE.Vector3(0.49, 0, 0)), { click: true });
+
+    const made = app.assembly.get(app.editor.selected);
+    expect(made.kind).toBe('block');
+    expect(made.shape).toBe(SHAPE.CONE);
+    expect(fill(made)).toBeLessThan(0.5);
+    app.setTool(TOOL.SELECT);
+    app.setNewBlockShape(SHAPE.BOX);
+  });
+
+  it('arming a shape with a block selected changes that block too', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.setNewBlockShape(SHAPE.CYLINDER);
+    expect(app.assembly.core.shape, 'it meant this one').toBe(SHAPE.CYLINDER);
+    app.setNewBlockShape(SHAPE.BOX);
+  });
+
+  it('re-cutting is one undo step', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    const before = app.assembly.core.shape;
+    const solid = app.assembly.core.vox.solid;
+    app.editor.select(app.assembly.rootId);
+    app.editor.setBlockShapeSelected(SHAPE.OCTA);
+    expect(app.assembly.core.vox.solid).not.toBe(solid);
+
+    app.undo();
+    expect(app.assembly.core.shape).toBe(before);
+    expect(app.assembly.core.vox.solid).toBe(solid);
+  });
+
+  it('re-cuts a whole selection at once, skipping bones and plates', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const blocks = [...app.assembly.parts.values()].filter((p) => p.vox).slice(0, 3);
+    const bone = [...app.assembly.parts.values()].find((p) => p.kind === 'bone');
+    app.editor.select([...blocks.map((p) => p.id), bone.id]);
+    expect(app.editor.setBlockShapeSelected(SHAPE.SPHERE)).toBe(true);
+    for (const b of blocks) expect(app.assembly.get(b.id).shape, b.id).toBe(SHAPE.SPHERE);
+    expect(app.assembly.get(bone.id).shape === undefined,
+      'a bone has no shape to set').toBe(true);
+  });
+
+  it('every shape builds a mesh you can actually see', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    for (const id of SHAPE_IDS) {
+      app.editor.setBlockShapeSelected(id);
+      step(1);
+      const mesh = app.editor.rig.nodes.get(app.assembly.rootId).mesh;
+      const verts = mesh.geometry.getAttribute('position');
+      expect(verts, id).toBeTruthy();
+      expect(verts.count, `${id} has faces`).toBeGreaterThan(0);
+    }
+    app.editor.setBlockShapeSelected(SHAPE.BEVEL);
+  });
+
+  it('the placement cursor takes the shape it is about to place', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.clearSelection();
+    app.setNewBlockShape(SHAPE.SPHERE);
+    app.setTool(TOOL.BLOCK);
+
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(6, 0, 0));
+    pointAt(core.clone().add(new THREE.Vector3(0.49, 0, 0)));
+
+    const ghost = app.editor.ghost;
+    expect(ghost.visible).toBe(true);
+    expect(ghost.geometry === app.editor.ghostBox, 'not the stand-in box').toBe(false);
+    expect(ghost.geometry.getAttribute('position').count).toBeGreaterThan(100);
+    // The wire stays a box on purpose: it is the footprint the block will
+    // take up, which is what decides where the next one can go.
+    expect(app.editor.ghostWire.geometry.getAttribute('position').count).toBe(24);
+
+    app.setNewBlockShape(SHAPE.BOX);
+    pointAt(core.clone().add(new THREE.Vector3(0.49, 0, 0)));
+    expect(app.editor.ghost.geometry === app.editor.ghostBox, 'a box is the box').toBe(true);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('other tools keep the plain box cursor', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.clearSelection();
+    app.setNewBlockShape(SHAPE.SPHERE);
+    app.setTool(TOOL.BONE_LEG);
+
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(6, 0, 0));
+    pointAt(core.clone().add(new THREE.Vector3(0.49, 0, 0)));
+    expect(app.editor.ghost.geometry === app.editor.ghostBox).toBe(true);
+
+    app.setNewBlockShape(SHAPE.BOX);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('each shape ghost is cut once and kept', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.clearSelection();
+    app.setTool(TOOL.BLOCK);
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(6, 0, 0));
+
+    app.editor.ghostShapes.clear();
+    for (const shape of [SHAPE.CONE, SHAPE.CONE, SHAPE.TUBE]) {
+      app.setNewBlockShape(shape);
+      pointAt(core.clone().add(new THREE.Vector3(0.49, 0, 0)));
+    }
+    expect(app.editor.ghostShapes.size, 'two shapes, three hovers').toBe(2);
+
+    app.setNewBlockShape(SHAPE.BOX);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('you can still carve a sphere', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.editor.setBlockShapeSelected(SHAPE.SPHERE);
+    const vox = app.assembly.core.vox;
+    const before = vox.solid;
+
+    app.setTool(TOOL.CARVE);
+    app.editor.brushPercent = 100 / vox.n;
+    const mid = Math.floor(vox.n / 2);
+    sculptAt(mid, mid, mid);
+    expect(vox.solid, 'the brush works the same on any shape').toBe(before - 27);
+    app.setTool(TOOL.SELECT);
+  });
+});
+
+describe('the help window', () => {
+  const body = () => document.querySelector('.helpbody').textContent;
+
+  it('opens from the topbar, and from F1', () => {
+    app.setMode('edit');
+    app.ui.help.close();
+    const btn = [...document.querySelectorAll('#topbar button')].find((b) => b.textContent === '？');
+    expect(btn, 'there is a way in without knowing a shortcut').toBeTruthy();
+    btn.click();
+    expect(app.ui.help.open).toBe(true);
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F1', bubbles: true }));
+    expect(app.ui.help.open, 'F1 toggles it back shut').toBe(false);
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F1', bubbles: true }));
+    expect(app.ui.help.open).toBe(true);
+    app.ui.help.close();
+  });
+
+  it('? opens it too', () => {
+    app.ui.help.close();
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Slash', shiftKey: true, bubbles: true }));
+    expect(app.ui.help.open).toBe(true);
+    app.ui.help.close();
+  });
+
+  it('Escape closes it before anything else does', () => {
+    app.setMode('edit');
+    app.setTool(TOOL.BLOCK);
+    app.ui.help.show();
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+    expect(app.ui.help.open).toBe(false);
+    expect(app.editor.tool, 'and it did not also drop the tool').toBe(TOOL.BLOCK);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('every page renders something', () => {
+    const pages = app.ui.help.pages();
+    expect(pages.length).toBeGreaterThan(4);
+    for (const p of pages) {
+      app.ui.help.show(p.id);
+      expect(body().length, p.id).toBeGreaterThan(80);
+    }
+    app.ui.help.close();
+  });
+
+  it('is written from the live tables, not copied out of them', () => {
+    // The point of generating it: a plate added to the table shows up here
+    // with its own words, and a rebound key redraws the field page.
+    app.ui.help.show('equip');
+    for (const t of [...WEAPON_TYPES, ...SYSTEM_TYPES]) {
+      expect(body(), t).toContain(EQUIP_META[t].label);
+    }
+    expect(body()).toContain(EQUIP_META.float.blurb);
+
+    app.ui.help.show('shapes');
+    for (const id of SHAPE_IDS) expect(body(), id).toContain(SHAPES[id].label);
+    app.ui.help.close();
+  });
+
+  it('the field page follows the keys you actually bound', () => {
+    const fire = app.input.keysFor('fire')[0];
+    const forward = app.input.keysFor('forward');
+    app.ui.help.show('field');
+    expect(body()).toContain('武器を撃つ');
+    expect(body()).toContain('W');
+
+    app.input.setBinding('forward', ['KeyO']);
+    app.ui.help.render();
+    expect(body(), 'the rebind shows up').toContain('O');
+
+    app.input.setBinding('forward', forward);
+    app.ui.help.render();
+    expect(body()).toContain('W');
+    expect(app.input.keysFor('fire')[0], 'nothing else moved').toBe(fire);
+    app.ui.help.close();
+  });
+
+  it('can be resized like the other windows', () => {
+    app.ui.help.show();
+    const box = document.querySelector('#help .helpbox');
+    expect(box.querySelectorAll('.grip').length).toBe(3);
+    app.ui.help.close();
+    box.resetSize();
+  });
+
+  it('the pause menu offers it mid-fight', () => {
+    app.setMode('field');
+    app.pauseField();
+    const btn = [...document.querySelectorAll('#pause button')].find((b) => b.textContent.includes('使い方'));
+    expect(btn).toBeTruthy();
+    btn.click();
+    expect(app.ui.help.open).toBe(true);
+    expect(app.ui.help.section, 'straight to the controls').toBe('field');
+    app.ui.help.close();
+    [...document.querySelectorAll('#pause button')].find((b) => b.textContent.includes('再開')).click();
+    app.setMode('edit');
+  });
+});
+
+describe('a machine with no legs has no gait', () => {
+  it('the spec panel drops the badge entirely', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.ui.renderStats(app.editor.stats);
+    expect(app.editor.stats.legs).toBe(0);
+    expect(app.ui.statsEl.querySelector('.gaitbadge'), 'no badge at all').toBe(null);
+    expect(app.ui.statsEl.textContent, 'and it does not say hover either').not.toContain('ホバー');
+
+    app.loadPreset('biped');
+    app.ui.renderStats(app.editor.stats);
+    expect(app.ui.statsEl.querySelector('.gaitbadge').textContent).toBe('二足歩行');
+  });
+
+  it('the field read-out drops the row too', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.setMode('field');
+    step(4);
+    const bag = (p) => ({ telemetry: p.body.telemetry(), gait: p.stats.gait, legs: p.stats.legs });
+    const rows = app.field.hud.debugRows(bag(app.field.player));
+    expect(rows.some(([k]) => k === 'GAIT'), 'nothing to report').toBe(false);
+    app.setMode('edit');
+
+    app.loadPreset('biped');
+    app.setMode('field');
+    step(4);
+    expect(app.field.hud.debugRows(bag(app.field.player)).some(([k]) => k === 'GAIT')).toBe(true);
+    app.setMode('edit');
+  });
+});
+
+describe('the float plate', () => {
+  const fit = (type) => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const chest = [...app.assembly.parts.values()].find((p) => p.size?.[0] === 1.5);
+    return app.assembly.addEquipOnFace(chest.id, 5, type, { size: 0.7 });
+  };
+
+  it('holds the machine off the ground in the field', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    step(90);
+    const grounded = app.field.player.position.y;
+    app.setMode('edit');
+
+    fit(EQUIP.FLOAT);
+    app.editor.rebuild();
+    app.setMode('field');
+    step(90);
+    expect(app.field.player.body.floating).toBe(true);
+    expect(app.field.player.position.y, 'visibly higher than it stood before')
+      .toBeGreaterThan(grounded + 1);
+    app.setMode('edit');
+  });
+
+  it('stops the legs walking, and hangs them instead', () => {
+    // Standing still nobody strides, so both halves have to actually travel.
+    const runFor = (frames) => {
+      app.input.setEnabled(true);
+      app.field.respawn();
+      app.input.keys.add('KeyW');
+      step(frames);
+      app.input.keys.clear();
+      return app.field.player.animator;
+    };
+
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    const striding = runFor(90).gaitFreq;
+    app.setMode('edit');
+
+    fit(EQUIP.FLOAT);
+    app.editor.rebuild();
+    app.setMode('field');
+    const anim = runFor(90);
+    expect(striding, 'the grounded one was walking').toBeGreaterThan(0.8);
+    expect(anim.gaitFreq, 'the floating one is not').toBeLessThan(0.1);
+    // The legs are still posed — by inertia now, not by a gait.
+    const leg = app.field.player.rig.limbs[0].chain[0];
+    expect(leg.joint.quaternion.angleTo(new THREE.Quaternion())).toBeGreaterThan(0.05);
+    app.setMode('edit');
+  });
+
+  it('is refused alongside a gravity plate, with a reason', () => {
+    fit(EQUIP.GRAVITY);
+    app.editor.rebuild();
+    app.setEquipType(EQUIP.FLOAT);
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(0, 1, 7));
+    pointAt(core.clone().add(new THREE.Vector3(0, 0, 0.49)), { click: true });
+
+    expect(app.assembly.countEquip(EQUIP.FLOAT)).toBe(0);
+    expect(app.ui.toast.textContent).toContain('グラビティ');
+    app.setTool(TOOL.SELECT);
+  });
+});
+
+describe('the circle plate', () => {
+  /** A wide deck with towers at the given distances from the middle. */
+  const deck = (radius, dists) => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    const a = app.assembly;
+    app.editor.select(a.rootId);
+    app.editor.resizeSelected([4, 0.5, 4]);
+    const towers = dists.map((d, i) => a.addBlock(a.rootId, { pos: [d, 0.35, 0] }, 2 + i, {
+      size: [0.5, 0.5, 0.5],
+    }));
+    const plate = a.addEquipOnFace(a.rootId, 2, EQUIP.CIRCLE, { ringRadius: radius });
+    app.editor.rebuild();
+    return { towers, plate };
+  };
+
+  it('turns what stands inside the circle and nothing else', () => {
+    const { towers, plate } = deck(1.5, [0.8, 2.6]);
+    expect(app.editor.rig.nodes.get(plate.id).ring.members).toEqual([towers[0].id]);
+
+    app.editor.rig.root.updateMatrixWorld(true);
+    const before = towers.map((t) => worldOf(t.id).clone());
+    step(40);
+    app.editor.rig.root.updateMatrixWorld(true);
+    const after = towers.map((t) => worldOf(t.id));
+
+    expect(after[0].distanceTo(before[0]), 'the one inside went round').toBeGreaterThan(0.1);
+    expect(after[1].distanceTo(before[1]), 'the one outside stayed put').toBeLessThan(0.001);
+  });
+
+  it('the radius slider re-decides who rides it', () => {
+    const { towers, plate } = deck(1.0, [0.8, 2.6]);
+    app.editor.select(plate.id);
+    expect(app.editor.rig.nodes.get(plate.id).ring.members).toHaveLength(1);
+
+    app.editor.setEquipRingSelected(3);
+    expect(app.assembly.get(plate.id).ringRadius).toBeCloseTo(3, 6);
+    expect(app.editor.rig.nodes.get(plate.id).ring.members, 'both of them now')
+      .toHaveLength(2);
+    expect(app.editor.rig.nodes.get(plate.id).ring.members).toContain(towers[1].id);
+  });
+
+  it('the panel shows the radius and how many parts it caught', () => {
+    const { plate } = deck(1.5, [0.8, 2.6]);
+    app.editor.select(plate.id);
+    app.ui.renderInspector(app.editor.selectedParts());
+    const text = app.ui.inspectorEl.textContent;
+    expect(text).toContain('サークル');
+    expect(text).toContain('半径');
+    expect(text).toContain('回るパーツ');
+  });
+
+  it('changing the radius is one undo step', () => {
+    const { plate } = deck(1.5, [0.8]);
+    app.editor.select(plate.id);
+    app.editor.setEquipRingSelected(4);
+    expect(app.assembly.get(plate.id).ringRadius).toBeCloseTo(4, 6);
+    app.undo();
+    expect(app.assembly.get(plate.id).ringRadius).toBeCloseTo(1.5, 6);
+  });
+});
+
+describe('the rest of the rack, in the field', () => {
+  /** Deploy the biped carrying exactly these plates (plus its boost). */
+  const deploy = (...types) => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const a = app.assembly;
+    for (const e of a.equips()) if (e.equipType !== EQUIP.BOOST) a.remove(e.id);
+    const chest = [...a.parts.values()].find((p) => p.size?.[0] === 1.5);
+    for (const t of types) a.addEquipOnFace(chest.id, 4, t, { size: 0.8 });
+    app.editor.rebuild();
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.respawn();
+    step(4);
+    return app.field.player;
+  };
+
+  const hold = (frames) => {
+    app.input.keys.add('Mouse0');
+    step(frames);
+    app.input.keys.clear();
+  };
+
+  it('a beam shot is drawn as a long thin line', () => {
+    deploy(EQUIP.BEAM);
+    forceLock();
+    hold(1);
+    const shot = app.field.projectiles.pool.find((s) => s.life > 0);
+    expect(shot, 'something left the barrel').toBeTruthy();
+    expect(shot.kind).toBe('beam');
+    expect(shot.mesh.scale.z, 'long').toBeGreaterThan(6);
+    expect(shot.mesh.scale.x, 'and thin').toBeLessThan(shot.mesh.scale.z / 10);
+    app.setMode('edit');
+  });
+
+  it('a missile plate really puts five in the air, trailing smoke', () => {
+    deploy(EQUIP.MISSILE);
+    forceLock();
+    hold(1);
+    const live = app.field.projectiles.pool.filter((s) => s.life > 0);
+    expect(live).toHaveLength(EQUIP_META.missile.shots);
+    expect(live.every((s) => s.trail && s.trail.line.visible), 'each with its own trail').toBe(true);
+    step(20);
+    // The trail is a line of points that only fills in as the missile flies.
+    const pts = live[0].trail.geo.getAttribute('position').array;
+    const head = [pts[pts.length - 3], pts[pts.length - 2], pts[pts.length - 1]];
+    expect(Math.hypot(head[0] - pts[0], head[1] - pts[1], head[2] - pts[2]),
+      'and the tail is behind the head').toBeGreaterThan(0.5);
+    app.setMode('edit');
+  });
+
+  it('the laser draws a beam while it is held, and stops when it is not', () => {
+    deploy(EQUIP.LASER);
+    forceLock();
+    const lit = () => app.field.projectiles.beams.filter((b) => b.life > 0 && b.mesh.visible).length;
+    hold(6);
+    expect(lit(), 'a beam is on screen').toBeGreaterThan(0);
+    step(30);
+    expect(lit(), 'and gone once you let go').toBe(0);
+    app.setMode('edit');
+  });
+
+  it('the scope narrows the view, and gives it back', () => {
+    deploy(EQUIP.SNIPER);
+    step(30);
+    const open = app.field.camera.fov;
+
+    app.input.keys.add('KeyQ');
+    step(60);
+    expect(app.field.player.weapons.scoped).toBe(true);
+    expect(app.field.cameraRig.scope).toBeCloseTo(EQUIP_META.sniper.scope, 5);
+    expect(app.field.camera.fov, 'zoomed in').toBeLessThan(open * 0.7);
+
+    app.input.keys.clear();
+    step(90);
+    expect(app.field.cameraRig.scope, 'and the zoom is released').toBe(1);
+    // It eases back rather than snapping, so "near enough" is the honest test.
+    expect(Math.abs(app.field.camera.fov - open), 'back to where it was').toBeLessThan(2);
+    app.setMode('edit');
+  });
+
+  it('a shield puts a bubble round the machine and takes it away again', () => {
+    const p = deploy(EQUIP.SHIELD);
+    hold(2);
+    step(2);
+    expect(p.shield, 'the barrier is up').toBeTruthy();
+    const bubble = app.field.shieldBubbles.get(p);
+    expect(bubble, 'and you can see it').toBeTruthy();
+    expect(bubble.visible).toBe(true);
+
+    p.shield = null;
+    step(2);
+    expect(bubble.visible, 'it goes when the barrier does').toBe(false);
+    app.setMode('edit');
+  });
+
+  it('leaving the field takes the barrier with it', () => {
+    const p = deploy(EQUIP.SHIELD);
+    hold(2);
+    step(2);
+    const bubble = app.field.shieldBubbles.get(p);
+    expect(bubble.visible).toBe(true);
+    app.setMode('edit');
+    expect(bubble.visible, 'nothing from the fight is left hanging').toBe(false);
+  });
+
+  it('a grenade arcs and sets off a blast where it lands', () => {
+    deploy(EQUIP.GRENADE);
+    forceLock();
+    hold(1);
+    const shot = app.field.projectiles.pool.find((s) => s.life > 0);
+    expect(shot.kind).toBe('grenade');
+    const rise = shot.velocity.y;
+    step(14);
+    expect(shot.velocity.y, 'it is falling').toBeLessThan(rise);
+
+    let blast = false;
+    for (let i = 0; i < 240 && !blast; i++) {
+      step(1);
+      if (app.field.projectiles.hits.some((h) => h.blast > 0)) blast = true;
+    }
+    expect(blast, 'and it went off').toBe(true);
+    app.setMode('edit');
+  });
+
+  it('every weapon fires in the field without throwing', () => {
+    for (const type of WEAPON_TYPES) {
+      deploy(type);
+      forceLock();
+      shouldNotThrow(() => {
+        app.input.keys.add('Mouse0');
+        app.input.keys.add('KeyQ');
+        step(60);
+        app.input.keys.clear();
+        step(20);
+      }, type);
+    }
+    app.setMode('edit');
+  });
+
+  it('the whole rack can be carried, switched through, and read on the HUD', () => {
+    const p = deploy(...WEAPON_TYPES);
+    expect(p.weapons.slots).toHaveLength(WEAPON_TYPES.length);
+    for (let i = 0; i < WEAPON_TYPES.length; i++) {
+      expect(p.weapons.active.type).toBe(WEAPON_TYPES[i]);
+      p.weapons.next();
+    }
+    expect(p.weapons.readout()).toHaveLength(WEAPON_TYPES.length);
+    shouldNotThrow(() => step(10), 'hud');
+    app.setMode('edit');
+  });
+});
+
+describe('the boost', () => {
+  it('is a step change over cruising', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.input.setEnabled(true);
+
+    const peak = (boost) => {
+      app.field.respawn();
+      app.input.keys.clear();
+      app.input.keys.add('KeyW');
+      if (boost) app.input.keys.add('KeyE');
+      let top = 0;
+      for (let i = 0; i < 200; i++) { step(1); top = Math.max(top, app.field.player.body.speed); }
+      app.input.keys.clear();
+      return top;
+    };
+    const cruise = peak(false);
+    const boosted = peak(true);
+    expect(boosted / cruise, 'unmistakably faster').toBeGreaterThan(1.4);
+    app.setMode('edit');
+  });
+});
+
+describe('the look of it', () => {
+  const post = () => app.post;
+
+  it('one post chain serves every screen', () => {
+    // Editors and arena share the target: a machine has to look the same on
+    // the bench as it does in the fight, and one HDR buffer is cheaper than
+    // three.
+    expect(app.mainEditor.post).toBe(post());
+    expect(app.partEditor.post).toBe(post());
+    expect(app.field.post).toBe(post());
+  });
+
+  it('the scene target is multisampled', () => {
+    // `antialias: true` on the canvas does nothing once the scene is drawn
+    // into a target instead, so the target has to ask for MSAA itself.
+    expect(post().target.samples).toBeGreaterThan(1);
+  });
+
+  it('the bloom chain steps down in halves, and follows the window', () => {
+    app.resize();
+    const t = post().target;
+    expect(post().bright.width).toBe(Math.max(1, t.width >> 1));
+    expect(post().bloomA[0].width).toBe(Math.max(1, t.width >> 2));
+    expect(post().bloomB[0].width).toBe(Math.max(1, t.width >> 3));
+
+    post().setSize(640, 400);
+    const pr = app.renderer.getPixelRatio();
+    expect(post().target.width).toBe(Math.floor(640 * pr));
+    expect(post().bloomB[0].height).toBe(Math.max(1, Math.floor(400 * pr) >> 3));
+    app.resize();
+  });
+
+  it('turning bloom off really skips the work', () => {
+    app.setMode('field');
+    const count = () => {
+      app.renderer.info.autoReset = false;
+      app.renderer.info.reset();
+      app.field.render();
+      const n = app.renderer.info.render.calls;
+      app.renderer.info.autoReset = true;
+      return n;
+    };
+    const lit = count();
+    post().setBloom(0);
+    const dark = count();
+    post().setBloom(0.85);
+    expect(dark, 'five passes fewer').toBeLessThan(lit);
+    app.setMode('edit');
+  });
+
+  it('bloom actually spills light outside what emits it', () => {
+    // The test the feature is named after: draw one small bright square on
+    // black and look for light where the square is not.
+    const scene = new THREE.Scene();
+    const cam = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+    cam.position.set(0, 0, 6);
+    cam.lookAt(0, 0, 0);
+    // Brighter than white on purpose: the bright pass only takes what is
+    // over 1, which is the whole point of rendering into an HDR target.
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    mat.color.setRGB(4, 4, 4);
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.6), mat);
+    scene.add(quad);
+
+    const gl = app.renderer.getContext();
+    const px = new Uint8Array(4);
+    // Just outside the square: past its edge, but well inside the halo a
+    // blur of this radius throws.
+    const sampleAway = () => {
+      const w = gl.drawingBufferWidth;
+      const h = gl.drawingBufferHeight;
+      gl.readPixels(Math.floor(w * 0.5), Math.floor(h * 0.62), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      return px[0] + px[1] + px[2];
+    };
+
+    post().setBloom(0);
+    post().set({ chroma: 0, lines: 0, noise: 0, flash: 0 }, 0);
+    post().render(scene, cam);
+    const dark = sampleAway();
+
+    post().setBloom(1.2);
+    post().render(scene, cam);
+    const lit = sampleAway();
+
+    post().setBloom(0.85);
+    quad.geometry.dispose();
+    mat.dispose();
+
+    expect(lit, 'the halo reaches past the source').toBeGreaterThan(dark + 4);
+  });
+
+  it('both worlds are lit by an environment, not just by lamps', () => {
+    // Every metal surface in the game — bone shafts, plate accents, pillar
+    // caps — needs something to reflect or it renders as a dark smudge.
+    expect(app.mainEditor.scene.environment, 'the workbench').toBeTruthy();
+    app.setMode('field');
+    expect(app.field.scene.environment, 'the arena').toBeTruthy();
+    expect(app.field.scene.background, 'and a sky behind it').toBeTruthy();
+    app.setMode('edit');
+  });
+
+  it('the arena has a horizon rather than an edge', () => {
+    app.setMode('field');
+    const skyline = app.field.world.skyline;
+    expect(skyline, 'distant blocks stand around the arena').toBeTruthy();
+    expect(skyline.children.length).toBeGreaterThan(10);
+    for (const m of skyline.children) {
+      const d = Math.hypot(m.position.x, m.position.z);
+      expect(d, 'well outside the fighting floor').toBeGreaterThan(app.field.world.arenaRadius);
+    }
+    app.setMode('edit');
+  });
+
+  it('the editor draws through the chain, and still draws', () => {
+    app.setMode('edit');
+    app.renderer.info.autoReset = false;
+    app.renderer.info.reset();
+    app.editor.render();
+    const calls = app.renderer.info.render.calls;
+    app.renderer.info.autoReset = true;
+    expect(calls, 'scene, bloom chain, resolve').toBeGreaterThan(1);
+  });
+
+  it('the whole chain disposes without throwing', () => {
+    const { PostFX } = window.__postfxModule;
+    const spare = new PostFX(app.renderer);
+    shouldNotThrow(() => spare.dispose(), 'PostFX.dispose');
+  });
+});
+
 describe('sculpting', () => {
   it('carves, adds and paints at the default resolution', () => {
     app.loadPreset('core');
@@ -1931,8 +2853,18 @@ describe('field mode', () => {
     app.field.respawn();
 
     // Park a target overhead and hold the lock while walking at it.
+    //
+    // The other machines are moved out of the arena first: this test is
+    // about what AIMING does to the chassis, and being shoved by something
+    // an earlier test left standing on the spawn point tips it for reasons
+    // that have nothing to do with the lock.
     const p = app.field.player;
     const target = app.field.enemies.find((e) => e.alive);
+    for (const e of app.field.enemies) {
+      if (e === target) continue;
+      e.body.reset(new THREE.Vector3(0, 40, 220));
+      e.syncTransform();
+    }
     target.body.reset(new THREE.Vector3(4, 30, -10));
     target.syncTransform();
     app.field.lock = { robot: target, aimPoint: target.position.clone() };
@@ -2272,18 +3204,19 @@ describe('weapons in the field', () => {
   it('a blade lights the block it is stuck to while you hold the trigger', () => {
     const p = deploy(EQUIP.BLADE);
     const glow = p.rig.equipNodes[0].bladeGlow;
-    expect(glow, 'the shell exists').toBeTruthy();
-    expect(glow.visible).toBe(false);
+    expect(glow, 'the shells exist').toBeTruthy();
+    expect(glow.meshes.length, 'at least the block it is stuck to').toBeGreaterThan(0);
+    expect(glow.meshes.some((m) => m.visible)).toBe(false);
 
     app.input.keys.add('Mouse0');
     step(30);
     expect(p.weapons.bladeGlow).toBeGreaterThan(0.7);
-    expect(glow.visible).toBe(true);
+    expect(glow.meshes.every((m) => m.visible), 'the whole run lights').toBe(true);
     expect(glow.material.opacity).toBeGreaterThan(0.1);
 
     app.input.keys.clear();
     step(90);
-    expect(glow.visible).toBe(false);
+    expect(glow.meshes.some((m) => m.visible)).toBe(false);
   });
 
   it('the HUD lists every plate with its magazine', () => {
@@ -2301,9 +3234,9 @@ describe('weapons in the field', () => {
     app.input.keys.add('Mouse0');
     step(20);
     app.input.keys.clear();
-    expect(p.weapons.slots[0].ammo).toBeLessThan(6);
+    expect(p.weapons.slots[0].ammo).toBeLessThan(EQUIP_META.beam.ammo);
     app.field.respawn();
-    expect(app.field.player.weapons.slots[0].ammo).toBe(6);
+    expect(app.field.player.weapons.slots[0].ammo).toBe(EQUIP_META.beam.ammo);
     expect(app.field.projectiles.liveCount).toBe(0);
   });
 
@@ -2431,7 +3364,9 @@ describe('key config', () => {
     app.input.resetBindings();
     kc().show();
     expect(kc().el.classList.contains('hidden')).toBe(false);
-    expect(kc().rowsEl.querySelectorAll('.keyrow').length).toBe(17);
+    // One row per bindable action — counted from the table, so adding an
+    // action does not quietly leave a row untested.
+    expect(kc().rowsEl.querySelectorAll('.keyrow').length).toBe(ACTIONS.length);
     expect(rowFor('武器を撃つ')).toBeTruthy();
   });
 
@@ -2585,7 +3520,7 @@ describe('switching weapons', () => {
     app.input.keys.add('Mouse0');
     step(30);
     app.input.keys.clear();
-    expect(p.weapons.slots[0].ammo, 'the beam sat it out').toBe(6);
+    expect(p.weapons.slots[0].ammo, 'the beam sat it out').toBe(EQUIP_META.beam.ammo);
     expect(p.weapons.slots[1].ammo).toBeLessThan(30);
   });
 

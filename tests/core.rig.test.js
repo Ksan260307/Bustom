@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import * as THREE from 'three';
+import { EQUIP } from '../src/core/constants.js';
 import { Rig, ridesFarHalf, makeBodyMaterial } from '../src/core/Rig.js';
 import { Assembly, PRESETS, alignYToFace, _resetIds } from '../src/core/Assembly.js';
 import { BONE } from '../src/core/constants.js';
@@ -388,6 +389,136 @@ describe('Rig limbs', () => {
 
   it('a legless build has no limbs', () => {
     expect(new Rig(a).limbs).toHaveLength(0);
+  });
+});
+
+describe('the circle plate turns a ring of parts', () => {
+  /** A wide deck with towers at the given distances from the middle. */
+  const deck = (radius, dists) => {
+    const a = Assembly.createDefault();
+    a.setSize(a.rootId, [4, 0.5, 4]);
+    const towers = dists.map((d, i) => a.addBlock(a.rootId, { pos: [d, 0.35, 0] }, 2 + i, {
+      size: [0.5, 0.5, 0.5],
+    }));
+    const plate = a.addEquipOnFace(a.rootId, 2, EQUIP.CIRCLE, { ringRadius: radius });
+    return { a, towers, plate, rig: new Rig(a) };
+  };
+
+  it('collects only what stands inside the circle', () => {
+    const { plate, towers, rig } = deck(1.5, [0.8, 1.2, 2.4]);
+    const ring = rig.nodes.get(plate.id).ring;
+    expect(ring, 'the plate built a ring').toBeTruthy();
+    expect(ring.members).toHaveLength(2);
+    expect(ring.members).toContain(towers[0].id);
+    expect(ring.members).toContain(towers[1].id);
+    expect(ring.members).not.toContain(towers[2].id);
+    rig.dispose();
+  });
+
+  it('a wider radius sweeps up more of them', () => {
+    expect(deck(1.0, [0.8, 1.2, 2.4]).rig.nodes.size).toBeGreaterThan(0);
+    const narrow = deck(1.0, [0.8, 1.2, 2.4]);
+    const wide = deck(3.0, [0.8, 1.2, 2.4]);
+    expect(narrow.rig.nodes.get(narrow.plate.id).ring.members).toHaveLength(1);
+    expect(wide.rig.nodes.get(wide.plate.id).ring.members).toHaveLength(3);
+    narrow.rig.dispose();
+    wide.rig.dispose();
+  });
+
+  it('turns what it collected, and leaves the rest alone', () => {
+    const { plate, towers, rig } = deck(1.5, [0.8, 2.4]);
+    rig.root.updateMatrixWorld(true);
+    const before = towers.map((t) => {
+      const v = new THREE.Vector3();
+      rig.nodes.get(t.id).group.getWorldPosition(v);
+      return v;
+    });
+
+    rig.updateRollers(0.5);          // half a second of turning
+    rig.root.updateMatrixWorld(true);
+    const after = towers.map((t) => {
+      const v = new THREE.Vector3();
+      rig.nodes.get(t.id).group.getWorldPosition(v);
+      return v;
+    });
+
+    expect(after[0].distanceTo(before[0]), 'the one inside moved').toBeGreaterThan(0.2);
+    expect(after[1].distanceTo(before[1]), 'the one outside did not').toBeLessThan(1e-6);
+    rig.dispose();
+  });
+
+  it('the ring turns about the face the plate was stuck to', () => {
+    const { plate, towers, rig } = deck(1.5, [0.8]);
+    rig.root.updateMatrixWorld(true);
+    const v = new THREE.Vector3();
+    rig.nodes.get(towers[0].id).group.getWorldPosition(v);
+    const y0 = v.y;
+
+    rig.updateRollers(0.4);
+    rig.root.updateMatrixWorld(true);
+    rig.nodes.get(towers[0].id).group.getWorldPosition(v);
+    // Stuck on the top face, so the ring is horizontal: the rider goes round,
+    // never up or down.
+    expect(v.y).toBeCloseTo(y0, 5);
+    rig.dispose();
+  });
+
+  it('a plate with no radius set still gets the default one', () => {
+    const a = Assembly.createDefault();
+    a.setSize(a.rootId, [3, 0.5, 3]);
+    const tower = a.addBlock(a.rootId, { pos: [0.7, 0.35, 0] }, 3, { size: [0.4, 0.4, 0.4] });
+    const plate = a.addEquipOnFace(a.rootId, 2, EQUIP.CIRCLE);
+    const rig = new Rig(a);
+    expect(rig.nodes.get(plate.id).ring.members).toContain(tower.id);
+    rig.dispose();
+  });
+
+  it('rolling and circle plates advance together', () => {
+    const { rig } = deck(1.5, [0.8]);
+    expect(rig.rings).toHaveLength(1);
+    const ring = rig.rings[0];
+    rig.updateRollers(0.25);
+    expect(ring.angle).toBeGreaterThan(0);
+    rig.dispose();
+  });
+});
+
+describe('a blade lights everything joined to it', () => {
+  const built = () => {
+    const a = Assembly.createDefault();
+    const wing = a.addBlockOnFace(a.rootId, 0, 5, { size: [1, 0.5, 1] });
+    const tip = a.addBlockOnFace(wing.id, 0, 5, { size: [0.75, 0.5, 0.75] });
+    a.addBlockOnFace(tip.id, 0, 5, { size: [0.5, 0.5, 0.5] });
+    const arm = a.addBoneOnFace(wing.id, 3, BONE.ARM, { length: 1 });
+    const past = a.addBlockOnBone(arm.id, 0.8, 5, { size: [0.5, 0.5, 0.5] });
+    const blade = a.addEquipOnFace(wing.id, 2, EQUIP.BLADE, { size: 0.6 });
+    return { a, blade, past, rig: new Rig(a) };
+  };
+
+  it('wraps the whole connected run of blocks', () => {
+    const { blade, rig } = built();
+    const glow = rig.nodes.get(blade.id).bladeGlow;
+    expect(glow.meshes, 'the block it is on, and the two joined to it').toHaveLength(3);
+    rig.dispose();
+  });
+
+  it('stops at a bone, because past a joint it is a different limb', () => {
+    const { blade, past, rig } = built();
+    const glow = rig.nodes.get(blade.id).bladeGlow;
+    const beyond = rig.nodes.get(past.id);
+    expect(glow.meshes.some((m) => m.parent === (beyond.spin ?? beyond.group))).toBe(false);
+    rig.dispose();
+  });
+
+  it('lights and dims as one thing', () => {
+    const { blade, rig } = built();
+    const glow = rig.nodes.get(blade.id).bladeGlow;
+    rig.setBladeGlow(1);
+    expect(glow.meshes.every((m) => m.visible)).toBe(true);
+    expect(glow.material.opacity).toBeGreaterThan(0.4);
+    rig.setBladeGlow(0);
+    expect(glow.meshes.some((m) => m.visible)).toBe(false);
+    rig.dispose();
   });
 });
 

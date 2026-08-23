@@ -66,6 +66,16 @@ export class Animator {
      */
     this.travel = new THREE.Vector2(0, 1);
     this.travelBlend = 0;
+    /** Body-local velocity, kept so the float poses can read it. */
+    this.localVel = new THREE.Vector3();
+    this._prevLocalVel = new THREE.Vector3();
+    /**
+     * Where a hanging leg wants to swing to, in the body's own (x, z).
+     * A limb with no floor under it is a pendulum: it lags behind whatever
+     * the machine is doing, trailing acceleration and dragging against
+     * travel. Everything the FLOAT poses do is built on this one vector.
+     */
+    this.legSway = new THREE.Vector2();
     this._bind();
   }
 
@@ -171,6 +181,8 @@ export class Animator {
     this.time += dt;
 
     const gait = this.stats.gait;
+    /** A FLOAT plate keeps the feet off the floor, so nothing walks. */
+    const floating = (this.stats.hoverHeight ?? 0) > 0 && this.rig.limbs.length > 0;
     this.aimBlend = damp(this.aimBlend, s.locked ?? 0, 0.11, dt);
 
     // ---- gait clock: stride rate follows real ground speed
@@ -182,7 +194,9 @@ export class Animator {
       // otherwise four small legs just look like they are vibrating.
       ? (1.6 + clamp(s.planarSpeed / strideLen, 0, 6) * 1.6) * moving
       : clamp(s.planarSpeed / strideLen, 0, 4.2);
-    this.gaitFreq = damp(this.gaitFreq, targetFreq * s.grounded, 0.12, dt);
+    // Hovering machines have no stride: the clock stops, which also settles
+    // the arms into their idle float and stills a stride-driven waist.
+    this.gaitFreq = damp(this.gaitFreq, floating ? 0 : targetFreq * s.grounded, 0.12, dt);
     this.gaitPhase = (this.gaitPhase + this.gaitFreq * dt) % 1;
 
     // ---- body carriage
@@ -191,13 +205,14 @@ export class Animator {
     // cancels the very motion it is supposed to sell.
     const bobAmp = gait === 'hop' ? 0 : gait === 'multileg' ? 0.075 : 0.045;
     const bobHz = gait === 'hover' ? Math.max(1, legs) : 2;
-    const bobTarget = Math.sin(this.gaitPhase * TAU * bobHz)
-      * bobAmp * (1 + this.gaitFreq * 0.2) * s.grounded;
+    const bobTarget = floating ? 0
+      : Math.sin(this.gaitPhase * TAU * bobHz)
+        * bobAmp * (1 + this.gaitFreq * 0.2) * s.grounded;
     // Track faster when the gait is faster, or the smoothing eats the peaks.
     const bobHalfLife = clamp(0.22 / Math.max(1, this.gaitFreq * bobHz), 0.02, 0.06);
     this.bodyBob = damp(this.bodyBob, bobTarget, bobHalfLife, dt);
 
-    const localVel = _v.copy(s.velocity).applyQuaternion(_q.copy(s.bodyQ).invert());
+    const localVel = this.localVel.copy(s.velocity).applyQuaternion(_q.copy(s.bodyQ).invert());
     this.bodyLean.x = damp(this.bodyLean.x, clamp(localVel.z * 0.012, -0.20, 0.20), 0.15, dt);
     this.bodyLean.y = damp(this.bodyLean.y, clamp(-localVel.x * 0.010, -0.16, 0.16), 0.15, dt);
 
@@ -219,12 +234,18 @@ export class Animator {
     }
     this.travelBlend = damp(this.travelBlend, clamp01((planar - 0.4) / 2.5), 0.12, dt);
 
+    this._sway(dt);
+
     // ---- limbs
-    switch (gait) {
-      case 'hop': this._hop(s, dt); break;
-      case 'walk': this._walk(s, dt); break;
-      case 'multileg': this._multileg(s, dt); break;
-      default: this._hover(s, dt); break;
+    if (floating) {
+      this._floatLegs(s, dt);
+    } else {
+      switch (gait) {
+        case 'hop': this._hop(s, dt); break;
+        case 'walk': this._walk(s, dt); break;
+        case 'multileg': this._multileg(s, dt); break;
+        default: this._hover(s, dt); break;
+      }
     }
 
     this._arms(s, dt);
@@ -364,6 +385,158 @@ export class Animator {
           _q.multiply(_q2);
         }
         node.target.copy(limitQuat(_q, node.part.limit));
+      });
+    }
+  }
+
+  /**
+   * Update the pendulum a hanging limb swings on.
+   *
+   * Two forces, both read off the body's own motion: legs are thrown back
+   * when the machine accelerates, and they drag against the way it is
+   * already travelling. Damping toward the sum is what makes them lag —
+   * they arrive late and settle late, which is the whole tell that they are
+   * hanging rather than being held.
+   */
+  _sway(dt) {
+    if (dt <= 0) return;
+    _t2.set(
+      (this.localVel.x - this._prevLocalVel.x) / dt,
+      (this.localVel.z - this._prevLocalVel.z) / dt,
+    );
+    this._prevLocalVel.copy(this.localVel);
+
+    // Acceleration throws them hard; travel drags them gently.
+    const tx = clamp(-_t2.x * 0.016 - this.localVel.x * 0.030, -1, 1);
+    const tz = clamp(-_t2.y * 0.016 - this.localVel.z * 0.030, -1, 1);
+    this.legSway.set(damp(this.legSway.x, tx, 0.13, dt), damp(this.legSway.y, tz, 0.13, dt));
+  }
+
+  /**
+   * Legs with no ground under them.
+   *
+   *   1 leg    a plain pendulum: it goes where inertia leaves it
+   *   2 legs   hung, knees softly folded, toes pointed and trailing
+   *   3+ legs  curled inward under the body, the way an insect flies
+   */
+  _floatLegs(s, dt) {
+    const n = this.rig.limbs.length;
+    if (n === 1) this._floatSingle(s, dt);
+    else if (n === 2) this._floatPair(s, dt);
+    else this._floatCurl(s, dt);
+  }
+
+  /**
+   * Which way the angles go.
+   *
+   * The stride axis is Z x S, and (Z x S) x S = -Z, so turning a joint the
+   * POSITIVE way about it swings the tip BACKWARD. Same story sideways:
+   * positive about the splay axis carries the tip toward -X. Every float
+   * pose below is written in those terms — "back" and "inboard" are the
+   * positive directions — because a hanging leg is described far more
+   * naturally that way than by the raw axis signs.
+   */
+
+  /** One leg, hanging free. Inertia is the only thing posing it. */
+  _floatSingle(s, dt) {
+    const limb = this.rig.limbs[0];
+    if (!limb) return;
+    const sway = this.legSway;
+    const mag = Math.hypot(sway.x, sway.y);
+    const idle = Math.sin(this.time * 1.15) * 3 * DEG;
+
+    limb.chain.forEach((node, i) => {
+      // Down the chain the swing arrives later and smaller: the tip of a
+      // hanging limb always trails its own root.
+      const follow = 0.62 ** i;
+      const g = Animator.gainOf(node);
+      _q.setFromAxisAngle(node.axisStride, (-sway.y * 30 * DEG * follow + idle) * g);
+      _q2.setFromAxisAngle(node.axisSplay, -sway.x * 22 * DEG * follow * g);
+      _q.multiply(_q2);
+      if (i > 0) {
+        // A trailing knee never straightens all the way.
+        _q2.setFromAxisAngle(node.axisStride, (9 + mag * 13) * DEG * g);
+        _q.multiply(_q2);
+      }
+      node.target.copy(limitQuat(_q, node.part.limit));
+    });
+  }
+
+  /**
+   * Two legs, hung the way a hovering bipedal frame hangs them: trailing a
+   * little behind the body, knees softly folded back, toes pointed. Held
+   * close together rather than braced apart — there is nothing to brace
+   * against.
+   */
+  _floatPair(s, dt) {
+    const sway = this.legSway;
+    const mag = Math.hypot(sway.x, sway.y);
+    const thrust = s.thrust ?? 0;
+
+    for (const limb of this.rig.limbs) {
+      const mirror = limb.root.part.invert ? -1 : 1;
+      const side = limb.root.side;
+      // The two legs breathe out of phase, so the pair never reads as one
+      // rigid fork.
+      const idle = Math.sin(this.time * 0.9 + (side > 0 ? 0 : Math.PI)) * 2.5 * DEG;
+
+      limb.chain.forEach((node, i) => {
+        const g = Animator.gainOf(node);
+        const follow = 0.68 ** i;
+        let pitch;
+        if (i === 0) {
+          // Hip: hangs a touch behind vertical, and further back the harder
+          // the thrusters push.
+          pitch = (11 + thrust * 9) * DEG - sway.y * 26 * DEG + idle;
+        } else if (i === 1) {
+          // Knee: folded back, and it folds tighter as the machine moves.
+          pitch = (20 + mag * 10) * DEG * mirror - sway.y * 26 * DEG * follow;
+        } else {
+          // Ankle and beyond: the toe points, trailing the knee.
+          pitch = (-14 + mag * 6) * DEG * mirror - sway.y * 20 * DEG * follow;
+        }
+        _q.setFromAxisAngle(this._strideAxis(node), pitch * g);
+        // Drawn in toward the centre line, plus whatever the sway asks for.
+        _q2.setFromAxisAngle(node.axisSplay, (side * 5 * DEG - sway.x * 20 * DEG * follow) * g);
+        _q.multiply(_q2);
+        node.target.copy(limitQuat(_q, Math.max(node.part.limit, 80)));
+      });
+    }
+  }
+
+  /**
+   * Three legs or more: curled in under the body, tracing an arc, the way a
+   * flying insect carries the legs it is not standing on. Each bone down the
+   * chain turns a little further the same way, and a chain of equal turns IS
+   * an arc — that is where the circle comes from.
+   */
+  _floatCurl(s, dt) {
+    const sway = this.legSway;
+    const mag = Math.hypot(sway.x, sway.y);
+
+    for (const limb of this.rig.limbs) {
+      const side = limb.root.side;
+      // Front legs fold forward and under, back legs trail back and under —
+      // the way a beetle carries them in the air. Curling every leg the same
+      // way just piles all the feet in the middle and they cross.
+      const fore = Math.sign(Number(limb.root.restPos.z.toFixed(3))) || 1;
+      // Slow, per-limb ripple: real ones never hold perfectly still.
+      const idle = Math.sin(this.time * 1.3 + limb.phaseOffset * TAU) * 3 * DEG;
+
+      limb.chain.forEach((node, i) => {
+        const g = Animator.gainOf(node);
+        const follow = 0.7 ** i;
+        // The arc: each joint turns a bit further the same way. Big enough
+        // at the hip to lift the limb clear of hanging, tighter down the
+        // chain to close the curl.
+        const curl = (34 + i * 22) * DEG;
+        _q.setFromAxisAngle(node.axisSplay, (side * curl - sway.x * 18 * DEG * follow) * g);
+        _q2.setFromAxisAngle(
+          this._strideAxis(node),
+          (-fore * (16 + i * 13) * DEG - sway.y * 22 * DEG * follow + idle + mag * 5 * DEG) * g,
+        );
+        _q.multiply(_q2);
+        node.target.copy(limitQuat(_q, Math.max(node.part.limit, 110)));
       });
     }
   }

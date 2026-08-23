@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Projectiles, WeaponSystem } from '../src/game/Weapons.js';
 import { Robot } from '../src/game/Robot.js';
 import { Assembly, PRESETS, computeStats, _resetIds } from '../src/core/Assembly.js';
-import { EQUIP, EQUIP_META } from '../src/core/constants.js';
+import { EQUIP, EQUIP_META, WEAPON_TYPES } from '../src/core/constants.js';
 import { testWorld, stripEquips } from './helpers/dom.js';
 
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -189,7 +189,7 @@ describe('WeaponSystem', () => {
     const r = machine(EQUIP.BEAM);
     const p = pool(64);
     for (let i = 0; i < 60; i++) r.weapons.update(ctx({ firing: true, projectiles: p }), 1 / 60);
-    expect(r.weapons.slots[0].ammo).toBe(5);
+    expect(r.weapons.slots[0].ammo, 'one round gone').toBe(EQUIP_META.beam.ammo - 1);
   });
 
   it('releasing and pressing again fires the beam again', () => {
@@ -200,7 +200,7 @@ describe('WeaponSystem', () => {
       for (let i = 0; i < 5; i++) r.weapons.update(ctx({ firing: false, projectiles: p }), 1 / 60);
     };
     pull(); pull(); pull();
-    expect(r.weapons.slots[0].ammo).toBe(3);
+    expect(r.weapons.slots[0].ammo, 'three presses, three rounds').toBe(EQUIP_META.beam.ammo - 3);
   });
 
   it('runs dry, reloads on its own, and comes back full', () => {
@@ -313,8 +313,8 @@ describe('WeaponSystem', () => {
     const p = pool(64);
     r.weapons.select(1);
     r.weapons.update(ctx({ firing: true, projectiles: p }), 1 / 60);
-    expect(r.weapons.slots[0].ammo, 'the beam never fired').toBe(6);
-    expect(r.weapons.slots[1].ammo).toBe(5);
+    expect(r.weapons.slots[0].ammo, 'the beam never fired').toBe(EQUIP_META.beam.ammo);
+    expect(r.weapons.slots[1].ammo).toBe(EQUIP_META.shot.ammo - 1);
     expect(p.liveCount, 'three pellets, from the shot plate only').toBe(3);
   });
 
@@ -344,11 +344,11 @@ describe('WeaponSystem', () => {
     const p = pool(64);
     // hold the trigger on the beam
     for (let i = 0; i < 30; i++) r.weapons.update(ctx({ firing: true, projectiles: p }), 1 / 60);
-    expect(r.weapons.slots[0].ammo).toBe(5);
+    expect(r.weapons.slots[0].ammo, 'one round gone').toBe(EQUIP_META.beam.ammo - 1);
 
     r.weapons.select(1);
     for (let i = 0; i < 30; i++) r.weapons.update(ctx({ firing: true, projectiles: p }), 1 / 60);
-    expect(r.weapons.slots[1].ammo, 'a semi-auto fires once per press').toBe(5);
+    expect(r.weapons.slots[1].ammo, 'a semi-auto fires once per press').toBe(EQUIP_META.shot.ammo - 1);
   });
 
   it('only the selected blade lights up', () => {
@@ -365,7 +365,10 @@ describe('WeaponSystem', () => {
     const r = machine(EQUIP.BEAM, EQUIP.BLADE);
     const rows = r.weapons.readout();
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatchObject({ label: 'ビーム', ammo: 6, max: 6, reloading: false, melee: false });
+    expect(rows[0]).toMatchObject({
+      label: EQUIP_META.beam.label, ammo: EQUIP_META.beam.ammo,
+      max: EQUIP_META.beam.ammo, reloading: false, melee: false,
+    });
     expect(rows[1].melee).toBe(true);
     expect(rows.map((x) => x.active), 'and marks the live one').toEqual([true, false]);
     r.weapons.next();
@@ -376,9 +379,9 @@ describe('WeaponSystem', () => {
     const r = machine(EQUIP.BEAM);
     const p = pool(8);
     r.weapons.update(ctx({ firing: true, projectiles: p }), 1 / 60);
-    expect(r.weapons.slots[0].ammo).toBe(5);
+    expect(r.weapons.slots[0].ammo, 'one round gone').toBe(EQUIP_META.beam.ammo - 1);
     r.rearm();
-    expect(r.weapons.slots[0].ammo).toBe(6);
+    expect(r.weapons.slots[0].ammo).toBe(EQUIP_META.beam.ammo);
     expect(r.weapons.bladeGlow).toBe(0);
   });
 
@@ -435,6 +438,77 @@ describe('equipment effects', () => {
     expect(loaded.weaponCount).toBe(2);
   });
 
+  it('a float plate holds the machine off the floor', () => {
+    const s = computeStats(withPlates(EQUIP.FLOAT));
+    expect(s.floatPlates).toBe(1);
+    expect(s.hoverHeight).toBeCloseTo(EQUIP_META.float.hover, 6);
+    expect(computeStats(stripEquips(PRESETS.biped.build())).hoverHeight).toBe(0);
+  });
+
+  it('gravity and float refuse to share a machine', () => {
+    const a = stripEquips(PRESETS.biped.build());
+    expect(a.addEquipOnFace(a.core.id, 4, EQUIP.GRAVITY)).toBeTruthy();
+    expect(a.addEquipOnFace(a.core.id, 2, EQUIP.FLOAT), 'one says never leave the ground, the other never touch it')
+      .toBeNull();
+    expect(a.blockedBy(EQUIP.FLOAT)).toBe(EQUIP.GRAVITY);
+    expect(a.canAddEquip(EQUIP.FLOAT)).toBe(false);
+
+    const b = stripEquips(PRESETS.biped.build());
+    expect(b.addEquipOnFace(b.core.id, 4, EQUIP.FLOAT)).toBeTruthy();
+    expect(b.addEquipOnFace(b.core.id, 2, EQUIP.GRAVITY)).toBeNull();
+    expect(b.blockedBy(EQUIP.GRAVITY)).toBe(EQUIP.FLOAT);
+  });
+
+  it('swapping a fitted plate obeys the same rule', () => {
+    const a = stripEquips(PRESETS.biped.build());
+    a.addEquipOnFace(a.core.id, 4, EQUIP.GRAVITY);
+    const other = a.addEquipOnFace(a.core.id, 2, EQUIP.BEAM);
+    expect(a.setEquipType(other.id, EQUIP.FLOAT)).toBe(false);
+    expect(a.get(other.id).equipType).toBe(EQUIP.BEAM);
+  });
+
+  it('only one float plate, like gravity', () => {
+    const a = stripEquips(PRESETS.biped.build());
+    expect(a.addEquipOnFace(a.core.id, 4, EQUIP.FLOAT)).toBeTruthy();
+    expect(a.addEquipOnFace(a.core.id, 2, EQUIP.FLOAT)).toBeNull();
+    expect(a.countEquip(EQUIP.FLOAT)).toBe(1);
+  });
+
+  it('gravity wins if an old build somehow carries both', () => {
+    // Nothing can fit them together any more, but a file saved before the
+    // rule existed still can. Gravity is the one that pins you down.
+    const a = stripEquips(PRESETS.biped.build());
+    a.addEquipOnFace(a.core.id, 4, EQUIP.GRAVITY);
+    const forced = a.addEquipOnFace(a.core.id, 2, EQUIP.BEAM);
+    a.get(forced.id).equipType = EQUIP.FLOAT;           // bypass the rule
+    const s = computeStats(a);
+    expect(s.noFly).toBe(true);
+    expect(s.hoverHeight).toBe(0);
+  });
+
+  it('a circle plate carries a ring radius, and keeps it', () => {
+    const a = stripEquips(PRESETS.biped.build());
+    const p = a.addEquipOnFace(a.core.id, 2, EQUIP.CIRCLE, { ringRadius: 3 });
+    expect(p.ringRadius).toBeCloseTo(3, 6);
+    expect(p.spin).toEqual({ dir: 1, rpm: EQUIP_META.circle.rpm });
+    expect(computeStats(a).circlePlates).toBe(1);
+
+    expect(a.setEquipRing(p.id, 1.3)).toBe(true);
+    expect(p.ringRadius, 'snapped to the step').toBeCloseTo(1.25, 6);
+    expect(a.setEquipRing(p.id, 99)).toBe(true);
+    expect(p.ringRadius).toBeCloseTo(6, 6);
+
+    const back = Assembly.fromJSON(a.toJSON());
+    expect(back.get(p.id).ringRadius).toBeCloseTo(6, 6);
+  });
+
+  it('a plate that turns nothing has no ring radius at all', () => {
+    const a = stripEquips(PRESETS.biped.build());
+    const beam = a.addEquipOnFace(a.core.id, 2, EQUIP.BEAM);
+    expect(beam.ringRadius).toBe(null);
+    expect(a.setEquipRing(beam.id, 2)).toBe(false);
+  });
+
   it('a bigger plate weighs more than a small one', () => {
     const small = new Assembly('S');
     small.addCore();
@@ -443,5 +517,277 @@ describe('equipment effects', () => {
     big.addCore();
     big.addEquipOnFace(big.rootId, 4, EQUIP.BEAM, { size: 1.6 });
     expect(computeStats(big).mass).toBeGreaterThan(computeStats(small).mass);
+  });
+});
+
+// ============================================================
+//  The rest of the rack
+// ============================================================
+
+describe('the new weapons', () => {
+  let world;
+  beforeEach(() => { _resetIds(0); world = testWorld(); });
+
+  const machine = (...types) => {
+    const a = stripEquips(PRESETS.biped.build());
+    for (const t of types) a.addEquipOnFace(a.core.id, 4, t, { size: 0.7 });
+    return new Robot(a, world, { isPlayer: true });
+  };
+  const ctx = (over = {}) => ({
+    firing: false, aimPoint: null, projectiles: null, targets: [], lockTarget: null, ...over,
+  });
+  const dummy = (z = 30) => {
+    const t = new Robot(stripEquips(PRESETS.biped.build()), world);
+    t.body.reset(new THREE.Vector3(0, 2, z));
+    t.syncTransform();
+    return t;
+  };
+
+  it('the beam is one long line, not a stream of dots', () => {
+    const r = machine(EQUIP.BEAM);
+    const p = pool(16);
+    r.weapons.update(ctx({ firing: true, projectiles: p, aimPoint: V(0, 2, 60) }), 1 / 60);
+    const shot = p.pool.find((s) => s.life > 0);
+    expect(shot.kind).toBe('beam');
+    expect(shot.streak, 'drawn as a stroke').toBeGreaterThan(5);
+    expect(shot.mesh.scale.z, 'and that is its length on screen').toBeCloseTo(shot.streak, 5);
+    expect(shot.mesh.scale.x, 'thin').toBeLessThan(0.4);
+  });
+
+  it('the beam will not machine-gun', () => {
+    const r = machine(EQUIP.BEAM);
+    const p = pool(64);
+    // Two seconds of frantic clicking.
+    for (let i = 0; i < 120; i++) {
+      r.weapons.update(ctx({ firing: i % 2 === 0, projectiles: p }), 1 / 60);
+    }
+    expect(EQUIP_META.beam.interval).toBeGreaterThan(0.4);
+    expect(p.pool.filter((s) => s.life > 0).length + (EQUIP_META.beam.ammo - r.weapons.slots[0].ammo))
+      .toBeLessThan(12);
+  });
+
+  it('a missile plate throws a salvo, each one homing', () => {
+    const r = machine(EQUIP.MISSILE);
+    const p = pool(32);
+    const t = dummy();
+    r.weapons.update(ctx({ firing: true, projectiles: p, targets: [t], lockTarget: t }), 1 / 60);
+    const live = p.pool.filter((s) => s.life > 0);
+    expect(live).toHaveLength(EQUIP_META.missile.shots);
+    expect(live.length, 'a salvo, not a single round').toBeGreaterThan(1);
+    for (const s of live) {
+      expect(s.kind).toBe('missile');
+      expect(s.turn, 'every one of them steers').toBeGreaterThan(0);
+      expect(s.target).toBe(t);
+      expect(s.trail, 'and leaves a trail behind it').toBeTruthy();
+    }
+    // Thrown wide: they do not all leave along the same line.
+    const dirs = live.map((s) => s.velocity.clone().normalize());
+    const spread = Math.max(...dirs.map((d) => d.distanceTo(dirs[0])));
+    expect(spread, 'scattered on the way out').toBeGreaterThan(0.1);
+  });
+
+  it('the laser burns while held and overheats rather than running dry', () => {
+    const r = machine(EQUIP.LASER);
+    const t = dummy(20);
+    const slot = r.weapons.slots[0];
+    expect(slot.meta.beam, 'it is a beam weapon').toBeTruthy();
+
+    const hp = t.hp;
+    for (let i = 0; i < 30; i++) {
+      r.weapons.update(ctx({ firing: true, targets: [t], aimPoint: t.position }), 1 / 60);
+    }
+    expect(t.hp, 'it is doing damage the whole time').toBeLessThan(hp);
+    expect(slot.heat, 'and heating up').toBeGreaterThan(0);
+
+    for (let i = 0; i < 240; i++) {
+      r.weapons.update(ctx({ firing: true, targets: [t], aimPoint: t.position }), 1 / 60);
+    }
+    expect(slot.reloadT, 'held too long, it cuts out').toBeGreaterThan(0);
+
+    const cooked = t.hp;
+    r.weapons.update(ctx({ firing: true, targets: [t], aimPoint: t.position }), 1 / 60);
+    expect(t.hp, 'and does nothing while it cools').toBe(cooked);
+  });
+
+  it('the laser cools down when you let go', () => {
+    const r = machine(EQUIP.LASER);
+    const t = dummy(20);
+    const slot = r.weapons.slots[0];
+    for (let i = 0; i < 40; i++) {
+      r.weapons.update(ctx({ firing: true, targets: [t], aimPoint: t.position }), 1 / 60);
+    }
+    const hot = slot.heat;
+    for (let i = 0; i < 120; i++) r.weapons.update(ctx({ firing: false, targets: [t] }), 1 / 60);
+    expect(slot.heat).toBeLessThan(hot);
+  });
+
+  it('the laser hits the nearest thing on the line, not everything on it', () => {
+    const r = machine(EQUIP.LASER);
+    const near = dummy(20);
+    const far = dummy(60);
+    for (let i = 0; i < 20; i++) {
+      r.weapons.update(ctx({
+        firing: true, targets: [near, far], aimPoint: new THREE.Vector3(0, 2, 80),
+      }), 1 / 60);
+    }
+    expect(near.hp, 'the one in the way took it').toBeLessThan(near.maxHp);
+    expect(far.hp, 'and shielded the one behind').toBe(far.maxHp);
+  });
+
+  it('the sniper reaches further and hits harder than the rifle', () => {
+    expect(EQUIP_META.sniper.speed).toBeGreaterThan(EQUIP_META.beam.speed);
+    expect(EQUIP_META.sniper.damage).toBeGreaterThan(EQUIP_META.beam.damage);
+    expect(EQUIP_META.sniper.interval, 'and pays for it in rate of fire')
+      .toBeGreaterThan(EQUIP_META.beam.interval);
+  });
+
+  it('the scope only zooms for the plate that has one, and only while held', () => {
+    const r = machine(EQUIP.SNIPER, EQUIP.BEAM);
+    expect(r.weapons.scopeZoom).toBe(1);
+
+    r.weapons.update(ctx({ scoping: true }), 1 / 60);
+    expect(r.weapons.scoped).toBe(true);
+    expect(r.weapons.scopeZoom).toBeCloseTo(EQUIP_META.sniper.scope, 6);
+
+    r.weapons.update(ctx({ scoping: false }), 1 / 60);
+    expect(r.weapons.scoped).toBe(false);
+    expect(r.weapons.scopeZoom).toBe(1);
+
+    r.weapons.select(1);
+    r.weapons.update(ctx({ scoping: true }), 1 / 60);
+    expect(r.weapons.scoped, 'the rifle has no scope to hold').toBe(false);
+    expect(r.weapons.scopeZoom).toBe(1);
+  });
+
+  it('the spread throws a fan of pellets in one pull', () => {
+    const r = machine(EQUIP.SPREAD);
+    const p = pool(32);
+    r.weapons.update(ctx({ firing: true, projectiles: p, aimPoint: V(0, 2, 40) }), 1 / 60);
+    const live = p.pool.filter((s) => s.life > 0);
+    expect(live).toHaveLength(EQUIP_META.spread.shots);
+    const dirs = live.map((s) => s.velocity.clone().normalize());
+    expect(Math.max(...dirs.map((d) => d.distanceTo(dirs[0]))), 'a wide fan')
+      .toBeGreaterThan(0.2);
+  });
+
+  it('the magnum hits hard but simply stops after a few metres', () => {
+    const m = EQUIP_META.magnum;
+    expect(m.damage).toBeGreaterThan(EQUIP_META.shot.damage * 3);
+    const reach = m.speed * m.life;
+    expect(reach, 'a short-range weapon').toBeLessThan(45);
+    expect(EQUIP_META.beam.speed * EQUIP_META.beam.life, 'the rifle reaches much further')
+      .toBeGreaterThan(reach * 4);
+  });
+
+  it('a grenade arcs, and goes off where it lands', () => {
+    const r = machine(EQUIP.GRENADE);
+    const p = pool(16);
+    r.weapons.update(ctx({ firing: true, projectiles: p, aimPoint: V(0, 2, 30) }), 1 / 60);
+    const shot = p.pool.find((s) => s.life > 0);
+    expect(shot.kind).toBe('grenade');
+    expect(shot.gravity, 'it falls').toBeGreaterThan(0);
+    expect(shot.blast, 'and it has a blast').toBeTruthy();
+
+    const before = shot.velocity.y;
+    p.update(0.2, []);
+    expect(shot.velocity.y, 'dropping as it goes').toBeLessThan(before);
+  });
+
+  it('the blast catches whoever is standing near the impact', () => {
+    const p = pool(8);
+    const bystander = dummy(4);
+    p.spawn({
+      position: V(0, 6, 4), direction: V(0, -1, 0), speed: 40, life: 2,
+      damage: 1, radius: 0.3, kind: 'grenade', gravity: 14,
+      blast: { radius: 8, damage: 30 },
+    });
+    let sawBlast = false;
+    for (let i = 0; i < 40; i++) {
+      p.update(1 / 60, [bystander]);
+      if (p.hits.some((h) => h.blast > 0)) sawBlast = true;
+    }
+    expect(bystander.hp, 'it did not have to be a direct hit').toBeLessThan(bystander.maxHp);
+    expect(sawBlast, 'and it reported one, so the field can draw it').toBe(true);
+  });
+
+  it('a shield goes up, keeps damage off the machine, and expires', () => {
+    const r = machine(EQUIP.SHIELD);
+    expect(r.shield).toBe(null);
+    r.weapons.update(ctx({ firing: true }), 1 / 60);
+    expect(r.shield, 'the barrier is up').toBeTruthy();
+
+    const hp = r.hp;
+    r.damage(40);
+    expect(r.hp, 'the barrier ate it').toBe(hp);
+    expect(r.shield.hp).toBeCloseTo(EQUIP_META.shield.shield.hp - 40, 0);
+
+    // Run it past its own clock.
+    for (let i = 0; i < 60 * (EQUIP_META.shield.shield.seconds + 1); i++) {
+      r.weapons.update(ctx({ firing: false }), 1 / 60);
+    }
+    expect(r.shield, 'and it runs out').toBe(null);
+    r.damage(10);
+    expect(r.hp, 'after which damage lands as usual').toBeLessThan(hp);
+  });
+
+  it('a barrier that is overwhelmed breaks, and the rest gets through', () => {
+    const r = machine(EQUIP.SHIELD);
+    r.weapons.update(ctx({ firing: true }), 1 / 60);
+    const hp = r.hp;
+    r.damage(EQUIP_META.shield.shield.hp + 25);
+    expect(r.shield).toBe(null);
+    expect(hp - r.hp, 'only the excess reached the machine').toBeCloseTo(25, 0);
+  });
+
+  it('ramming with the shield up hurts what you drive into', () => {
+    const r = machine(EQUIP.SHIELD);
+    const t = dummy(0);
+    t.body.reset(new THREE.Vector3(0, 2, r.radius + t.radius));
+    t.syncTransform();
+    r.weapons.update(ctx({ firing: true, targets: [t] }), 1 / 60);
+
+    const hp = t.hp;
+    for (let i = 0; i < 60; i++) r.weapons.update(ctx({ firing: false, targets: [t] }), 1 / 60);
+    expect(t.hp, 'contact with a live barrier costs it').toBeLessThan(hp);
+  });
+
+  it('a shield comes down when the machine does', () => {
+    const r = machine(EQUIP.SHIELD);
+    r.weapons.update(ctx({ firing: true }), 1 / 60);
+    expect(r.shield).toBeTruthy();
+    r.damage(99999);
+    expect(r.alive).toBe(false);
+    expect(r.shield, 'nothing survives the wreck').toBe(null);
+  });
+
+  it('every weapon in the table can be fired without throwing', () => {
+    for (const type of WEAPON_TYPES) {
+      const r = machine(type);
+      const p = pool(64);
+      const t = dummy();
+      expect(() => {
+        for (let i = 0; i < 90; i++) {
+          r.weapons.update(ctx({
+            firing: true, projectiles: p, targets: [t], lockTarget: t,
+            aimPoint: t.position, scoping: i > 45,
+          }), 1 / 60);
+          p.update(1 / 60, [t]);
+        }
+      }, type).not.toThrow();
+    }
+  });
+
+  it('the HUD gets a row it can draw for every one of them', () => {
+    const r = machine(...WEAPON_TYPES);
+    const rows = r.weapons.readout();
+    expect(rows).toHaveLength(WEAPON_TYPES.length);
+    for (const row of rows) {
+      expect(typeof row.label).toBe('string');
+      expect(Number.isFinite(row.ammo)).toBe(true);
+      expect(Number.isFinite(row.reloadFrac)).toBe(true);
+    }
+    // The laser has no magazine, so it reports a heat gauge instead.
+    const laser = rows[WEAPON_TYPES.indexOf(EQUIP.LASER)];
+    expect(laser.gauge).toBeGreaterThan(0);
   });
 });

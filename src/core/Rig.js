@@ -28,14 +28,20 @@ export function makeBodyMaterial() {
     flatShading: true,
     // Keep metalness low: a metallic surface has almost no diffuse term, and
     // the whole point of the palette is that the player's colours read.
-    metalness: 0.18,
-    roughness: 0.58,
+    // The environment supplies the sheen instead — a painted panel catching
+    // the sky, rather than a chrome one losing its colour to it.
+    metalness: 0.22,
+    roughness: 0.46,
+    envMapIntensity: 0.85,
   });
 }
 
 function makeBoneMaterial(color) {
   return new THREE.MeshStandardMaterial({
-    color, metalness: 0.75, roughness: 0.32, flatShading: true,
+    color, metalness: 0.85, roughness: 0.24, flatShading: true,
+    // Bones ARE the chrome. With a sky to reflect they finally read as
+    // machined metal instead of grey plastic.
+    envMapIntensity: 1.35,
   });
 }
 
@@ -61,6 +67,7 @@ export class Rig {
     this.equipNodes = [];
     /** blocks a ROLLING plate keeps turning */
     this.rollers = [];
+    this.rings = [];
     /** pickable meshes, tagged with userData.partId */
     this.pickables = [];
     /** geometry + materials this rig created itself and must dispose */
@@ -151,6 +158,59 @@ export class Rig {
     for (const c of part.children) this._build(c, group, part);
   }
 
+  /**
+   * Hand every CIRCLE plate the parts it is meant to turn.
+   *
+   * A rolling plate spins the block it is stuck to. A circle plate spins
+   * everything STANDING AROUND it — a turret ring rather than a wheel — so
+   * it cannot be done while building: the parts it collects are its own
+   * siblings, and they do not exist yet when the plate is reached.
+   *
+   * Membership is measured in the plane of the ring, so a tall tower inside
+   * the circle turns with it however high it reaches.
+   */
+  _buildRings() {
+    for (const node of this.equipNodes) {
+      const part = node.part;
+      if (!EQUIP_META[part.equipType]?.ring || !part.spin) continue;
+      const host = part.parent ? this.nodes.get(part.parent) : null;
+      if (!host) continue;
+
+      const base = new THREE.Group();
+      base.name = 'ringbase';
+      base.position.fromArray(part.mount.pos);
+      base.quaternion.fromArray(part.mount.rot);
+      const spin = new THREE.Group();
+      spin.name = 'ring';
+      base.add(spin);
+      (host.spin ?? host.group).add(base);
+
+      const inv = base.quaternion.clone().invert();
+      const members = [];
+      for (const id of this.assembly.get(part.parent).children) {
+        if (id === part.id) continue;
+        const other = this.nodes.get(id);
+        if (!other || other.group.parent !== (host.spin ?? host.group)) continue;
+        // Distance across the ring, ignoring how far along the axis it sits.
+        const local = other.group.position.clone().sub(base.position).applyQuaternion(inv);
+        if (Math.hypot(local.x, local.z) > part.ringRadius) continue;
+        other.group.position.copy(local);
+        other.group.quaternion.premultiply(inv);
+        spin.add(other.group);
+        members.push(id);
+      }
+
+      node.ring = {
+        part,
+        spin,
+        axis: new THREE.Vector3(0, 1, 0),   // the ring's own frame is the plate's
+        angle: 0,
+        members,
+      };
+      this.rings.push(node.ring);
+    }
+  }
+
   /** The ROLLING plate mounted directly on this part, if any. */
   _rollerOn(part) {
     for (const id of part.children) {
@@ -205,7 +265,9 @@ export class Rig {
       : new THREE.BoxGeometry(d * k, t * 0.9, d * k);
     this._owned.push(accentGeo);
     const accentMat = new THREE.MeshStandardMaterial({
-      color: accentColor, emissive: accentColor, emissiveIntensity: 0.85,
+      // Above 1 so the bright pass finds it: an accent light that does not
+      // spill is a sticker, not a lamp.
+      color: accentColor, emissive: accentColor, emissiveIntensity: 1.9,
       metalness: 0.2, roughness: 0.4,
     });
     this._ownedMaterials.push(accentMat);
@@ -256,22 +318,46 @@ export class Rig {
     });
     this._ownedMaterials.push(mat);
 
-    let mesh;
+    const shells = [];
+    /** A shell that copies one block's silhouette, a touch proud of it. */
+    const wrap = (node) => {
+      if (!node?.mesh?.geometry) return;
+      const m = new THREE.Mesh(node.mesh.geometry, mat);
+      m.scale.copy(node.mesh.scale).multiplyScalar(1.07);
+      m.position.copy(node.mesh.position).multiplyScalar(1.07);
+      m.frustumCulled = false;
+      m.visible = false;
+      (node.spin ?? node.group).add(m);
+      shells.push(m);
+    };
+
     if (pnode && parentPart.kind !== 'bone' && pnode.mesh?.geometry) {
-      // Same silhouette as the block, a touch proud of it.
-      mesh = new THREE.Mesh(pnode.mesh.geometry, mat);
-      mesh.scale.copy(pnode.mesh.scale).multiplyScalar(1.07);
-      mesh.position.copy(pnode.mesh.position).multiplyScalar(1.07);
-      pnode.group.add(mesh);
+      // The blade lights the block it is stuck to AND everything joined to
+      // it, so a blade on a wing lights the whole wing. Bones stop the run:
+      // past a joint it is a different limb, not the same edge.
+      wrap(pnode);
+      const spread = (p) => {
+        for (const id of p.children) {
+          const child = this.assembly.get(id);
+          if (!child || child.kind === 'bone' || child.kind === 'equip') continue;
+          wrap(this.nodes.get(id));
+          spread(child);
+        }
+      };
+      spread(parentPart);
     } else {
       const geo = new THREE.IcosahedronGeometry(Math.max(0.4, part.size * 0.9), 1);
       this._owned.push(geo);
-      mesh = new THREE.Mesh(geo, mat);
-      host.add(mesh);
+      const m = new THREE.Mesh(geo, mat);
+      m.frustumCulled = false;
+      m.visible = false;
+      host.add(m);
+      shells.push(m);
     }
-    mesh.frustumCulled = false;
-    mesh.visible = false;
-    return mesh;
+
+    // One material behind however many shells, so the whole run lights and
+    // dims as a single thing.
+    return { material: mat, meshes: shells };
   }
 
   /**
@@ -280,7 +366,7 @@ export class Rig {
    * turning while you look at it.
    */
   updateRollers(dt) {
-    for (const r of this.rollers) {
+    for (const r of [...this.rollers, ...this.rings]) {
       const { dir, rpm } = r.part.spin;
       r.angle = (r.angle + dir * rpm * (Math.PI / 30) * dt) % (Math.PI * 2);
       r.spin.quaternion.setFromAxisAngle(r.axis, r.angle);
@@ -344,9 +430,11 @@ export class Rig {
       const wobble = 1 + flicker * 0.18;
       f.cone.material.opacity = amount * 0.55;
       f.cone.scale.set(1, amount * wobble, 1);
-      f.disc.material.opacity = amount * 0.8;
+      // Trimmed once bloom arrived: the flare now spills light of its own,
+      // and at full opacity the core of it just clipped to white.
+      f.disc.material.opacity = amount * 0.55;
       f.disc.scale.setScalar(0.6 + amount * 0.7);
-      node.accent.material.emissiveIntensity = 0.85 + amount * 3.2;
+      node.accent.material.emissiveIntensity = 1.9 + amount * 4.2;
     }
     return this;
   }
@@ -355,9 +443,10 @@ export class Rig {
   setBladeGlow(amount) {
     for (const node of this.equipNodes) {
       if (!node.bladeGlow) continue;
-      node.bladeGlow.visible = amount > 0.01;
+      const on = amount > 0.01;
+      for (const m of node.bladeGlow.meshes) m.visible = on;
       node.bladeGlow.material.opacity = amount * 0.55;
-      node.accent.material.emissiveIntensity = 0.85 + amount * 2.4;
+      node.accent.material.emissiveIntensity = 1.9 + amount * 3.4;
     }
     return this;
   }
@@ -480,6 +569,8 @@ export class Rig {
     }
     limbs.sort((a, b) => (b.anchor.z - a.anchor.z) || (a.anchor.x - b.anchor.x));
     limbs.forEach((l, i) => { l.index = i; });
+
+    this._buildRings();
 
     this.limbs = limbs;
     this.armBones = this.joints.filter((n) => n.part.boneType === 'arm');

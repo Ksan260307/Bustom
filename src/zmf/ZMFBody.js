@@ -61,9 +61,17 @@ export class ZMFBody {
     this.setStats(stats, opts.rideHeight ?? 1.0);
   }
 
-  setStats(stats, rideHeight = this.rideHeight) {
+  setStats(stats, rideHeight = this.baseRideHeight ?? this.rideHeight) {
     this.stats = stats;
-    this.rideHeight = rideHeight;
+    this.baseRideHeight = rideHeight;
+    /**
+     * A FLOAT plate holds the machine off the floor. Raising the ride height
+     * is all it takes: the machine still "lands", just onto a surface that
+     * is now a metre and a half up, so it hovers with its legs dangling and
+     * everything else — walking, jumping, ground steering — keeps working.
+     */
+    this.hoverHeight = stats.hoverHeight ?? 0;
+    this.rideHeight = rideHeight + this.hoverHeight;
     // A tall mech is not a big ball: keep the collision proxy close to the
     // torso so you can actually walk between the pillars.
     this.radius = Math.max(0.6, stats.extent * 0.42);
@@ -77,7 +85,9 @@ export class ZMFBody {
     this.groundSpeedCap = 8 + legs * 2.2 + stats.agility * 9;
     this.airSpeedCap = 16 + stats.agility * 24;
     // BOOST plates make a dash bite harder. They stack, deliberately gently.
-    this.dashSpeed = (11 + stats.agility * 11) * (1 + (stats.dashBonus ?? 0));
+    // Hard and immediate. A boost you have to wait for is a boost you stop
+    // using, so the impulse is big and the cooldown short.
+    this.dashSpeed = (17 + stats.agility * 17) * (1 + (stats.dashBonus ?? 0));
     /**
      * The boost thruster is a fitted part, not a birthright: a machine with
      * no BOOST plate has nothing to light.
@@ -88,6 +98,7 @@ export class ZMFBody {
     this.boostOutput = 0;
     /** A GRAVITY plate trades sustained flight for durability. */
     this.noFly = !!stats.noFly;
+    this.floating = this.hoverHeight > 0;
   }
 
   reset(position = new THREE.Vector3(0, this.rideHeight, 0)) {
@@ -171,8 +182,8 @@ export class ZMFBody {
     const boosting = this.canBoost && input.isDown('boost') && this.energy > 0.04;
     this.boosting = boosting;
     // Lights fast, dies slowly: a thruster that snaps off looks switched, not spent.
-    this.boostOutput = damp(this.boostOutput, boosting ? 1 : 0, boosting ? 0.035 : 0.09, dt);
-    const burn = this.hover * 0.30 + this.inertia.thrustOutput * 0.11 + (boosting ? 0.4 : 0);
+    this.boostOutput = damp(this.boostOutput, boosting ? 1 : 0, boosting ? 0.018 : 0.09, dt);
+    const burn = this.hover * 0.30 + this.inertia.thrustOutput * 0.11 + (boosting ? 0.34 : 0);
     const regen = groundedNow > 0.5 ? 0.55 : 0.10;
     this.energy = clamp01(this.energy + (regen - burn) * dt);
     this.strain = smoothstep(0.28, 0.02, this.energy);
@@ -188,7 +199,7 @@ export class ZMFBody {
         // Backwards is a fraction weaker, but still unmistakably a dash.
         const back = input.dash.dir.z < -0.5 ? 0.9 : 1;
         this.inertia.applyImpulse(_tmp.normalize().multiplyScalar(this.dashSpeed * back));
-        this.dashCooldown = 0.42;
+        this.dashCooldown = 0.26;
         this.dashFlash = 1;
         this.energy = clamp01(this.energy - 0.12);
         input.dash = null;
@@ -206,8 +217,10 @@ export class ZMFBody {
     );
 
     // speed ceilings, expressed as soft drag rather than a hard clamp
+    // The ceiling opens up a long way under boost: the whole point of the
+    // thruster is that it takes the machine somewhere its cruise cannot.
     const cap = THREE.MathUtils.lerp(this.airSpeedCap, this.groundSpeedCap, this.env.grounded)
-      * (boosting ? 1.55 : 1) * (1 + this.layers.jerk * 0.12);
+      * (boosting ? 2.35 : 1) * (1 + this.layers.jerk * 0.12);
     const sp = this.speed;
     if (sp > cap) {
       const over = (sp - cap) / cap;
@@ -284,7 +297,7 @@ export class ZMFBody {
     }
     // Legs push against the floor: more of them means more traction, which
     // is where a walker's ground speed advantage over a hover build comes from.
-    _thrust.multiplyScalar((1 + (boosting ? 0.55 : 0)) * (1 + grounded * this.grip * 0.55));
+    _thrust.multiplyScalar((1 + (boosting ? 1.05 : 0)) * (1 + grounded * this.grip * 0.55));
 
     // -------- external accelerations (bypass the mass term)
     _external.set(0, -this.world.gravity * this.gravityScale * (1 - grounded * 0.9), 0);
