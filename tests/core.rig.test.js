@@ -374,10 +374,16 @@ describe('Rig limbs', () => {
 
   it('separates bones by attribute', () => {
     const rig = new Rig(PRESETS.biped.build());
-    expect(rig.armBones.length).toBe(2);
+    expect(rig.armBones.length, 'upper arm and forearm, both sides').toBe(4);
     expect(rig.faceBones.length).toBe(1);
-    expect(rig.customBones.length).toBe(0);
+    expect(rig.customBones.length, 'the waist').toBe(1);
     expect(new Rig(PRESETS.multileg.build()).customBones.length).toBe(1);
+  });
+
+  it('knows how deep each arm bone hangs in its chain', () => {
+    const rig = new Rig(PRESETS.biped.build());
+    const depths = rig.armBones.map((n) => n.chainDepth).sort();
+    expect(depths, 'a shoulder and a forearm per side').toEqual([0, 0, 1, 1]);
   });
 
   it('a legless build has no limbs', () => {

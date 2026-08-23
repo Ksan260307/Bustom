@@ -91,13 +91,30 @@ export const CUSTOM_WAVES = {
 };
 
 export const CUSTOM_SOURCES = [
-  ['time', '常時'], ['speed', '速度'], ['thrust', '推力'], ['jerk', '衝撃'], ['aim', 'ロックオン'],
+  ['time', '常時'], ['stride', '歩調'], ['speed', '速度'],
+  ['thrust', '推力'], ['jerk', '衝撃'], ['aim', 'ロックオン'],
 ];
 
 /** Default motion for a freshly placed custom bone. */
 export const CUSTOM_DEFAULT = {
   axis: 'x', amp: 30, freq: 1.0, phase: 0, offset: 0, wave: 'sine', source: 'time',
 };
+
+/**
+ * Every bone carries these two, whatever its attribute. Together they turn
+ * the four bone types into the joints a robot actually has:
+ *
+ *   肩       an ARM bone at the root of an arm chain, gain ~0.4
+ *   股関節   the LEG bone at the root of a leg chain, gain to taste
+ *   腰       a CUSTOM bone twisting on Y, driven by the stride
+ *
+ * `gain` scales whatever motion the bone's attribute gives it; `lag` slides
+ * it round the gait cycle so a chain ripples instead of swinging as one
+ * rigid stick.
+ */
+export const BONE_GAIN_MAX = 2;
+export const BONE_LAG_MAX = 1;
+export const BONE_MOTION_DEFAULT = { gain: 1, lag: 0 };
 
 /** Named thickness presets. The radius itself stays freely adjustable. */
 export const BONE_GAUGE = {

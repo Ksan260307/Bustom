@@ -56,3 +56,13 @@ export function testWorld(colliders = []) {
     groundHeight: () => 0,
   };
 }
+
+/**
+ * The presets now ship with equipment, because a machine you cannot dash or
+ * shoot with is not a fair starting point. Tests about "a machine with no
+ * plates" need one anyway, so they strip them back off.
+ */
+export function stripEquips(assembly) {
+  for (const p of assembly.equips()) assembly.remove(p.id);
+  return assembly;
+}

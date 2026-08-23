@@ -6,6 +6,7 @@ import {
   EQUIP_META, WEAPON_TYPES, SYSTEM_TYPES,
   EQUIP_SIZE_MIN, EQUIP_SIZE_MAX, EQUIP_SIZE_STEP,
   SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_WAVES, CUSTOM_SOURCES,
+  BONE_GAIN_MAX, BONE_LAG_MAX,
 } from '../core/constants.js';
 import { PRESETS } from '../core/Assembly.js';
 import { STANDARD_COLORS, hexToCss } from '../core/Palette.js';
@@ -13,6 +14,7 @@ import { TOOL } from '../editor/EditorScene.js';
 import { ColorWheel } from './ColorWheel.js';
 import { h, slider, vectorField, collapsible, toolSection } from './dom.js';
 import { KeyConfig } from './KeyConfig.js';
+import { ShareDialog } from './ShareDialog.js';
 
 export { h, slider, vectorField };
 
@@ -21,15 +23,24 @@ export { h, slider, vectorField };
 // ============================================================
 
 
+/**
+ * The order you actually work in: pick things up, then build the body, then
+ * hang limbs off it head-downward, then drop in a saved part. The bones read
+ * face -> arm -> leg -> custom because that is the order they sit on a robot.
+ */
 const ASSEMBLE_TOOLS = [
+  { group: '選ぶ' },
   { tool: TOOL.SELECT, label: '選択 / 移動', key: 'V', color: '#ffd166' },
-  { tool: TOOL.STAMP, label: 'パーツ配置', key: '—', color: '#8effc9' },
+  { group: '組む' },
   { tool: TOOL.BLOCK, label: 'ブロック', key: 'B', color: '#c9d2dc' },
   { tool: TOOL.EQUIP, label: '装備プレート', key: 'G', color: '#8fd9ff' },
-  { tool: TOOL.BONE_LEG, label: BONE_META.leg.label, key: 'L', color: '#6fe3ff' },
-  { tool: TOOL.BONE_ARM, label: BONE_META.arm.label, key: 'A', color: '#ffc861' },
+  { group: 'ボーン' },
   { tool: TOOL.BONE_FACE, label: BONE_META.face.label, key: 'F', color: '#ff7ba6' },
+  { tool: TOOL.BONE_ARM, label: BONE_META.arm.label, key: 'A', color: '#ffc861' },
+  { tool: TOOL.BONE_LEG, label: BONE_META.leg.label, key: 'L', color: '#6fe3ff' },
   { tool: TOOL.BONE_CUSTOM, label: BONE_META.custom.label, key: 'C', color: '#b98cff' },
+  { group: '呼び出す' },
+  { tool: TOOL.STAMP, label: 'パーツ配置', key: '—', color: '#8effc9' },
 ];
 
 const SCULPT_LIST = [
@@ -93,6 +104,7 @@ export class EditorUI {
       this.undoBtn,
       this.redoBtn,
       h('button', { class: 'icon', title: 'キー設定', onClick: () => this.keyConfig.show() }, '⌨'),
+      h('button', { class: 'icon', title: 'QRで共有 / 読み込み', onClick: () => this.share.show() }, '⧉'),
       h('div', { class: 'sep' }),
       h('button', { onClick: () => app.save() }, '保存'),
       h('button', { onClick: () => app.load() }, '読込'),
@@ -122,6 +134,7 @@ export class EditorUI {
       this.partRedoBtn,
       h('div', { class: 'sep' }),
       h('button', { class: 'primary', onClick: () => app.savePart(this.partNameInput.value) }, 'パーツ庫に保存'),
+      h('button', { title: 'QRで共有 / 読み込み', onClick: () => this.share.show() }, '⧉ 共有'),
       h('button', { onClick: () => app.newPart() }, '新規'),
       h('div', { class: 'spacer' }),
       h('span', { class: 'note', style: 'margin:0' }, '作ったパーツはメイン編集の「パーツ庫」から呼び出せます'),
@@ -132,6 +145,7 @@ export class EditorUI {
     this.toolButtons = new Map();
 
     const mkTool = (t) => {
+      if (t.group) return h('div', { class: 'toolgroup' }, t.group);
       const btn = h('button', { class: 'toolbtn', onClick: () => app.setTool(t.tool) },
         h('span', { class: 'dot', style: `background:${t.color};color:${t.color}` }),
         h('span', {}, t.label),
@@ -257,7 +271,7 @@ export class EditorUI {
       type: 'checkbox', onChange: (e) => { app.editor.symmetry = e.target.checked; },
     });
     this.previewToggle = h('input', {
-      type: 'checkbox', onChange: (e) => { app.editor.previewMotion = e.target.checked; },
+      type: 'checkbox', onChange: (e) => app.editor.setPreviewMotion(e.target.checked),
     });
 
     // Each tool brings its own settings and takes them away again: with a
@@ -373,10 +387,11 @@ export class EditorUI {
     this.keyConfig = new KeyConfig(app.input, {
       onChange: () => { app.saveBindings(); this.syncFieldHint(); },
     });
+    this.share = new ShareDialog(app);
 
     this.root.append(
       this.topbar, this.partBar, this.leftPanel, this.rightPanel, this.hint,
-      this.fieldBar, this.pauseMenu, this.keyConfig.el, this.toast,
+      this.fieldBar, this.pauseMenu, this.keyConfig.el, this.share.el, this.toast,
     );
 
     this.renderPalette();
@@ -674,6 +689,8 @@ export class EditorUI {
           onChange: (ev) => { part.invert = ev.target.checked; app.editor.rebuild(); },
         }), '動きを反転'));
 
+      rows.push(...this._boneMotion(part));
+
       rows.push(h('h3', { class: 'inline' }, 'つなげる'));
       rows.push(h('button', {
         class: 'ghost wide',
@@ -807,6 +824,43 @@ export class EditorUI {
    * It used to be three unlabelled sliders and a dropdown; the shape of the
    * motion was invisible until you deployed.
    */
+  /**
+   * Shoulders, hips and waists without adding bone types.
+   *
+   * The four attributes say WHAT a bone does; these two say how much of it
+   * and when. A shoulder is an arm bone that only takes a little of the
+   * swing; a hip is the leg bone at the root of the chain; a waist is a
+   * custom bone twisting on Y off the stride.
+   */
+  _boneMotion(part) {
+    const app = this.app;
+    const rows = [h('h3', { class: 'inline' }, '関節の効き')];
+
+    rows.push(slider('効き', {
+      min: 0, max: BONE_GAIN_MAX, step: 0.05, value: part.gain ?? 1, fixed: 2,
+    }, (v) => app.editor.setBoneMotionSelected({ gain: v })));
+    rows.push(slider('ずらし', {
+      min: 0, max: BONE_LAG_MAX, step: 0.05, value: part.lag ?? 0, fixed: 2,
+    }, (v) => app.editor.setBoneMotionSelected({ lag: v })));
+
+    const recipe = (label, title, motion) => h('button', {
+      title, onClick: () => app.editor.setBoneMotionSelected(motion),
+    }, label);
+    rows.push(h('div', { class: 'row tight' },
+      recipe('肩', 'アームの根元。振りを抑えて、腕全体の付け根らしく', { gain: 0.4, lag: 0 }),
+      recipe('股関節', 'レッグの根元。しっかり踏み出す', { gain: 1, lag: 0 }),
+      recipe('しなり', 'ひと呼吸遅れて追従。先端側に付けるとムチのように動く', { gain: 0.8, lag: 0.12 }),
+      recipe('固定', 'まったく動かさない', { gain: 0, lag: 0 }),
+    ));
+
+    rows.push(h('div', { class: 'note' },
+      '効き0で動かない関節、1で標準、2で大振り。',
+      h('br'), 'ずらしは歩調1周のうちどこで動くか。先端ほど遅らせるとしなります。',
+      h('br'), '腰は「カスタム」でひねり軸＋駆動ソース「歩調」。'));
+
+    return rows;
+  }
+
   _customMotion(part) {
     const app = this.app;
     const c = part.custom;
@@ -854,7 +908,8 @@ export class EditorUI {
         value: v, ...(c.source === v ? { selected: 'selected' } : {}),
       }, l))));
     rows.push(h('div', { class: 'note' },
-      '選択している間、編集画面でもこの動きが再生されます。'));
+      '「歩調」は足の運びに同期します。腰のひねりはこれ。',
+      h('br'), '選択している間、編集画面でもこの動きが再生されます。'));
 
     return rows;
   }

@@ -241,6 +241,14 @@ export class Animator {
    * travel direction D = cos.Z + sin.X, and the cross product is linear in D,
    * so the answer is just the same blend of the two bound axes.
    */
+  /** How much of its attribute's motion this bone takes. */
+  static gainOf(node) { return node.part.gain ?? 1; }
+
+  /** Where this bone sits in the gait cycle, its own lag included. */
+  _phaseFor(node, extra = 0) {
+    return (this.gaitPhase + extra + (node.part.lag ?? 0) + 1) % 1;
+  }
+
   _strideAxis(node, out = _axis2) {
     const k = this.travelBlend;
     const cos = 1 + (this.travel.y - 1) * k;
@@ -267,7 +275,10 @@ export class Animator {
     limb.chain.forEach((node, i) => {
       const t = i / Math.max(1, limb.chain.length - 1 || 1);
       const bend = this.hopCharge * (48 - i * 12) * DEG * (i % 2 === 0 ? 1 : -1.25);
-      _q.setFromAxisAngle(this._strideAxis(node), bend + (dir + sway) * (1 - t));
+      _q.setFromAxisAngle(
+        this._strideAxis(node),
+        (bend + (dir + sway) * (1 - t)) * Animator.gainOf(node),
+      );
       node.target.copy(limitQuat(_q, node.part.limit));
     });
   }
@@ -281,12 +292,15 @@ export class Animator {
     const air = 1 - s.grounded;
 
     for (const limb of this.rig.limbs) {
-      const p = (this.gaitPhase + limb.phaseOffset) % 1;
-      const stride = Math.sin(p * TAU);
-      const lift = Math.max(0, Math.sin(p * TAU));
       const mirror = limb.root.part.invert ? -1 : 1;
 
       limb.chain.forEach((node, i) => {
+        // Each bone reads the cycle at its own point in it, so a hip set to
+        // lag behind its knee gives the leg a whip rather than a hinge.
+        const p = this._phaseFor(node, limb.phaseOffset);
+        const stride = Math.sin(p * TAU);
+        const lift = Math.max(0, Math.sin(p * TAU));
+
         let angle;
         if (i === 0) {
           angle = stride * amp * mirror - air * 22 * DEG + idle * 2 * DEG;
@@ -295,7 +309,7 @@ export class Animator {
         } else {
           angle = (-stride * amp * 0.35 + lift * kneeAmp * 0.4) * mirror;
         }
-        _q.setFromAxisAngle(this._strideAxis(node), angle);
+        _q.setFromAxisAngle(this._strideAxis(node), angle * Animator.gainOf(node));
         node.target.copy(limitQuat(_q, node.part.limit));
       });
     }
@@ -316,7 +330,7 @@ export class Animator {
     const idle = 1 - clamp01(this.gaitFreq * 1.6);
 
     for (const limb of this.rig.limbs) {
-      const p = (this.gaitPhase + limb.phaseOffset) % 1;
+      const p = this._phaseFor(limb.root, limb.phaseOffset);
       const stride = Math.sin(p * TAU);
       // Swing occupies the first half of the cycle; stance drags along the floor.
       const swing = Math.max(0, Math.sin(p * TAU));
@@ -324,12 +338,15 @@ export class Animator {
       const splay = 22 * DEG * -limb.root.side;
 
       limb.chain.forEach((node, i) => {
+        // Splay is posture, not motion, so gain leaves it alone: a hip turned
+        // down to a shoulder's worth of swing still stands where it stood.
+        const g = Animator.gainOf(node);
         if (i === 0) {
           // hip: step along the travel vector, lift clear of the floor on the swing
-          _q.setFromAxisAngle(this._strideAxis(node), stride * strideAmp * mirror);
+          _q.setFromAxisAngle(this._strideAxis(node), stride * strideAmp * mirror * g);
           _q2.setFromAxisAngle(
             node.axisLift,
-            (swing * liftAmp + air * 14 * DEG) * -limb.root.side * node.liftScale,
+            (swing * liftAmp + air * 14 * DEG) * -limb.root.side * node.liftScale * g,
           );
           _q.multiply(_q2);
           _q2.setFromAxisAngle(node.axisSplay, splay * (1 + idle * 0.3));
@@ -338,11 +355,11 @@ export class Animator {
           // knee: tuck during the swing, extend to plant
           // With a vertical hip the knee is the only thing that can pick the
           // foot up, so it carries the whole lift.
-          const bend = (0.35 + swing * 0.65) * kneeAmp + air * 18 * DEG;
+          const bend = ((0.35 + swing * 0.65) * kneeAmp + air * 18 * DEG) * g;
           _q.setFromAxisAngle(this._strideAxis(node), -bend * mirror);
           _q2.setFromAxisAngle(
             node.axisLift,
-            -swing * liftAmp * 0.5 * -limb.root.side * node.liftScale,
+            -swing * liftAmp * 0.5 * -limb.root.side * node.liftScale * g,
           );
           _q.multiply(_q2);
         }
@@ -371,11 +388,19 @@ export class Animator {
 
     for (const node of this.rig.armBones) {
       const phaseSide = node.side >= 0 ? 0 : 0.5;
-      const p = (this.gaitPhase + phaseSide) % 1;
-      const swing = -Math.sin(p * TAU) * swingAmp;
+      // An arm hung off another arm is a forearm: it trails the shoulder and
+      // takes less of the swing, or the limb bends twice as far as an arm can.
+      const depth = node.chainDepth ?? 0;
+      const chainFalloff = depth === 0 ? 1 : 0.55 ** depth;
+      const chainLag = depth * 0.08;
+      const p = this._phaseFor(node, phaseSide + chainLag);
+      const swing = -Math.sin(p * TAU) * swingAmp * chainFalloff;
       const idleFloat = Math.sin(this.time * 1.3 + node.restPos.x * 2) * 3 * DEG;
 
-      _q.setFromAxisAngle(this._strideAxis(node), swing + idleFloat + s.thrust * 12 * DEG);
+      _q.setFromAxisAngle(
+        this._strideAxis(node),
+        (swing + idleFloat + s.thrust * 12 * DEG) * Animator.gainOf(node),
+      );
 
       if (s.aimDir && this.aimBlend > 0.001) {
         this._aimQuat(node, s.aimDir, s.bodyQ, _q2);
@@ -414,14 +439,20 @@ export class Animator {
       if ((c.wave ?? 'sine') === 'saw') {
         // A continuous turn: the drive scales the SPEED, not the angle, so
         // easing off does not snap the joint back to where it started.
-        node.spinPhase = (node.spinPhase ?? c.phase ?? 0) + (c.freq ?? 1) * drive * dt;
+        node.spinPhase = (node.spinPhase ?? c.phase ?? 0)
+          + (c.freq ?? 1) * drive * Animator.gainOf(node) * dt;
         _q.setFromAxisAngle(axis, node.spinPhase * TAU + (c.offset ?? 0) * DEG);
         node.target.copy(_q);          // no joint limit: it is a rotation
         continue;
       }
 
-      const t = this.time * (c.freq ?? 1) + (c.phase ?? 0);
-      const angle = ((c.offset ?? 0) + waveAt(c.wave, t) * (c.amp ?? 20) * drive) * DEG;
+      // "Stride" locks the wave to the walk cycle instead of a free clock,
+      // which is what a waist has to do: twist in time with the footfalls.
+      const t = c.source === 'stride'
+        ? this._phaseFor(node) * (c.freq ?? 1) + (c.phase ?? 0)
+        : this.time * (c.freq ?? 1) + (c.phase ?? 0);
+      const angle = ((c.offset ?? 0)
+        + waveAt(c.wave, t) * (c.amp ?? 20) * drive * Animator.gainOf(node)) * DEG;
       _q.setFromAxisAngle(axis, angle);
       node.target.copy(limitQuat(_q, node.part.limit));
     }
@@ -429,6 +460,7 @@ export class Animator {
 
   _customDrive(c, s) {
     switch (c.source) {
+      case 'stride': return clamp01(this.gaitFreq / 1.6);
       case 'speed': return clamp01((s.planarSpeed ?? 0) / 18);
       case 'thrust': return s.thrust ?? 0;
       case 'jerk': return clamp01((s.jerk ?? 0) / 240);

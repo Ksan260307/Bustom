@@ -7,6 +7,7 @@ import { FieldScene } from './game/FieldScene.js';
 import { EditorUI } from './ui/EditorUI.js';
 import { InputManager, DEFAULT_BINDINGS } from './zmf/InputManager.js';
 import { KineticFeedback } from './zmf/KineticFeedback.js';
+import { SIZE_STEP } from './core/constants.js';
 
 // ============================================================
 //  BroStom — application shell.
@@ -37,6 +38,16 @@ const TOOL_KEYS = {
 };
 
 const EDIT_MODES = new Set(['edit', 'part']);
+
+/** Arrow key -> [screen right, screen forward]. */
+const NUDGE = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, 1],
+  ArrowDown: [0, -1],
+};
+/** Alt gives a step finer than the placement grid, for the last millimetre. */
+const FINE_STEP = 0.05;
 const KEY_SAVE = 'brostom.keys.v1';
 
 /** Only the rows the player changed are stored, so new defaults still land. */
@@ -264,10 +275,16 @@ export class App {
     this.ui.toastMsg(`${p.label} を読み込みました`);
   }
 
-  /** Replace the active document wholesale. Undo history starts fresh. */
-  _adopt(assembly) {
+  /**
+   * Replace the active document wholesale.
+   *
+   * Loading a preset or a file is a deliberate fresh start, so the history
+   * goes with it. A build arriving from a share code is not: dropping
+   * someone else's machine over an hour of work has to be recoverable.
+   */
+  _adopt(assembly, { keepHistory = false } = {}) {
     this.assembly = assembly;
-    this.history.clear();
+    if (!keepHistory) this.history.clear();
     this.editor.setAssembly(assembly);
     this.ui.syncName(assembly.name);
     this.ui.syncResolution(assembly.voxRes);
@@ -385,6 +402,26 @@ export class App {
       this.ui.renderInspector(this.editor.selectedParts());
     }
   }
+
+  /**
+   * Take in a build that arrived from somewhere else. A machine replaces
+   * what is on the bench; a part goes on the shelf, because dropping it
+   * over the machine you are working on is never what was meant.
+   * @returns {string} where it went, for the message
+   */
+  adoptShared(assembly) {
+    if (assembly.isPart) {
+      const entry = this.library.put(assembly.name, assembly);
+      this.ui.renderLibrary();
+      return `パーツ庫「${entry.name}」`;
+    }
+    if (this.mode !== 'edit') this.setMode('edit');
+    this.pushHistory('共有コード読み込み');
+    this._adopt(assembly, { keepHistory: true });
+    return 'メイン編集';
+  }
+
+  openShare() { return this.ui.share.show(); }
 
   /** Persist the key scheme. Called by the key-config screen on every edit. */
   saveBindings() {
@@ -562,6 +599,7 @@ export class App {
       const editing = EDIT_MODES.has(this.mode);
 
       if (e.code === 'Escape') {
+        if (this.ui.share.open) { this.ui.share.close(); return; }
         if (this.ui.keyConfig.open) { this.ui.keyConfig.close(); return; }
         if (this.mode === 'field') {
           if (this.field.paused) this.resumeField();
@@ -596,6 +634,17 @@ export class App {
         return;
       }
       if (e.code === 'F5') return;
+
+      if (editing && NUDGE[e.code]) {
+        // Arrow keys inch the selection around. Plain arrows work in the
+        // ground plane as seen from the camera; Shift lifts and lowers.
+        e.preventDefault();
+        const [right, forward] = NUDGE[e.code];
+        const step = e.altKey ? FINE_STEP : SIZE_STEP;
+        if (e.shiftKey) this.editor.nudgeSelectedByView(0, forward, 0, step);
+        else this.editor.nudgeSelectedByView(right, 0, forward, step);
+        return;
+      }
 
       if (editing) {
         const tool = TOOL_KEYS[e.code];

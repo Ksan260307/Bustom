@@ -4,7 +4,7 @@ import { Projectiles, WeaponSystem } from '../src/game/Weapons.js';
 import { Robot } from '../src/game/Robot.js';
 import { Assembly, PRESETS, computeStats, _resetIds } from '../src/core/Assembly.js';
 import { EQUIP, EQUIP_META } from '../src/core/constants.js';
-import { testWorld } from './helpers/dom.js';
+import { testWorld, stripEquips } from './helpers/dom.js';
 
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
 
@@ -149,9 +149,9 @@ describe('WeaponSystem', () => {
 
   beforeEach(() => { _resetIds(0); world = testWorld(); });
 
-  /** A machine with the listed plates stuck on its core. */
+  /** A machine carrying the listed plates and nothing else. */
   const machine = (...types) => {
-    const a = PRESETS.biped.build();
+    const a = stripEquips(PRESETS.biped.build());
     for (const t of types) a.addEquipOnFace(a.core.id, 4, t, { size: 0.7 });
     return new Robot(a, world, { isPlayer: true });
   };
@@ -167,7 +167,7 @@ describe('WeaponSystem', () => {
   });
 
   it('a machine with no plates has no weapons at all', () => {
-    const r = new Robot(PRESETS.biped.build(), world);
+    const r = new Robot(stripEquips(PRESETS.biped.build()), world);
     expect(r.weapons.hasWeapons).toBe(false);
     expect(r.weapons.readout()).toEqual([]);
   });
@@ -230,7 +230,7 @@ describe('WeaponSystem', () => {
   });
 
   it('fires in the plate colour the player chose', () => {
-    const a = PRESETS.biped.build();
+    const a = stripEquips(PRESETS.biped.build());
     a.addEquipOnFace(a.core.id, 4, EQUIP.BEAM, { bulletColor: 0x6bff6b });
     const r = new Robot(a, world);
     const p = pool(8);
@@ -302,7 +302,7 @@ describe('WeaponSystem', () => {
   });
 
   it('a machine with no plates has nothing to cycle', () => {
-    const r = new Robot(PRESETS.biped.build(), world);
+    const r = new Robot(stripEquips(PRESETS.biped.build()), world);
     expect(r.weapons.active).toBeNull();
     expect(r.weapons.next()).toBeNull();
     expect(() => r.weapons.update(ctx({ firing: true }), 1 / 60)).not.toThrow();
@@ -394,7 +394,7 @@ describe('WeaponSystem', () => {
 
 describe('equipment effects', () => {
   const withPlates = (...types) => {
-    const a = PRESETS.biped.build();
+    const a = stripEquips(PRESETS.biped.build());
     for (const t of types) a.addEquipOnFace(a.core.id, 4, t);
     return a;
   };
@@ -404,7 +404,7 @@ describe('equipment effects', () => {
     const two = computeStats(withPlates(EQUIP.BOOST, EQUIP.BOOST));
     expect(one.dashBonus).toBeCloseTo(EQUIP_META.boost.dashBonus, 6);
     expect(two.dashBonus).toBeCloseTo(EQUIP_META.boost.dashBonus * 2, 6);
-    expect(computeStats(PRESETS.biped.build()).dashBonus).toBe(0);
+    expect(computeStats(stripEquips(PRESETS.biped.build())).dashBonus).toBe(0);
   });
 
   it('a gravity plate trades flight for durability', () => {
@@ -412,7 +412,7 @@ describe('equipment effects', () => {
     expect(s.noFly).toBe(true);
     expect(s.hpBonus).toBeCloseTo(EQUIP_META.gravity.hpBonus, 6);
 
-    const bare = new Robot(PRESETS.biped.build(), testWorld());
+    const bare = new Robot(stripEquips(PRESETS.biped.build()), testWorld());
     const heavy = new Robot(withPlates(EQUIP.GRAVITY), testWorld());
     expect(heavy.hp).toBeGreaterThan(bare.hp * 1.3);
     expect(heavy.body.noFly).toBe(true);
@@ -420,7 +420,7 @@ describe('equipment effects', () => {
   });
 
   it('only one gravity plate can ever be fitted', () => {
-    const a = PRESETS.biped.build();
+    const a = stripEquips(PRESETS.biped.build());
     expect(a.addEquipOnFace(a.core.id, 4, EQUIP.GRAVITY)).toBeTruthy();
     expect(a.addEquipOnFace(a.core.id, 2, EQUIP.GRAVITY)).toBeNull();
     expect(a.countEquip(EQUIP.GRAVITY)).toBe(1);
@@ -428,7 +428,7 @@ describe('equipment effects', () => {
   });
 
   it('plates make the machine heavier', () => {
-    const bare = computeStats(PRESETS.biped.build());
+    const bare = computeStats(stripEquips(PRESETS.biped.build()));
     const loaded = computeStats(withPlates(EQUIP.MISSILE, EQUIP.MISSILE, EQUIP.GRAVITY));
     expect(loaded.mass).toBeGreaterThan(bare.mass);
     expect(loaded.equipCount).toBe(3);

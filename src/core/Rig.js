@@ -483,9 +483,26 @@ export class Rig {
 
     this.limbs = limbs;
     this.armBones = this.joints.filter((n) => n.part.boneType === 'arm');
+
+    // Arms are chains too. Without this, a shoulder and the elbow below it
+    // both take the full swing and the arm bends twice as far as it should.
+    for (const node of this.armBones) {
+      node.chainDepth = this._depthUnder(node.part, 'arm');
+    }
     this.faceBones = this.joints.filter((n) => n.part.boneType === 'face');
     this.customBones = this.joints.filter((n) => n.part.boneType === 'custom');
     return limbs;
+  }
+
+  /** How many bones of the same attribute sit above this one. */
+  _depthUnder(part, boneType) {
+    let depth = 0;
+    let cur = part.parent ? this.assembly.get(part.parent) : null;
+    while (cur) {
+      if (cur.kind === 'bone' && cur.boneType === boneType) depth++;
+      cur = cur.parent ? this.assembly.get(cur.parent) : null;
+    }
+    return depth;
   }
 
   _hasLegAncestor(part) {

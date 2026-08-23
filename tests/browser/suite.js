@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import { describe, it, expect, shouldNotThrow, run } from './runner.js';
 import { App } from '../../src/main.js';
 import { TOOL } from '../../src/editor/EditorScene.js';
-import { PRESETS, computeStats } from '../../src/core/Assembly.js';
+import { Assembly, PRESETS, computeStats } from '../../src/core/Assembly.js';
 import { STANDARD_COLORS, hexToCss } from '../../src/core/Palette.js';
-import { VOX_LEVELS, EQUIP, EQUIP_META } from '../../src/core/constants.js';
+import { VOX_LEVELS, EQUIP, EQUIP_META, SIZE_MAX } from '../../src/core/constants.js';
 import { ColorWheel } from '../../src/ui/ColorWheel.js';
 import { Hud } from '../../src/game/Hud.js';
 
@@ -93,6 +93,19 @@ function sculptAt(x, y, z) {
   app.editor._applySculpt();
 }
 
+/**
+ * The biped, with the equipment it ships with taken back off.
+ *
+ * The presets now deploy armed, which is right for a player and wrong for a
+ * test that wants to say "fit exactly this plate and nothing else".
+ */
+function bare(preset = 'biped') {
+  app.loadPreset(preset);
+  for (const e of app.assembly.equips()) app.assembly.remove(e.id);
+  app.editor.rebuild();
+  return app.assembly;
+}
+
 /** A whole stroke, the way a pointer press starts one — undo step included. */
 function strokeAt(x, y, z) {
   app.editor.hoverVoxel = { x, y, z };
@@ -140,6 +153,21 @@ describe('boot', () => {
     expect(Math.max(...optRgb), 'the options too').toBeLessThan(60);
   });
 
+  it('reads its durability off the core and the weight', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const small = app.editor.stats.durability;
+
+    app.editor.select(app.assembly.rootId);
+    app.editor.resizeSelected([2, 2, 2]);
+    expect(app.editor.stats.coreScale).toBeCloseTo(2, 4);
+    expect(app.editor.stats.durability, 'a bigger core is a tougher machine')
+      .toBeGreaterThan(small * 2);
+
+    app.editor.resizeSelected([1, 1, 1]);
+    expect(app.editor.stats.durability).toBe(small);
+  });
+
   it('shows the standard palette', () => {
     const swatches = document.querySelectorAll('#rightpanel .swatch');
     expect(swatches.length).toBeGreaterThanOrEqual(STANDARD_COLORS.length);
@@ -176,6 +204,53 @@ describe('presets', () => {
       .filter((p) => p.mount)
       .map((p) => worldOf(p.id).distanceTo(core));
     expect(Math.max(...far)).toBeGreaterThan(1.5);
+  });
+});
+
+describe('what the presets come wearing', () => {
+  it('every preset can dash and shoot the moment you deploy', () => {
+    for (const key of Object.keys(PRESETS)) {
+      if (key === 'core') continue;
+      app.loadPreset(key);
+      step(2);
+      expect(app.editor.stats.dashBonus, `${key} has a boost plate`).toBeGreaterThan(0);
+      expect(app.editor.stats.weaponCount, `${key} is armed`).toBeGreaterThan(0);
+    }
+  });
+
+  it('the plates it ships with turn into real weapon slots in the field', () => {
+    app.loadPreset('biped');
+    app.setMode('field');
+    step(4);
+    const types = app.field.player.weapons.slots.map((s) => s.type);
+    expect(types.length, 'more than one thing to fire').toBeGreaterThan(1);
+    expect(types).toContain(EQUIP.BEAM);
+    expect(app.field.player.weapons.readout().length).toBe(types.length);
+    app.setMode('edit');
+  });
+
+  it('the heavy one cannot fly, and the others can', () => {
+    app.loadPreset('multileg');
+    app.setMode('field');
+    step(2);
+    expect(app.field.player.body.noFly).toBe(true);
+    app.setMode('edit');
+
+    app.loadPreset('biped');
+    app.setMode('field');
+    step(2);
+    expect(app.field.player.body.noFly).toBe(false);
+    app.setMode('edit');
+  });
+
+  it('the biped walks with a waist and damped shoulders', () => {
+    app.loadPreset('biped');
+    step(2);
+    const bones = [...app.assembly.parts.values()].filter((p) => p.kind === 'bone');
+    expect(bones.some((b) => b.boneType === 'custom' && b.custom.source === 'stride')).toBe(true);
+    expect(bones.filter((b) => b.boneType === 'arm' && b.gain < 0.6).length).toBe(2);
+    expect(app.editor.rig.armBones.filter((n) => n.chainDepth === 1).length,
+      'and a forearm on each side').toBe(2);
   });
 });
 
@@ -284,6 +359,115 @@ describe('placing parts', () => {
     pointAt(core.clone().add(new THREE.Vector3(0.49, 0, 0)));
     expect(app.editor.ghost.visible).toBe(true);
     expect(app.editor.pendingPlacement).toBeTruthy();
+  });
+});
+
+describe('nudging with the arrow keys', () => {
+  const arrow = (code, mods = {}) =>
+    window.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true, ...mods }));
+
+  /** Park the camera somewhere known, so screen directions are predictable. */
+  const lookFrom = (x, y, z) => {
+    const cam = app.editor.camera;
+    cam.position.set(x, y, z);
+    cam.lookAt(0, 2, 0);
+    cam.updateMatrixWorld(true);
+  };
+
+  const pick = () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setTool(TOOL.SELECT);
+    const b = [...app.assembly.parts.values()].find((p) => p.size?.[0] === 1.5);
+    app.editor.select(b.id);
+    return b;
+  };
+
+  it('moves the selection in the direction it looks on screen', () => {
+    const b = pick();
+    lookFrom(0, 3, 10);
+    const at = [...b.mount.pos];
+
+    arrow('ArrowRight');
+    expect(app.assembly.get(b.id).mount.pos[0] - at[0], 'right is +X from here')
+      .toBeCloseTo(0.25, 5);
+
+    const then = [...app.assembly.get(b.id).mount.pos];
+    arrow('ArrowUp');
+    expect(app.assembly.get(b.id).mount.pos[2] - then[2], 'up is into the screen')
+      .toBeCloseTo(-0.25, 5);
+  });
+
+  it('follows the camera round, so it is never a puzzle', () => {
+    const b = pick();
+    lookFrom(10, 3, 0);
+    const at = [...b.mount.pos];
+    arrow('ArrowUp');
+    const moved = app.assembly.get(b.id).mount.pos;
+    expect(moved[0] - at[0], 'into the screen is -X from over here').toBeCloseTo(-0.25, 5);
+    expect(moved[2] - at[2]).toBeCloseTo(0, 5);
+  });
+
+  it('shift lifts and lowers', () => {
+    const b = pick();
+    lookFrom(0, 3, 10);
+    const at = [...b.mount.pos];
+    arrow('ArrowUp', { shiftKey: true });
+    expect(app.assembly.get(b.id).mount.pos[1] - at[1]).toBeCloseTo(0.25, 5);
+    arrow('ArrowDown', { shiftKey: true });
+    arrow('ArrowDown', { shiftKey: true });
+    expect(app.assembly.get(b.id).mount.pos[1] - at[1]).toBeCloseTo(-0.25, 5);
+  });
+
+  it('alt gives a finer step than the placement grid', () => {
+    const b = pick();
+    lookFrom(0, 3, 10);
+    const at = [...b.mount.pos];
+    arrow('ArrowRight', { altKey: true });
+    expect(app.assembly.get(b.id).mount.pos[0] - at[0]).toBeCloseTo(0.05, 5);
+  });
+
+  it('each press is one undo step', () => {
+    const b = pick();
+    lookFrom(0, 3, 10);
+    const at = [...b.mount.pos];
+    arrow('ArrowRight');
+    arrow('ArrowRight');
+    app.undo();
+    expect(app.assembly.get(b.id).mount.pos[0] - at[0]).toBeCloseTo(0.25, 5);
+    app.undo();
+    expect(app.assembly.get(b.id).mount.pos[0] - at[0]).toBeCloseTo(0, 5);
+  });
+
+  it('moves a multi-selection as one, without moving children twice', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    lookFrom(0, 3, 10);
+    const bone = [...app.assembly.parts.values()].find((p) => p.boneType === 'arm');
+    const hand = [...app.assembly.parts.values()]
+      .find((p) => p.parent === bone.id && p.kind === 'block');
+    app.editor.select([bone.id, hand.id]);
+
+    const boneAt = [...bone.mount.pos];
+    const handAt = [...hand.mount.pos];
+    arrow('ArrowRight');
+
+    expect(app.assembly.get(bone.id).mount.pos[0] - boneAt[0]).toBeCloseTo(0.25, 4);
+    expect(app.assembly.get(hand.id).mount.pos, 'the child rode along with its bone')
+      .toEqual(handAt);
+  });
+
+  it('does nothing with an empty selection, and nothing in the field', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.editor.clearSelection();
+    shouldNotThrow(() => arrow('ArrowRight'), 'nudge with nothing selected');
+
+    app.setMode('field');
+    const before = app.field.player.position.clone();
+    arrow('ArrowRight');
+    expect(app.field.player.position.distanceTo(before)).toBe(0);
+    app.setMode('edit');
   });
 });
 
@@ -516,6 +700,84 @@ describe('working with bones', () => {
   });
 });
 
+describe('shoulders, hips and waists', () => {
+  const firstBone = (type) => [...app.assembly.parts.values()]
+    .find((p) => p.kind === 'bone' && p.boneType === type);
+
+  it('the panel offers the two knobs and explains what they are for', () => {
+    app.loadPreset('biped');
+    app.editor.select(firstBone('leg').id);
+    app.ui.renderInspector(app.editor.selectedParts());
+    const text = app.ui.inspectorEl.textContent;
+    for (const k of ['関節の効き', '効き', 'ずらし', '肩', '股関節', '腰']) {
+      expect(text, k).toContain(k);
+    }
+  });
+
+  it('a recipe button sets the joint up in one click', () => {
+    app.loadPreset('biped');
+    const leg = firstBone('leg');
+    app.editor.select(leg.id);
+    app.ui.renderInspector(app.editor.selectedParts());
+    const btn = [...app.ui.inspectorEl.querySelectorAll('button')]
+      .find((b) => b.textContent === '肩');
+    expect(btn, 'the shoulder recipe is offered').toBeTruthy();
+    btn.click();
+    expect(app.assembly.get(leg.id).gain).toBeCloseTo(0.4, 6);
+  });
+
+  it('turning the effect down really quietens the joint', () => {
+    app.loadPreset('biped');
+    const leg = firstBone('leg');
+    const node = () => app.editor.rig.nodes.get(leg.id);
+
+    const swing = () => {
+      app.editor.setPreviewMotion(true);
+      let peak = 0;
+      for (let i = 0; i < 120; i++) {
+        step(1);
+        peak = Math.max(peak, 2 * Math.acos(Math.min(1, Math.abs(node().joint.quaternion.w))));
+      }
+      app.editor.setPreviewMotion(false);
+      return peak;
+    };
+
+    const loud = swing();
+    app.editor.select(leg.id);
+    app.editor.setBoneMotionSelected({ gain: 0 });
+    expect(swing(), 'a dead joint stays put').toBeLessThan(loud * 0.35);
+  });
+
+  it('the change is one undo step, and survives a save', () => {
+    app.loadPreset('biped');
+    const leg = firstBone('leg');
+    app.editor.select(leg.id);
+    app.editor.setBoneMotionSelected({ gain: 0.25, lag: 0.4 });
+    expect(app.assembly.get(leg.id).gain).toBeCloseTo(0.25, 6);
+
+    app.undo();
+    expect(app.assembly.get(leg.id).gain).toBeCloseTo(1, 6);
+    app.redo();
+    expect(app.assembly.get(leg.id).lag).toBeCloseTo(0.4, 6);
+
+    const back = Assembly.fromJSON(app.assembly.toJSON());
+    expect(back.get(leg.id).gain).toBeCloseTo(0.25, 6);
+    expect(back.get(leg.id).lag).toBeCloseTo(0.4, 6);
+  });
+
+  it('the waist source is offered alongside the others', () => {
+    app.loadPreset('biped');
+    const waist = firstBone('custom');
+    app.editor.select(waist.id);
+    app.ui.renderInspector(app.editor.selectedParts());
+    // The first select is "what does it hang off"; the motion source is last.
+    const sels = app.ui.inspectorEl.querySelectorAll('select');
+    const sel = sels[sels.length - 1];
+    expect([...sel.options].map((o) => o.value)).toContain('stride');
+    expect(sel.value, 'and the waist is already on it').toBe('stride');
+  });
+});
+
 describe('the custom bone', () => {
   const rotor = (custom = {}) => {
     app.setMode('edit');
@@ -599,6 +861,66 @@ describe('the custom bone', () => {
     app.editor.select(bone.id);
     expect(axisPos().dot(onX), 'a different axis draws a different hinge')
       .toBeLessThan(0.9);
+  });
+});
+
+describe('the tool list', () => {
+  it('reads in the order you build in, bones head-downward', () => {
+    app.setMode('edit');
+    const rows = [...document.querySelectorAll('#leftpanel .toolbtn, #leftpanel .toolgroup')]
+      .map((e) => e.textContent.replace(/\s+/g, ''));
+    expect(rows.slice(0, 11)).toEqual([
+      '選ぶ', '選択/移動V',
+      '組む', 'ブロックB', '装備プレートG',
+      'ボーン', 'フェイスボーンF', 'アームボーンA', 'レッグボーンL', 'カスタムボーンC',
+      '呼び出す',
+    ]);
+  });
+
+  it('every tool is still reachable', () => {
+    expect(document.querySelectorAll('#leftpanel .toolbtn')).toHaveLength(11);
+  });
+});
+
+describe('the walk preview', () => {
+  it('puts the pose back the moment it is switched off', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.editor.clearSelection();
+    const rest = () => Math.max(0, ...app.editor.rig.joints
+      .map((j) => j.joint.quaternion.angleTo(new THREE.Quaternion())));
+
+    app.editor.setPreviewMotion(true);
+    step(60);
+    expect(rest(), 'it really is mid-stride').toBeGreaterThan(0.2);
+
+    app.editor.setPreviewMotion(false);
+    expect(rest(), 'and standing again immediately, not over the next second')
+      .toBeCloseTo(0, 5);
+    expect(app.editor.rig.root.position.y).toBeCloseTo(app.editor.groundOffset, 5);
+    expect(app.editor.rig.root.rotation.x).toBe(0);
+  });
+
+  it('leaving the editor does not park it mid-stride', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.editor.setPreviewMotion(true);
+    step(40);
+    app.setMode('field');
+    expect(app.editor.previewMotion).toBe(false);
+    app.setMode('edit');
+    expect(Math.max(0, ...app.editor.rig.joints
+      .map((j) => j.joint.quaternion.angleTo(new THREE.Quaternion())))).toBeCloseTo(0, 5);
+  });
+
+  it('the checkbox drives it', () => {
+    app.setMode('edit');
+    app.ui.previewToggle.checked = true;
+    app.ui.previewToggle.dispatchEvent(new Event('change'));
+    expect(app.editor.previewMotion).toBe(true);
+    app.ui.previewToggle.checked = false;
+    app.ui.previewToggle.dispatchEvent(new Event('change'));
+    expect(app.editor.previewMotion).toBe(false);
   });
 });
 
@@ -755,7 +1077,7 @@ describe('selection', () => {
   it('deletes every selected part at once', () => {
     app.loadPreset('biped');
     const arms = [...app.assembly.parts.values()].filter((p) => p.boneType === 'arm');
-    expect(arms.length).toBe(2);
+    expect(arms.length, 'a shoulder and a forearm per side').toBe(4);
     const before = app.assembly.size;
     app.editor.select(arms.map((p) => p.id));
     app.editor.deleteSelected();
@@ -774,7 +1096,10 @@ describe('free movement', () => {
   it('the gizmo is attached to the selection centroid', () => {
     app.loadPreset('biped');
     app.setTool(TOOL.SELECT);
-    const ids = [...app.assembly.parts.keys()].slice(0, 2);
+    // Blocks, not bones: a bone's origin is its joint, which is not where
+    // the part reads as being, and that is a different question from this one.
+    const ids = [...app.assembly.parts.values()]
+      .filter((p) => p.kind === 'block' || p.kind === 'core').slice(0, 2).map((p) => p.id);
     app.editor.select(ids);
     expect(app.editor.gizmo.object).toBe(app.editor.pivot);
     const mid = worldOf(ids[0]).add(worldOf(ids[1])).multiplyScalar(0.5);
@@ -1222,6 +1547,49 @@ describe('sculpting', () => {
     expect(vox.get(mid, mid, mid)).toBe(5);
   });
 
+  it('the brush is a cube, so one click takes a square bite', () => {
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    const vox = app.assembly.core.vox;
+    const mid = Math.floor(vox.n / 2);
+
+    app.setTool(TOOL.CARVE);
+    app.editor.brushPercent = 100 / vox.n;       // exactly one cell of radius
+    expect(app.editor.brushRadiusCells(vox)).toBe(1);
+    const before = vox.solid;
+    sculptAt(mid, mid, mid);
+
+    expect(before - vox.solid, 'a 3x3x3 box, exactly').toBe(27);
+    const gone = (dx, dy, dz) => vox.get(mid + dx, mid + dy, mid + dz) === 0;
+    for (const x of [-1, 0, 1]) {
+      for (const y of [-1, 0, 1]) {
+        for (const z of [-1, 0, 1]) expect(gone(x, y, z), `${x},${y},${z}`).toBe(true);
+      }
+    }
+    expect(gone(2, 0, 0), 'and it stops there').toBe(false);
+  });
+
+  it('the cursor is the same box the brush will cut', () => {
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.editor.resizeSelected([1, 1, 1]);
+    app.setTool(TOOL.CARVE);
+    app.editor.brushPercent = 12;
+
+    const core = worldOf(app.assembly.rootId);
+    aimCamera(core, new THREE.Vector3(6, 0, 0));
+    pointAt(core.clone().add(new THREE.Vector3(0.49, 0, 0)));
+    expect(app.editor.voxCursor.visible).toBe(true);
+
+    const vox = app.assembly.core.vox;
+    const side = (app.editor.brushRadiusCells(vox) * 2 + 1) / vox.n;
+    // The cursor is drawn as a box; now that the brush is one too, the
+    // preview is the shape you actually get rather than a rough hint.
+    expect(app.editor.voxCursor.scale.x).toBeCloseTo(side, 6);
+    expect(app.editor.voxCursor.scale.y).toBeCloseTo(side, 6);
+    expect(app.editor.voxCursor.scale.z).toBeCloseTo(side, 6);
+  });
+
   it('keeps the camera usable: right button orbits, wheel zooms', () => {
     app.setTool(TOOL.CARVE);
     expect(app.editor.controls.enabled, 'orbit stays live').toBe(true);
@@ -1460,7 +1828,7 @@ describe('save and load', () => {
 
 describe('field mode', () => {
   it('drops straight into the action, with no pause menu', () => {
-    app.loadPreset('biped');
+    bare();
     app.setMode('field');
     expect(app.mode).toBe('field');
     expect(app.field.paused, 'running immediately').toBe(false);
@@ -1557,7 +1925,7 @@ describe('field mode', () => {
 
   it('keeps the chassis level on the ground, however steeply it is aiming', () => {
     app.setMode('edit');
-    app.loadPreset('biped');
+    bare();
     app.setMode('field');
     app.input.setEnabled(true);
     app.field.respawn();
@@ -1588,7 +1956,7 @@ describe('field mode', () => {
 
   it('closing on a locked target does not lift the machine off the ground', () => {
     app.setMode('edit');
-    app.loadPreset('biped');
+    bare();
     app.setMode('field');
     app.input.setEnabled(true);
     app.field.respawn();
@@ -1598,6 +1966,7 @@ describe('field mode', () => {
     expect(app.field.lock, 'locked on').toBeTruthy();
 
     const start = app.field.player.position.y;
+    const opened = app.field.player.position.distanceTo(app.field.lock.robot.position);
     let peak = start;
     let closest = Infinity;
     app.input.keys.add('KeyW');
@@ -1610,7 +1979,10 @@ describe('field mode', () => {
     }
     app.input.keys.clear();
 
-    expect(closest, 'we really did get close').toBeLessThan(8);
+    // Relative to where we started, not an absolute range: the opponent jinks
+    // on a random timer, and can respawn near or far, so both how close we get
+    // and how far we began vary run to run.
+    expect(closest, 'we really did close on it').toBeLessThan(opened * 0.5);
     expect(peak - start, 'and never left the floor').toBeLessThan(0.5);
     expect(app.field.player.body.env.grounded).toBeGreaterThan(0.9);
   });
@@ -1646,7 +2018,7 @@ describe('equipment plates', () => {
 
   it('the tool is armed by picking a plate, and the ghost shows it', () => {
     app.setMode('edit');
-    app.loadPreset('biped');
+    bare();
     app.setEquipType(EQUIP.BEAM);
     expect(app.editor.tool).toBe(TOOL.EQUIP);
     expect(app.editor.equipType).toBe(EQUIP.BEAM);
@@ -1658,7 +2030,7 @@ describe('equipment plates', () => {
   });
 
   it('a click sticks a plate flat on the surface it hit', () => {
-    app.loadPreset('biped');
+    bare();
     const before = app.assembly.size;
     const e = stick(EQUIP.BEAM);
 
@@ -1673,7 +2045,7 @@ describe('equipment plates', () => {
   });
 
   it('the plate really is in the scene, and it is a plate', () => {
-    app.loadPreset('biped');
+    bare();
     const e = stick(EQUIP.GATLING);
     const node = app.editor.rig.nodes.get(e.id);
     expect(node).toBeTruthy();
@@ -1687,7 +2059,7 @@ describe('equipment plates', () => {
   });
 
   it('picks up a plate when you click it', () => {
-    app.loadPreset('biped');
+    bare();
     const e = stick(EQUIP.BEAM);
     app.editor.clearSelection();
     app.setTool(TOOL.SELECT);
@@ -1696,7 +2068,7 @@ describe('equipment plates', () => {
   });
 
   it('swapping the type re-cuts the plate without rebuilding the world', () => {
-    app.loadPreset('biped');
+    bare();
     const e = stick(EQUIP.BEAM);
     const node = app.editor.rig.nodes.get(e.id);
     app.editor.setEquipTypeSelected(EQUIP.BOOST);
@@ -1707,7 +2079,7 @@ describe('equipment plates', () => {
   });
 
   it('resizing a plate is undoable like anything else', () => {
-    app.loadPreset('biped');
+    bare();
     const e = stick(EQUIP.BEAM);
     app.editor.setEquipSizeSelected(1.4);
     expect(app.assembly.get(e.id).size).toBeCloseTo(1.4, 3);
@@ -1716,7 +2088,7 @@ describe('equipment plates', () => {
   });
 
   it('the bullet colour reaches the plate you can see', () => {
-    app.loadPreset('biped');
+    bare();
     const e = stick(EQUIP.BEAM);
     app.setBulletColor(0x6bff6b);
     expect(app.assembly.get(e.id).bulletColor).toBe(0x6bff6b);
@@ -1724,7 +2096,7 @@ describe('equipment plates', () => {
   });
 
   it('a blade refuses a bullet colour, and says so in the panel', () => {
-    app.loadPreset('biped');
+    bare();
     const e = stick(EQUIP.BLADE);
     expect(app.editor.setBulletColorSelected(0x6bff6b)).toBe(false);
     expect(app.assembly.get(e.id).bulletColor).toBeNull();
@@ -1733,7 +2105,7 @@ describe('equipment plates', () => {
   });
 
   it('the panel offers the plate controls, and names the plate', () => {
-    app.loadPreset('biped');
+    bare();
     stick(EQUIP.SHOT);
     app.ui.renderInspector(app.editor.selectedParts());
     const text = app.ui.inspectorEl.textContent;
@@ -1743,7 +2115,7 @@ describe('equipment plates', () => {
   });
 
   it('a second gravity plate is refused, with a reason', () => {
-    app.loadPreset('biped');
+    bare();
     stick(EQUIP.GRAVITY);
     expect(app.assembly.countEquip(EQUIP.GRAVITY)).toBe(1);
     const size = app.assembly.size;
@@ -1755,7 +2127,7 @@ describe('equipment plates', () => {
   });
 
   it('symmetry mirrors a plate across the machine', () => {
-    app.loadPreset('biped');
+    bare();
     app.setEquipType(EQUIP.GATLING);
     app.editor.symmetry = true;
     const core = worldOf(app.assembly.rootId);
@@ -1770,7 +2142,7 @@ describe('equipment plates', () => {
   });
 
   it('plates travel with copy and paste', () => {
-    app.loadPreset('biped');
+    bare();
     const e = stick(EQUIP.BEAM);
     app.setTool(TOOL.SELECT);
     app.editor.select(e.id);
@@ -1781,7 +2153,7 @@ describe('equipment plates', () => {
   });
 
   it('a plate survives save and load', () => {
-    app.loadPreset('biped');
+    bare();
     stick(EQUIP.SHOT);
     app.setBulletColor(0xff2fb0);
     app.save();
@@ -1793,7 +2165,7 @@ describe('equipment plates', () => {
   });
 
   it('deletes like any other part', () => {
-    app.loadPreset('biped');
+    bare();
     const e = stick(EQUIP.BEAM);
     app.setTool(TOOL.SELECT);
     app.editor.select(e.id);
@@ -1807,7 +2179,7 @@ describe('weapons in the field', () => {
   /** A biped wearing one plate of each named type, already in the field. */
   const deploy = (...types) => {
     app.setMode('edit');
-    app.loadPreset('biped');
+    bare();
     const a = app.assembly;
     const chest = [...a.parts.values()].find((p) => p.size?.[0] === 1.5);
     for (const t of types) a.addEquipOnFace(chest.id, 4, t);
@@ -1859,13 +2231,17 @@ describe('weapons in the field', () => {
     const lock = lockOn();
     expect(lock).toBeTruthy();
     const hp = lock.robot.hp;
+    // Track the LOW-WATER mark: a machine that takes enough of this comes
+    // apart and respawns at full health, which is not the same as unhurt.
+    let lowest = hp;
     for (let i = 0; i < 300; i++) {
       if (i % 24 === 0) app.input.keys.delete('Mouse0');
       if (i % 24 === 2) app.input.keys.add('Mouse0');
       step(1);
+      lowest = Math.min(lowest, lock.robot.hp);
     }
     app.input.keys.clear();
-    expect(lock.robot.hp).toBeLessThan(hp);
+    expect(lowest).toBeLessThan(hp);
   });
 
   it('a missile chases what you locked', () => {
@@ -1933,7 +2309,7 @@ describe('weapons in the field', () => {
 
   it('a bare chassis still has its built-in vulcan', () => {
     app.setMode('edit');
-    app.loadPreset('biped');
+    bare();
     app.setMode('field');
     app.field.respawn();
     const lock = lockOn();
@@ -2024,7 +2400,7 @@ describe('weapons in the field', () => {
 
   it('every fitted plate fires, wherever it is stuck', () => {
     app.setMode('edit');
-    app.loadPreset('biped');
+    bare();
     const a = app.assembly;
     const chest = [...a.parts.values()].find((x) => x.size?.[0] === 1.5);
     a.addEquipOnFace(chest.id, 5, EQUIP.BOOST);
@@ -2172,7 +2548,7 @@ describe('key config', () => {
 describe('switching weapons', () => {
   const deploy = (...types) => {
     app.setMode('edit');
-    app.loadPreset('biped');
+    bare();
     const a = app.assembly;
     const chest = [...a.parts.values()].find((p) => p.size?.[0] === 1.5);
     for (const t of types) a.addEquipOnFace(chest.id, 4, t);
@@ -2225,6 +2601,383 @@ describe('switching weapons', () => {
     const p = deploy(EQUIP.BEAM);
     tap('KeyC');
     expect(p.weapons.active.type).toBe(EQUIP.BEAM);
+  });
+});
+
+describe('destruction and respawn', () => {
+  const deploy = () => {
+    app.setMode('edit');
+    bare();
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.respawn();
+    return app.field;
+  };
+
+  const kill = (robot) => { robot.damage(robot.hp + 1); step(1); };
+
+  it('a destroyed machine comes apart where it stood', () => {
+    const F = deploy();
+    const enemy = F.enemies.find((e) => e.alive);
+    const at = enemy.position.clone();
+
+    kill(enemy);
+    expect(enemy.alive).toBe(false);
+    expect(enemy.object3D.visible, 'the machine is gone').toBe(false);
+    expect(F.debris.pieceCount, 'and the wreckage is not').toBeGreaterThan(10);
+    expect(F.debris.blastCount).toBe(1);
+
+    // the chunks started on the machine, not at the origin
+    const near = F.debris.pieces.filter((p) => p.mesh.position.distanceTo(at) < 8);
+    expect(near.length).toBeGreaterThan(F.debris.pieceCount * 0.5);
+  });
+
+  it('the wreckage is made of the parts it was built from', () => {
+    const F = deploy();
+    const enemy = F.enemies.find((e) => e.alive);
+    const geometries = new Set(enemy.rig.pickables.map((m) => m.geometry));
+    kill(enemy);
+    const chunks = F.debris.pieces.filter((p) => !p.spark);
+    expect(chunks.length).toBeGreaterThan(5);
+    for (const p of chunks) expect(geometries.has(p.mesh.geometry)).toBe(true);
+  });
+
+  it('it comes back on its own after the wreck has had its moment', () => {
+    const F = deploy();
+    const enemy = F.enemies.find((e) => e.alive);
+    kill(enemy);
+    expect(F.pendingRespawns).toHaveLength(1);
+
+    step(60);
+    expect(enemy.alive, 'still down a second later').toBe(false);
+
+    step(60 * 2);
+    expect(enemy.alive, 'and back after the delay').toBe(true);
+    expect(enemy.hp).toBe(enemy.maxHp);
+    expect(enemy.object3D.visible).toBe(true);
+    expect(F.pendingRespawns).toHaveLength(0);
+  });
+
+  it('it comes back somewhere else, and inside the arena', () => {
+    const F = deploy();
+    const enemy = F.enemies.find((e) => e.alive);
+    const at = enemy.position.clone();
+    kill(enemy);
+    step(60 * 3);
+    expect(enemy.position.distanceTo(at), 'not on top of its own wreck').toBeGreaterThan(10);
+    expect(Math.hypot(enemy.position.x, enemy.position.z))
+      .toBeLessThan(F.world.arenaRadius + 1);
+  });
+
+  it('the lock lets go of something that no longer exists', () => {
+    const F = deploy();
+    const enemy = forceLock().robot;
+    expect(F.lock).toBeTruthy();
+    kill(enemy);
+    expect(F.lock, 'nothing to lock onto any more').toBeNull();
+    expect(F.player.body.locked).toBe(false);
+  });
+
+  it('the wreckage burns out by itself', () => {
+    const F = deploy();
+    kill(F.enemies.find((e) => e.alive));
+    step(60 * 6);
+    expect(F.debris.pieceCount).toBe(0);
+    expect(F.debris.blastCount).toBe(0);
+  });
+
+  it('the player blows up too, and respawns at the start line', () => {
+    const F = deploy();
+    const p = F.player;
+    p.body.reset(new THREE.Vector3(30, 5, 30));
+    step(2);
+
+    kill(p);
+    expect(p.alive).toBe(false);
+    expect(F.debris.pieceCount).toBeGreaterThan(10);
+
+    step(60 * 3);
+    expect(p.alive).toBe(true);
+    expect(p.hp).toBe(p.maxHp);
+    expect(p.position.z, 'back on the start line').toBeCloseTo(-18, 0);
+    expect(F.debris.pieceCount, 'and the field is cleared').toBe(0);
+  });
+
+  it('shooting one down does the same thing as killing it by hand', () => {
+    app.setMode('edit');
+    bare();
+    const a = app.assembly;
+    const chest = [...a.parts.values()].find((x) => x.size?.[0] === 1.5);
+    a.addEquipOnFace(chest.id, 4, EQUIP.GATLING);
+    app.editor.rebuild();
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.respawn();
+
+    const enemy = forceLock().robot;
+    enemy.hp = 12;                       // one burst is enough
+    app.input.keys.add('Mouse0');
+    let sawWreck = false;
+    for (let i = 0; i < 240 && !sawWreck; i++) {
+      step(1);
+      if (app.field.debris.pieceCount > 5) sawWreck = true;
+    }
+    app.input.keys.clear();
+    expect(enemy.alive, 'shot down').toBe(false);
+    expect(sawWreck, 'and it came apart').toBe(true);
+  });
+
+  it('leaving the field takes the wreckage with it', () => {
+    const F = deploy();
+    kill(F.enemies.find((e) => e.alive));
+    expect(F.debris.pieceCount).toBeGreaterThan(0);
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.setMode('field');
+    expect(app.field.debris.pieceCount, 'no chunks of a machine that no longer exists').toBe(0);
+    expect(app.field.pendingRespawns).toHaveLength(0);
+  });
+});
+
+describe('sharing a build', () => {
+  const openShare = async () => {
+    app.setMode('edit');
+    await app.ui.share.show();
+    return app.ui.share;
+  };
+
+  it('turns the machine on the bench into a QR and a code', async () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.assembly.name = 'QR BIPED';
+    const dlg = await openShare();
+
+    expect(dlg.open).toBe(true);
+    expect(dlg.titleEl.textContent).toBe('機体: QR BIPED');
+    expect(dlg.code.startsWith('BRO1:')).toBe(true);
+    expect(dlg.canvas.width, 'a real QR was drawn').toBeGreaterThan(100);
+    expect(dlg.canvas.classList.contains('hidden')).toBe(false);
+    expect(dlg.sizeEl.textContent).toContain('バイト');
+    dlg.close();
+  });
+
+  it('the drawn QR reads back as exactly the code it came from', async () => {
+    app.setMode('edit');
+    app.loadPreset('multileg');
+    const dlg = await openShare();
+    const { readQRFromImage } = await import('../../src/ui/ShareDialog.js');
+
+    const blob = await new Promise((r) => dlg.canvas.toBlob(r, 'image/png'));
+    const decoded = await readQRFromImage(blob);
+    expect(decoded, 'an independent decoder agrees').toBe(dlg.code);
+    dlg.close();
+  });
+
+  it('loads a machine back from its own code', async () => {
+    app.setMode('edit');
+    app.loadPreset('multileg');
+    app.assembly.name = 'ROUND TRIP';
+    const dlg = await openShare();
+    const code = dlg.code;
+    const parts = app.assembly.size;
+
+    app.loadPreset('core');
+    expect(app.assembly.size).toBe(1);
+
+    dlg.importEl.value = code;
+    await dlg._importText();
+    expect(app.assembly.name).toBe('ROUND TRIP');
+    expect(app.assembly.size).toBe(parts);
+    expect(dlg.noteEl.textContent).toContain('メイン編集');
+    dlg.close();
+  });
+
+  it('loads one back from a QR image', async () => {
+    app.setMode('edit');
+    app.loadPreset('hopper');
+    app.assembly.name = 'FROM IMAGE';
+    const dlg = await openShare();
+    const { drawQR } = await import('../../src/ui/ShareDialog.js');
+
+    const big = document.createElement('canvas');
+    drawQR(big, dlg.code, { module: 10 });
+    const blob = await new Promise((r) => big.toBlob(r, 'image/png'));
+
+    app.loadPreset('core');
+    await dlg._readFile(blob);
+    expect(app.assembly.name).toBe('FROM IMAGE');
+    expect(app.assembly.size).toBeGreaterThan(1);
+    dlg.close();
+  });
+
+  it('a shared part goes to the shelf, not over your machine', async () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.library.clear();
+
+    app.newPart();
+    app.openPartEditor();
+    app.partAssembly.name = 'SHARED POD';
+    app.partAssembly.addBlockOnFace(app.partAssembly.rootId, 2, 5, { size: [0.5, 0.5, 0.5] });
+    app.partEditor.rebuild();
+    const dlg = await app.ui.share.show();
+    expect(dlg.titleEl.textContent).toBe('パーツ: SHARED POD');
+    const code = dlg.code;
+    dlg.close();
+
+    app.setMode('edit');
+    app.library.clear();
+    const machineParts = app.assembly.size;
+    dlg.importEl.value = code;
+    await dlg._importText();
+
+    expect(app.library.list().map((x) => x.name)).toContain('SHARED POD');
+    expect(app.assembly.size, 'the machine was left alone').toBe(machineParts);
+    dlg.close();
+  });
+
+  it('says what is wrong rather than failing silently', async () => {
+    const dlg = await openShare();
+    dlg.importEl.value = '';
+    await dlg._importText();
+    expect(dlg.noteEl.textContent).toContain('空');
+
+    dlg.importEl.value = 'https://example.com/not-a-build';
+    await dlg._importText();
+    expect(dlg.noteEl.textContent).toContain('共有コードではありません');
+
+    dlg.importEl.value = 'BRO1:!!!!!';
+    await dlg._importText();
+    expect(dlg.noteEl.textContent).toContain('壊れています');
+    dlg.close();
+  });
+
+  it('an import is one undo step', async () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const dlg = await openShare();
+    const code = dlg.code;
+    const before = app.assembly.size;
+
+    app.loadPreset('core');
+    dlg.importEl.value = code;
+    await dlg._importText();
+    expect(app.assembly.size).toBe(before);
+
+    app.undo();
+    expect(app.assembly.size, 'back to what was on the bench').toBe(1);
+    dlg.close();
+  });
+
+  it('blows up to fill the screen for a phone camera', async () => {
+    const dlg = await openShare();
+    expect(dlg.el.classList.contains('zoom')).toBe(false);
+    dlg._toggleZoom();
+    expect(dlg.el.classList.contains('zoom')).toBe(true);
+    dlg._toggleZoom();
+    expect(dlg.el.classList.contains('zoom')).toBe(false);
+    dlg.close();
+    expect(dlg.el.classList.contains('zoom'), 'closing drops the zoom too').toBe(false);
+  });
+
+  it('Escape closes it', async () => {
+    await openShare();
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+    expect(app.ui.share.open).toBe(false);
+  });
+});
+
+describe('building past the edge of a block', () => {
+  /** Point at a face from `dir` and click `reach` metres out along it. */
+  const clickFace = (partId, dir, reach) => {
+    const ed = app.editor;
+    ed.rig.root.updateMatrixWorld(true);
+    const at = worldOf(partId);
+    aimCamera(at, dir.clone().multiplyScalar(6));
+    return pointAt(at.clone().add(dir.clone().multiplyScalar(reach)), { click: true });
+  };
+
+  it('adding past a face grows the block instead of doing nothing', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.setTool(TOOL.ADD);
+
+    const before = [...app.assembly.core.size];
+    clickFace(app.assembly.rootId, new THREE.Vector3(1, 0, 0), 0.5);
+
+    expect(app.assembly.core.size[0], 'the block grew on the face that was hit')
+      .toBeCloseTo(before[0] + 0.25, 5);
+    expect(app.assembly.core.size[1], 'and only on that axis').toBeCloseTo(before[1], 5);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('the cursor warns that the next click will enlarge it', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.setTool(TOOL.ADD);
+
+    const at = worldOf(app.assembly.rootId);
+    aimCamera(at, new THREE.Vector3(6, 0, 0));
+    pointAt(at.clone().add(new THREE.Vector3(0.5, 0, 0)));
+    expect(app.editor.hoverVoxel, 'a cell was found').toBeTruthy();
+    expect(app.editor.hoverVoxel.grow, 'and it is off the edge').toBeTruthy();
+    expect(app.editor.hoverVoxel.grow.axis).toBe(0);
+    expect(app.editor.hoverVoxel.grow.dir).toBe(1);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('the shape that was already there does not move', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const chest = [...app.assembly.parts.values()].find((p) => p.size?.[0] === 1.5);
+    app.editor.select(chest.id);
+    app.setTool(TOOL.ADD);
+
+    app.editor.rig.root.updateMatrixWorld(true);
+    const before = worldOf(chest.id).clone();
+    const size = [...chest.size];
+
+    clickFace(chest.id, new THREE.Vector3(1, 0, 0), 0.76);
+    const grown = app.assembly.get(chest.id);
+    expect(grown.size[0]).toBeCloseTo(size[0] + 0.25, 5);
+
+    // The block's own origin moved half a step, which is exactly what keeps
+    // the material it already had standing still.
+    app.editor.rig.root.updateMatrixWorld(true);
+    expect(worldOf(chest.id).x - before.x).toBeCloseTo(0.125, 3);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('one undo takes the growth back', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.setTool(TOOL.ADD);
+    const before = [...app.assembly.core.size];
+    const solid = app.assembly.core.vox.solid;
+
+    clickFace(app.assembly.rootId, new THREE.Vector3(1, 0, 0), 0.5);
+    expect(app.assembly.core.size[0]).toBeGreaterThan(before[0]);
+
+    app.undo();
+    expect(app.assembly.core.size).toEqual(before);
+    expect(app.assembly.core.vox.solid).toBe(solid);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('refuses once the block is as big as a block may be', () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.editor.resizeSelected([SIZE_MAX, 1, 1]);
+    app.setTool(TOOL.ADD);
+
+    clickFace(app.assembly.rootId, new THREE.Vector3(1, 0, 0), SIZE_MAX / 2);
+    expect(app.assembly.core.size[0]).toBe(SIZE_MAX);
+    expect(app.ui.toast.textContent).toContain('大きく');
+    app.setTool(TOOL.SELECT);
   });
 });
 
@@ -2572,7 +3325,8 @@ describe('clipboard', () => {
 
   it('pastes several parts at once', () => {
     app.loadPreset('bits');
-    const bits = [...app.assembly.parts.values()].filter((p) => p.mount).slice(0, 3);
+    const bits = [...app.assembly.parts.values()]
+      .filter((p) => p.kind === 'block' && p.mount).slice(0, 3);
     const before = app.assembly.size;
     app.editor.select(bits.map((p) => p.id));
     expect(app.copySelected()).toBe(3);
@@ -2588,20 +3342,22 @@ describe('clipboard', () => {
     app.copySelected({ cut: true });
     expect(app.assembly.get(arm.id)).toBe(undefined);
     expect(app.pasteClipboard()).toBe(1);
-    expect([...app.assembly.parts.values()].filter((p) => p.boneType === 'arm'))
-      .toHaveLength(2);
+    expect([...app.assembly.parts.values()].filter((p) => p.boneType === 'arm'),
+      'the forearm came along with it, there and back').toHaveLength(4);
   });
 
   it('a paste can be undone in one step', () => {
     app.loadPreset('bits');
-    const bits = [...app.assembly.parts.values()].filter((p) => p.mount).slice(0, 2);
+    const bits = [...app.assembly.parts.values()]
+      .filter((p) => p.kind === 'block' && p.mount).slice(0, 2);
     const before = app.assembly.size;
     app.editor.select(bits.map((p) => p.id));
     app.copySelected();
     app.pasteClipboard();
-    expect(app.assembly.size).toBe(before + 2);
+    // More than two parts arrive: a bit brings the plate stuck to it.
+    expect(app.assembly.size).toBeGreaterThan(before + 1);
     app.undo();
-    expect(app.assembly.size).toBe(before);
+    expect(app.assembly.size, 'all of it, in one step').toBe(before);
   });
 
   it('copying nothing does nothing', () => {

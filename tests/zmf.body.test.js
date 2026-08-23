@@ -4,9 +4,9 @@ import { ZMFBody } from '../src/zmf/ZMFBody.js';
 import { SyntheticInput, Robot, SimpleAI } from '../src/game/Robot.js';
 import { Assembly, PRESETS, computeStats } from '../src/core/Assembly.js';
 import { Rig } from '../src/core/Rig.js';
-import { testWorld } from './helpers/dom.js';
+import { testWorld, stripEquips } from './helpers/dom.js';
 
-const STATS = computeStats(PRESETS.biped.build());
+const STATS = computeStats(stripEquips(PRESETS.biped.build()));
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
 
 function makeBody(stats = STATS, world = testWorld()) {
@@ -18,7 +18,7 @@ function makeBody(stats = STATS, world = testWorld()) {
 /** Run the body for `seconds` with a fixed input. */
 /** Stats for a biped wearing the named equipment plates. */
 function platedStats(...types) {
-  const a = PRESETS.biped.build();
+  const a = stripEquips(PRESETS.biped.build());
   for (const t of types) a.addEquipOnFace(a.core.id, 4, t);
   return computeStats(a);
 }
@@ -387,7 +387,9 @@ describe('ground lock-on', () => {
     b.locked = true;
     input.move.set(0, 0, 1);
     input.intensity = 1;
-    run(b, input, 6);
+    // Long enough to have turned, short enough that it has not yet arrived:
+    // once it flies past the target the correct answer is to turn round again.
+    run(b, input, 3);
 
     expect(b.forward.x, 'it turned to face the target').toBeGreaterThan(0.7);
     expect(Math.abs(b.forward.y), 'without tipping the chassis').toBeLessThan(0.05);
@@ -510,7 +512,7 @@ describe('equipment on the body', () => {
   const plated = platedStats;
 
   it('a boost plate makes the dash bite harder', () => {
-    const bare = makeBody(computeStats(PRESETS.biped.build()));
+    const bare = makeBody(computeStats(stripEquips(PRESETS.biped.build())));
     const boosted = makeBody(plated('boost', 'boost'));
     expect(boosted.dashSpeed).toBeGreaterThan(bare.dashSpeed);
   });

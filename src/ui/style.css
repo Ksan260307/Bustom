@@ -741,3 +741,91 @@ button:disabled:hover { background: rgba(255, 255, 255, 0.045); border-color: va
 }
 
 .inspector-empty.warn { color: var(--bad); border-color: var(--bad); }
+
+.toolgroup {
+  margin: 8px 0 3px;
+  color: var(--dim);
+  font: 600 9px/1 var(--mono);
+  letter-spacing: .18em;
+  text-transform: uppercase;
+}
+.toolgroup:first-child { margin-top: 0; }
+
+
+/* ---------- share dialog ---------- */
+#sharedlg {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 9, 14, 0.72);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+  z-index: 41;
+}
+#sharedlg.hidden { display: none; }
+.sharebox { width: min(760px, 94vw); }
+.sharebody {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 14px;
+  overflow-y: auto;
+}
+@media (max-width: 700px) { .sharebody { grid-template-columns: 1fr; } }
+.sharecol { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.sharetitle { font-size: 13px; color: var(--fg); font-weight: 600; }
+.qrcanvas {
+  width: 100%;
+  max-width: 260px;
+  align-self: center;
+  image-rendering: pixelated;
+  border-radius: 6px;
+  background: #fff;
+}
+.qrcanvas.hidden { display: none; }
+.sharecode {
+  width: 100%;
+  resize: vertical;
+  font: 500 10px/1.45 var(--mono);
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  word-break: break-all;
+}
+.dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 92px;
+  padding: 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--dim);
+  font-size: 11px;
+  text-align: center;
+  cursor: pointer;
+}
+.dropzone:hover, .dropzone.over {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(79, 210, 255, 0.08);
+}
+
+/* Blown up for a phone camera: the dialog cannot give a dense code the
+   ~6 screen pixels per module it needs to be read. */
+#sharedlg.zoom .sharebox { width: auto; background: none; border: 0; box-shadow: none; }
+#sharedlg.zoom .keyhead, #sharedlg.zoom .sharecol:last-child,
+#sharedlg.zoom .sharetitle, #sharedlg.zoom .sharecode,
+#sharedlg.zoom .row, #sharedlg.zoom .note { display: none; }
+#sharedlg.zoom .sharebody { grid-template-columns: 1fr; padding: 0; }
+#sharedlg.zoom .qrcanvas {
+  max-width: none;
+  width: min(92vw, 88vh);
+  height: min(92vw, 88vh);
+  padding: 12px;
+}
+#sharedlg.zoom { background: rgba(5, 9, 14, 0.94); }

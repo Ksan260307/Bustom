@@ -473,3 +473,135 @@ describe('custom bone motion', () => {
     rig.dispose();
   });
 });
+
+// ============================================================
+//  Shoulders, hips and waists, built out of what already exists
+// ============================================================
+
+describe('joint gain and lag', () => {
+  /** Two legs, both plain, with the LEFT one turned down to `gain`. */
+  const pair = (gain, lag = 0) => {
+    const a = Assembly.createDefault();
+    for (const face of [0, 1]) {
+      const hip = a.addBlockOnFace(a.rootId, face, 2, { size: [0.5, 0.5, 0.5] });
+      a.addBoneOnFace(hip.id, 3, BONE.LEG, {
+        length: 2, ...(face === 1 ? { gain, lag } : {}),
+      });
+    }
+    return makeAnimator(a);
+  };
+
+  const spanOf = (spans, id) => {
+    const s = spans.get(id);
+    return s.max - s.min;
+  };
+
+  it('gain scales how far a leg swings', () => {
+    const rigged = pair(0.3);
+    const spans = swingRange(rigged);
+    const [right, left] = rigged.rig.joints.filter((n) => n.part.boneType === 'leg');
+    expect(spanOf(spans, left.part.id), 'the quiet one barely moves')
+      .toBeLessThan(spanOf(spans, right.part.id) * 0.6);
+  });
+
+  it('gain zero pins a joint still', () => {
+    const rigged = pair(0);
+    const left = rigged.rig.joints.filter((n) => n.part.boneType === 'leg')[1];
+    swingRange(rigged);
+    expect(left.joint.quaternion.angleTo(IDENTITY)).toBeCloseTo(0, 5);
+  });
+
+  it('gain above one swings harder than standard', () => {
+    const loud = pair(1.8);
+    const spans = swingRange(loud);
+    const [right, left] = loud.rig.joints.filter((n) => n.part.boneType === 'leg');
+    expect(spanOf(spans, left.part.id)).toBeGreaterThan(spanOf(spans, right.part.id));
+  });
+
+  it('lag slides a joint round the gait cycle', () => {
+    const straight = pair(1, 0);
+    const delayed = pair(1, 0.25);
+    const legOf = (r) => r.rig.joints.filter((n) => n.part.boneType === 'leg')[1];
+
+    const sample = (r) => {
+      const s = {
+        dt: 1 / 60, speed: 8, planarSpeed: 8, grounded: 1, airborne: 0,
+        velocity: new THREE.Vector3(0, 0, 8), bodyQ: new THREE.Quaternion(),
+        aimDir: null, locked: 0, thrust: 0, jerk: 0,
+      };
+      for (let i = 0; i < 90; i++) r.animator.update(s);
+      return legOf(r).joint.quaternion.clone();
+    };
+    // Same drive, same number of frames: only the phase differs.
+    expect(sample(straight).angleTo(sample(delayed))).toBeGreaterThan(0.05);
+  });
+
+  it('a forearm takes less of the swing than the shoulder above it', () => {
+    const a = Assembly.createDefault();
+    const upper = a.addBoneOnFace(a.rootId, 0, BONE.ARM, { length: 1.3 });
+    const fore = a.addBoneOnTip(upper.id, BONE.ARM, { length: 1.2 });
+    const rigged = makeAnimator(a);
+    const spans = swingRange(rigged);
+
+    expect(rigged.rig.nodes.get(upper.id).chainDepth).toBe(0);
+    expect(rigged.rig.nodes.get(fore.id).chainDepth).toBe(1);
+    expect(spanOf(spans, fore.id), 'so the arm does not double-bend')
+      .toBeLessThan(spanOf(spans, upper.id));
+  });
+});
+
+describe('a waist driven by the stride', () => {
+  const waistRig = (source) => {
+    const a = Assembly.createDefault();
+    const hip = a.addBlockOnFace(a.rootId, 3, 2, { size: [0.5, 0.5, 0.5] });
+    a.addBoneOnFace(hip.id, 3, BONE.LEG, { length: 2 });
+    a.addBoneOnFace(a.rootId, 0, BONE.LEG, { length: 2 });
+    const waist = a.addBoneOnFace(a.rootId, 2, BONE.CUSTOM, {
+      length: 0.6,
+      custom: { axis: 'y', wave: 'sine', amp: 40, freq: 1, phase: 0, offset: 0, source },
+    });
+    return { ...makeAnimator(a), waist };
+  };
+
+  const walk = (rigged, speed) => {
+    const s = {
+      dt: 1 / 60, speed, planarSpeed: speed, grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(0, 0, speed), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 0, thrust: 0, jerk: 0,
+    };
+    let span = { min: Infinity, max: -Infinity };
+    for (let i = 0; i < 240; i++) {
+      rigged.animator.update(s);
+      const ang = rigged.rig.nodes.get(rigged.waist.id).joint.quaternion.angleTo(IDENTITY);
+      span = { min: Math.min(span.min, ang), max: Math.max(span.max, ang) };
+    }
+    return span.max - span.min;
+  };
+
+  it('turns when the machine walks and stops when it stops', () => {
+    expect(walk(waistRig('stride'), 8)).toBeGreaterThan(0.1);
+    expect(walk(waistRig('stride'), 0), 'standing still, the hips are still')
+      .toBeLessThan(0.02);
+  });
+
+  it('is locked to the footfalls, not to a free clock', () => {
+    // A time-driven bone at the same frequency drifts against the gait; a
+    // stride-driven one cannot, because the gait phase IS its clock.
+    const strided = waistRig('stride');
+    const timed = waistRig('time');
+    const phaseOf = (r) => {
+      const s = {
+        dt: 1 / 60, speed: 5, planarSpeed: 5, grounded: 1, airborne: 0,
+        velocity: new THREE.Vector3(0, 0, 5), bodyQ: new THREE.Quaternion(),
+        aimDir: null, locked: 0, thrust: 0, jerk: 0,
+      };
+      for (let i = 0; i < 200; i++) r.animator.update(s);
+      return { gait: r.animator.gaitPhase, q: r.rig.nodes.get(r.waist.id).joint.quaternion.clone() };
+    };
+    const a = phaseOf(strided);
+    const b = phaseOf(timed);
+    expect(a.gait).toBeCloseTo(b.gait, 6);
+    expect(a.q.angleTo(b.q), 'and so they end up somewhere different')
+      .toBeGreaterThan(0.02);
+  });
+});

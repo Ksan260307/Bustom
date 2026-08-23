@@ -7,7 +7,7 @@ import {
 import {
   BONE, SIZE_MIN, SIZE_MAX, BONE_LENGTH_MAX, BONE_RADIUS_MAX,
   EQUIP, EQUIP_META, EQUIP_SIZE_MIN, EQUIP_SIZE_MAX, equipShape,
-  SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT,
+  SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, BONE_GAIN_MAX, BONE_LAG_MAX,
 } from '../src/core/constants.js';
 import { STANDARD_COLORS } from '../src/core/Palette.js';
 
@@ -576,6 +576,95 @@ describe('custom bone defaults', () => {
   });
 });
 
+describe('growing a block outward', () => {
+  it('makes the block bigger on the face it was asked for', () => {
+    a.setSize(a.rootId, [1, 1, 1]);
+    expect(a.growBlock(a.rootId, 0, 1)).toBe(true);
+    expect(a.core.size).toEqual([1.25, 1, 1]);
+    expect(a.growBlock(a.rootId, 1, -1)).toBe(true);
+    expect(a.core.size).toEqual([1.25, 1.25, 1]);
+  });
+
+  it('leaves the material exactly where it was', () => {
+    const block = a.addBlockOnFace(a.rootId, 2, 3, { size: [1, 1, 1] });
+    const before = [...block.mount.pos];
+
+    a.growBlock(block.id, 0, 1);
+    // The box grew 0.25 on +X, so its centre moved half of that; the mount
+    // walks the same distance so the shape does not appear to slide.
+    expect(block.mount.pos[0] - before[0]).toBeCloseTo(0.125, 6);
+    expect(block.mount.pos[1]).toBeCloseTo(before[1], 6);
+
+    a.growBlock(block.id, 2, -1);
+    expect(block.mount.pos[2] - before[2]).toBeCloseTo(-0.125, 6);
+  });
+
+  it('does not drag whatever is bolted to it', () => {
+    const block = a.addBlockOnFace(a.rootId, 2, 3, { size: [1, 1, 1] });
+    const child = a.addBlockOnFace(block.id, 1, 4, { size: [0.5, 0.5, 0.5] });
+    const before = [...child.mount.pos];
+
+    a.growBlock(block.id, 0, 1);
+    // the block moved +0.125, so the child moves -0.125 and stays put
+    expect(child.mount.pos[0] - before[0]).toBeCloseTo(-0.125, 6);
+  });
+
+  it('the root has no mount, so its children take up the slack', () => {
+    const child = a.addBlockOnFace(a.rootId, 2, 4);
+    const before = [...child.mount.pos];
+    a.growBlock(a.rootId, 1, 1);
+    expect(a.core.mount).toBeNull();
+    expect(child.mount.pos[1] - before[1]).toBeCloseTo(-0.125, 6);
+  });
+
+  it('keeps the sculpted shape, only re-gridded', () => {
+    const block = a.addBlockOnFace(a.rootId, 2, 3, { size: [1, 1, 1] });
+    block.vox.fill(3);
+    const before = block.vox.solid;
+    a.growBlock(block.id, 0, 1);
+    // The old contents now cover 1/1.25 of the grid on X, so roughly that
+    // share of the cells stay solid — and nothing else changed.
+    expect(block.vox.solid).toBeGreaterThan(before * 0.7);
+    expect(block.vox.solid).toBeLessThan(before);
+    expect(block.vox.n, 'the resolution is untouched').toBe(a.voxRes);
+  });
+
+  it('a thin feature survives the re-grid rather than vanishing', () => {
+    const block = a.addBlockOnFace(a.rootId, 2, 3, { size: [1, 1, 1] });
+    block.vox.clear();
+    const n = block.vox.n;
+    // a one-cell-thick plate
+    for (let x = 0; x < n; x++) for (let z = 0; z < n; z++) block.vox.set(x, n >> 1, z, 4);
+    expect(block.vox.solid).toBe(n * n);
+
+    a.growBlock(block.id, 1, 1);
+    expect(block.vox.solid, 'still a plate, not a hole').toBeGreaterThan(0);
+  });
+
+  it('stops at the maximum block size', () => {
+    a.setSize(a.rootId, [SIZE_MAX, 1, 1]);
+    expect(a.growBlock(a.rootId, 0, 1)).toBe(false);
+    expect(a.core.size[0]).toBe(SIZE_MAX);
+  });
+
+  it('refuses parts that have no voxels to re-grid', () => {
+    const bone = a.addBoneOnFace(a.rootId, 3, BONE.LEG);
+    const plate = a.addEquipOnFace(a.rootId, 2, EQUIP.BEAM);
+    expect(a.growBlock(bone.id, 0, 1)).toBe(false);
+    expect(a.growBlock(plate.id, 0, 1)).toBe(false);
+    expect(a.growBlock('nope', 0, 1)).toBe(false);
+  });
+
+  it('a grown block still serialises and reloads', () => {
+    const block = a.addBlockOnFace(a.rootId, 2, 3);
+    a.growBlock(block.id, 0, 1);
+    a.growBlock(block.id, 1, -1);
+    const copy = Assembly.fromJSON(JSON.parse(JSON.stringify(a.toJSON())));
+    expect(copy.get(block.id).size).toEqual(block.size);
+    expect(copy.get(block.id).vox.solid).toBe(block.vox.solid);
+  });
+});
+
 describe('sizing', () => {
   it('setSize snaps and rejects bones', () => {
     const b = a.addBlock(a.rootId, at(0, 1, 0));
@@ -652,6 +741,11 @@ describe('serialisation', () => {
       if (p.kind === 'bone') {
         expect(q.length).toBeCloseTo(p.length, 6);
         expect(q.radius).toBeCloseTo(p.radius, 6);
+        expect(q.gain).toBeCloseTo(p.gain, 6);
+        expect(q.lag).toBeCloseTo(p.lag, 6);
+      } else if (p.kind === 'equip') {
+        expect(q.equipType).toBe(p.equipType);
+        expect(q.size).toBeCloseTo(p.size, 6);
       } else {
         expect(q.size).toEqual(p.size);
         expect(q.vox.solid).toBe(p.vox.solid);
@@ -824,6 +918,63 @@ describe('presets', () => {
       (p) => p.mount && Math.hypot(...p.mount.pos) > 1.5,
     );
     expect(floating.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('every preset can dash, because dashing needs a plate', () => {
+    for (const key of Object.keys(PRESETS)) {
+      if (key === 'core') continue;   // the bare core is the blank page
+      const s = computeStats(PRESETS[key].build());
+      expect(s.dashBonus, `${key} carries a boost plate`).toBeGreaterThan(0);
+    }
+  });
+
+  it('every preset comes armed', () => {
+    for (const key of Object.keys(PRESETS)) {
+      if (key === 'core') continue;
+      const s = computeStats(PRESETS[key].build());
+      expect(s.weaponCount, `${key} has something to shoot with`).toBeGreaterThan(0);
+    }
+  });
+
+  it('only the heavy one gives up flight for armour', () => {
+    expect(computeStats(PRESETS.multileg.build()).noFly).toBe(true);
+    for (const key of ['biped', 'hopper', 'bits']) {
+      expect(computeStats(PRESETS[key].build()).noFly, key).toBe(false);
+    }
+  });
+
+  it('no preset breaks the one-gravity-plate rule', () => {
+    for (const key of Object.keys(PRESETS)) {
+      expect(PRESETS[key].build().countEquip(EQUIP.GRAVITY), key).toBeLessThan(2);
+    }
+  });
+
+  it('the biped shows off the joint attributes', () => {
+    const a = PRESETS.biped.build();
+    const bones = [...a.parts.values()].filter((p) => p.kind === 'bone');
+
+    const shoulders = bones.filter((b) => b.boneType === BONE.ARM && b.gain < 0.6);
+    expect(shoulders.length, 'a damped arm bone per side').toBe(2);
+
+    const waist = bones.find((b) => b.boneType === BONE.CUSTOM);
+    expect(waist, 'a waist').toBeTruthy();
+    expect(waist.custom.source).toBe('stride');
+    expect(waist.custom.axis).toBe('y');
+
+    const knees = bones.filter((b) => b.boneType === BONE.LEG && b.lag > 0);
+    expect(knees.length, 'shins trail their thighs').toBe(2);
+  });
+
+  it('every preset keeps its joint attributes in range', () => {
+    for (const key of Object.keys(PRESETS)) {
+      PRESETS[key].build().walk((p) => {
+        if (p.kind !== 'bone') return;
+        expect(p.gain, `${key}:${p.id}`).toBeGreaterThanOrEqual(0);
+        expect(p.gain, `${key}:${p.id}`).toBeLessThanOrEqual(BONE_GAIN_MAX);
+        expect(p.lag, `${key}:${p.id}`).toBeGreaterThanOrEqual(0);
+        expect(p.lag, `${key}:${p.id}`).toBeLessThanOrEqual(BONE_LAG_MAX);
+      });
+    }
   });
 
   it('every preset is well formed', () => {

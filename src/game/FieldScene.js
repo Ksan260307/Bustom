@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { World } from './World.js';
 import { Robot, SimpleAI } from './Robot.js';
 import { Projectiles } from './Weapons.js';
+import { Debris } from './Debris.js';
 import { Hud } from './Hud.js';
 import { PostFX } from './PostFX.js';
 import { CameraDynamics } from '../zmf/CameraDynamics.js';
@@ -46,11 +47,22 @@ export class FieldScene {
 
     this._buildTracerPool();
     this.projectiles = new Projectiles(this.scene, this.world);
+    this.debris = new Debris(this.scene, this.world);
+    /** Machines waiting to be put back together: { robot, at }. */
+    this.pendingRespawns = [];
   }
+
+  /** Seconds a wreck lies on the field before the machine comes back. */
+  static get RESPAWN_DELAY() { return 2.6; }
 
   // ---------------------------------------------------------- lifecycle
 
   load(assembly) {
+    // The wreckage borrows the rig's geometry, so it cannot outlive the rig.
+    this.debris.clear();
+    // Anything queued against the machine we are about to throw away is not
+    // coming back; everything else is flushed by the respawn below.
+    this.pendingRespawns = this.pendingRespawns.filter((j) => j.robot !== this.player);
     if (this.player) { this.scene.remove(this.player.object3D); this.player.dispose(); }
     this.player = new Robot(assembly.clone(), this.world, { isPlayer: true });
     this.scene.add(this.player.object3D);
@@ -79,11 +91,13 @@ export class FieldScene {
 
   respawn() {
     const h = Math.max(0.35, -this.player.rig.restLowestY);
-    this.player.body.reset(new THREE.Vector3(0, h + 0.2, -18));
+    this.projectiles.clear();
+    this.debris.clear();
+    this._flushRespawns();
+    this.player.wrecked = false;
+    this.player.revive(new THREE.Vector3(0, h + 0.2, -18));
     // A respawn is a fresh view: whatever the player had the boom swung to,
     // they are looking at a new fight now. Their zoom is a preference, so it stays.
-    this.projectiles.clear();
-    this.player.rearm();
     this.cameraRig.recenter();
     this.cameraRig.snap(this.player.position, this.player.body.forward);
     this.lock = null;
@@ -231,6 +245,74 @@ export class FieldScene {
     if (!p.weapons.hasWeapons) this._fireDefault(dt);
   }
 
+  // ---------------------------------------------------------- destruction
+
+  /**
+   * Anything that hit zero this frame comes apart. The machine hides itself
+   * in `damage()`; the wreck and the queue for putting it back are ours.
+   */
+  _checkDeaths() {
+    for (const robot of [this.player, ...this.enemies]) {
+      if (!robot || robot.alive || robot.wrecked) continue;
+      robot.wrecked = true;
+      this.debris.burst(robot, { power: robot === this.player ? 1.15 : 1 });
+      this.hitPulse = Math.max(this.hitPulse, robot === this.player ? 0.9 : 0.55);
+      this.pendingRespawns.push({ robot, at: this.time + FieldScene.RESPAWN_DELAY });
+      if (this.lock?.robot === robot) {
+        this.lock = null;
+        this.player.setTarget(null);
+        this.player.setLocked(false);
+      }
+    }
+  }
+
+  /** Put wrecks back on the field once their timer is up. */
+  _updateRespawns() {
+    for (let i = this.pendingRespawns.length - 1; i >= 0; i--) {
+      const job = this.pendingRespawns[i];
+      if (this.time < job.at) continue;
+      this.pendingRespawns.splice(i, 1);
+      job.robot.wrecked = false;
+      if (job.robot === this.player) this.respawn();
+      else job.robot.revive(this._enemySpawn(job.robot));
+    }
+  }
+
+  /**
+   * Put every queued machine back right now. Dropping the queue instead
+   * would strand an opponent that happened to be mid-respawn when the
+   * player restarted — dead, invisible and never coming back.
+   */
+  _flushRespawns() {
+    for (const job of this.pendingRespawns) {
+      job.robot.wrecked = false;
+      if (job.robot === this.player) continue;      // the caller is reviving it
+      if (!this.enemies.includes(job.robot)) continue;
+      job.robot.revive(this._enemySpawn(job.robot));
+    }
+    this.pendingRespawns.length = 0;
+    return this;
+  }
+
+  /** Somewhere well clear of the player, and inside the arena, to put an
+   *  opponent back. */
+  _enemySpawn(robot) {
+    const angle = Math.random() * Math.PI * 2;
+    const r = 34 + Math.random() * 26;
+    _v.set(
+      this.player.position.x + Math.cos(angle) * r,
+      Math.max(0.5, -robot.rig.restLowestY),
+      this.player.position.z + Math.sin(angle) * r,
+    );
+    const edge = this.world.arenaRadius - 8;
+    const flat = Math.hypot(_v.x, _v.z);
+    if (flat > edge) {
+      _v.x *= edge / flat;
+      _v.z *= edge / flat;
+    }
+    return _v.clone();
+  }
+
   /** Cycle the sub-weapon set, and say what came up. */
   _switchWeapon(dir) {
     const w = this.player.weapons;
@@ -299,12 +381,19 @@ export class FieldScene {
       ai.update(p.position, dt);
     }
 
+    this._checkDeaths();
+    this._updateRespawns(dt);
+    this.debris.update(dt);
+
     this._fire(dt);
     this._updateTracers(dt);
     this.projectiles.update(dt, this.enemies);
     this.hitPulse = Math.max(0, this.hitPulse - dt * 5);
     for (const hit of this.projectiles.hits) {
-      if (hit.robot) this.hitPulse = Math.max(this.hitPulse, clamp01(hit.damage / 26));
+      // Landing a hit should register, not white out the screen. A missile
+      // does 30, so an unscaled ratio here drove the post-process flash to
+      // full and swallowed the frame you actually wanted to see.
+      if (hit.robot) this.hitPulse = Math.max(this.hitPulse, clamp01(hit.damage / 26) * 0.4);
     }
 
     // ---- camera

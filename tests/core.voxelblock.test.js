@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { VoxelBlock } from '../src/core/VoxelBlock.js';
+import { VoxelBlock, inBrush } from '../src/core/VoxelBlock.js';
 import { Palette } from '../src/core/Palette.js';
 import { VOX_LEVELS } from '../src/core/constants.js';
 
@@ -53,7 +53,7 @@ describe('VoxelBlock storage', () => {
 });
 
 describe('VoxelBlock sculpting', () => {
-  it('carves a sphere out of the middle', () => {
+  it('carves a hole in the middle', () => {
     const b = new VoxelBlock(16, 1);
     const before = b.solid;
     expect(b.brush(8, 8, 8, 3, 0)).toBe(true);
@@ -107,6 +107,77 @@ describe('VoxelBlock sculpting', () => {
     b.brush(0, 0, 0, 4, 0);
     expect(b.get(0, 0, 0)).toBe(0);
     expect(b.get(15, 15, 15)).not.toBe(0);
+  });
+});
+
+describe('the brush is a cube', () => {
+  /** Every cell the brush would touch at this radius, centred on the origin. */
+  const cells = (r) => {
+    const out = [];
+    const n = Math.ceil(r) + 1;
+    for (let z = -n; z <= n; z++) {
+      for (let y = -n; y <= n; y++) {
+        for (let x = -n; x <= n; x++) if (inBrush(x, y, z, r)) out.push([x, y, z]);
+      }
+    }
+    return out;
+  };
+
+  it('is exactly (2r+1) cells on a side', () => {
+    expect(cells(0)).toEqual([[0, 0, 0]]);
+    expect(cells(1)).toHaveLength(27);
+    expect(cells(2)).toHaveLength(125);
+    expect(cells(3)).toHaveLength(343);
+  });
+
+  it('keeps all eight corners and nothing beyond', () => {
+    const at = cells(1).map((c) => c.join(','));
+    for (const x of [-1, 1]) {
+      for (const y of [-1, 1]) {
+        for (const z of [-1, 1]) expect(at, `${x},${y},${z}`).toContain(`${x},${y},${z}`);
+      }
+    }
+    expect(at, 'and it does not reach past the radius').not.toContain('2,0,0');
+  });
+
+  it('is square from every direction, not a wedge', () => {
+    // The old tetrahedron gave a different silhouette per axis, which is what
+    // made a single click look lopsided instead of like a block.
+    for (const r of [1, 2, 3]) {
+      const c = cells(r);
+      for (const axis of [0, 1, 2]) {
+        const span = new Set(c.map((v) => v[axis]));
+        expect(span.size, `r=${r} axis=${axis}`).toBe(2 * r + 1);
+      }
+    }
+  });
+
+  it('carves a real cube out of a block', () => {
+    const b = new VoxelBlock(16, 1);
+    const before = b.solid;
+    b.brush(8, 8, 8, 1, 0);
+    expect(before - b.solid, 'twenty-seven cells and no more').toBe(27);
+    for (const [dx, dy, dz] of [[1, 1, 1], [-1, -1, -1], [1, -1, 0]]) {
+      expect(b.get(8 + dx, 8 + dy, 8 + dz), `${dx},${dy},${dz}`).toBe(0);
+    }
+    expect(b.get(6, 8, 8), 'the next cell out is untouched').not.toBe(0);
+  });
+
+  it('is what carving and painting both use', () => {
+    const carved = new VoxelBlock(16, 1);
+    carved.brush(8, 8, 8, 2, 0);
+    const painted = new VoxelBlock(16, 1);
+    painted.paint(8, 8, 8, 2, 4);
+
+    for (let z = 0; z < 16; z++) {
+      for (let y = 0; y < 16; y++) {
+        for (let x = 0; x < 16; x++) {
+          const hollow = carved.get(x, y, z) === 0;
+          const recoloured = painted.get(x, y, z) === 5;
+          expect(recoloured, `${x},${y},${z}`).toBe(hollow);
+        }
+      }
+    }
   });
 });
 

@@ -3,7 +3,8 @@ import {
   BONE, BONE_GAUGE, FACE_NORMAL, FACE_AXIS, DEFAULT_VOX, snapSize,
   BONE_LENGTH_MIN, BONE_LENGTH_MAX, BONE_RADIUS_MIN, BONE_RADIUS_MAX,
   EQUIP, EQUIP_META, EQUIP_SIZE_DEFAULT, snapEquipSize,
-  SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT,
+  SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, SIZE_STEP, SIZE_MAX,
+  BONE_GAIN_MAX, BONE_LAG_MAX, BONE_MOTION_DEFAULT,
 } from './constants.js';
 import { VoxelBlock } from './VoxelBlock.js';
 import { Palette } from './Palette.js';
@@ -177,6 +178,10 @@ export class Assembly {
       length: clamp(opts.length ?? 3, BONE_LENGTH_MIN, BONE_LENGTH_MAX),
       limit: opts.limit ?? 70,          // joint travel, degrees
       invert: opts.invert ?? false,     // mirror the animator's swing
+      /** How strongly this bone follows its attribute's motion. */
+      gain: clamp(opts.gain ?? 1, 0, BONE_GAIN_MAX),
+      /** Where it sits in the gait cycle, 0..1 of a stride. */
+      lag: clamp(opts.lag ?? 0, 0, BONE_LAG_MAX),
       custom: { ...CUSTOM_DEFAULT, ...(opts.custom ?? {}) },
       label: 'BONE',
     };
@@ -389,11 +394,76 @@ export class Assembly {
     return true;
   }
 
+  /**
+   * Grow a block outward on one face, keeping everything already sculpted
+   * exactly where it is. This is what lets the ADD tool build past the edge
+   * of a block instead of stopping dead at it.
+   *
+   * The block's own mount takes up the slack so the shape does not shift.
+   * The root has no mount, so there its children move instead — either way
+   * the sculpted material stays put and the build stays coherent.
+   *
+   * @param {string} id
+   * @param {number} axis 0..2
+   * @param {number} dir  +1 grows the positive face, -1 the negative one
+   * @param {number} amount world units, snapped to the size grid
+   * @returns {boolean} false if it is already as big as a block may be
+   */
+  growBlock(id, axis, dir, amount = SIZE_STEP) {
+    const part = this.parts.get(id);
+    if (!part || !part.vox) return false;
+
+    const grow = snapSize(part.size[axis] + Math.abs(amount)) - part.size[axis];
+    if (grow <= 0) return false;
+
+    const before = part.size[axis];
+    const after = before + grow;
+    part.size = part.size.slice();
+    part.size[axis] = after;
+
+    const keep = [1, 1, 1];
+    const offset = [0, 0, 0];
+    keep[axis] = before / after;
+    offset[axis] = dir < 0 ? grow / after : 0;
+    part.vox.regrid(keep, offset);
+
+    // Put the material back where it was: the box grew on one side, so its
+    // centre moved half the growth that way.
+    _v.set(0, 0, 0);
+    _v.setComponent(axis, (dir < 0 ? -1 : 1) * (grow / 2));
+
+    // Anything mounted on this block would ride the shift, so it is walked
+    // back by the same amount: growing a block must not drag the arm bolted
+    // to its far side along with it.
+    for (const childId of part.children) {
+      const child = this.parts.get(childId);
+      if (child?.mount) {
+        child.mount.pos = child.mount.pos.map((p, i) => p - _v.getComponent(i));
+      }
+    }
+
+    if (part.mount) {
+      _q.fromArray(part.mount.rot);
+      _v.applyQuaternion(_q);
+      part.mount.pos = part.mount.pos.map((p, i) => p + _v.getComponent(i));
+    }
+    return true;
+  }
+
   setBoneShape(id, { length, radius } = {}) {
     const part = this.parts.get(id);
     if (!part || part.kind !== 'bone') return false;
     if (length !== undefined) part.length = clamp(length, BONE_LENGTH_MIN, BONE_LENGTH_MAX);
     if (radius !== undefined) part.radius = clamp(radius, BONE_RADIUS_MIN, BONE_RADIUS_MAX);
+    return true;
+  }
+
+  /** How much of its attribute's motion a bone takes, and when. */
+  setBoneMotion(id, { gain, lag } = {}) {
+    const part = this.parts.get(id);
+    if (!part || part.kind !== 'bone') return false;
+    if (gain !== undefined) part.gain = clamp(Number(gain) || 0, 0, BONE_GAIN_MAX);
+    if (lag !== undefined) part.lag = clamp(Number(lag) || 0, 0, BONE_LAG_MAX);
     return true;
   }
 
@@ -440,7 +510,8 @@ export class Assembly {
       if (p.kind === 'bone') {
         Object.assign(copy, {
           boneType: p.boneType, radius: p.radius, length: p.length,
-          limit: p.limit, invert: p.invert, custom: { ...p.custom },
+          limit: p.limit, invert: p.invert, gain: p.gain, lag: p.lag,
+          custom: { ...p.custom },
         });
       } else if (p.kind === 'equip') {
         Object.assign(copy, {
@@ -497,8 +568,8 @@ export class Assembly {
       let copy;
       if (p.kind === 'bone') {
         copy = this.addBone(destParent, m, p.boneType, {
-          length: p.length, radius: p.radius, limit: p.limit,
-          invert: p.invert, custom: { ...p.custom },
+          length: p.length, radius: p.radius, limit: p.limit, invert: p.invert,
+          gain: p.gain, lag: p.lag, custom: { ...p.custom },
         });
       } else if (p.kind === 'equip') {
         // A unique plate the destination already carries is dropped rather
@@ -574,7 +645,8 @@ export class Assembly {
       if (p.kind === 'bone') {
         Object.assign(o, {
           boneType: p.boneType, radius: p.radius, length: p.length,
-          limit: p.limit, invert: p.invert, custom: p.custom,
+          limit: p.limit, invert: p.invert, gain: p.gain, lag: p.lag,
+          custom: p.custom,
         });
       } else if (p.kind === 'equip') {
         Object.assign(o, {
@@ -618,6 +690,8 @@ export class Assembly {
         }
         delete part.gauge;
         part.custom = { ...CUSTOM_DEFAULT, ...(o.custom ?? {}) };
+        part.gain = clamp(o.gain ?? BONE_MOTION_DEFAULT.gain, 0, BONE_GAIN_MAX);
+        part.lag = clamp(o.lag ?? BONE_MOTION_DEFAULT.lag, 0, BONE_LAG_MAX);
       } else if (o.kind === 'equip') {
         delete part.vox;
         const type = EQUIP_META[o.equipType] ? o.equipType : EQUIP.BEAM;
@@ -734,6 +808,15 @@ export function computeStats(assembly, rig = null) {
   // ---- equipment: what the plates do to the machine that carries them
   const loadout = summariseEquipment(equips);
 
+  // ---- durability comes from the CORE and the machine's own weight.
+  // The core is the thing that has to survive: making it bigger is the
+  // deliberate way to buy toughness, and it costs manoeuvrability through
+  // the mass it adds. Weight contributes too, so an armoured build is
+  // sturdier than a skeleton with the same core — but only gently, or
+  // "bolt on more bricks" would beat "design a tougher core".
+  const core = assembly.core;
+  const coreScale = core ? Math.cbrt(Math.max(1e-4, core.size[0] * core.size[1] * core.size[2])) : 1;
+
   // A solid 1x1x1 block weighs 1.0; carving it out makes it genuinely lighter.
   const mass = Math.max(0.8, solidVolume + boneMass + equipMass);
 
@@ -765,6 +848,10 @@ export function computeStats(assembly, rig = null) {
     faces: bones.face,
     customs: bones.custom,
     gait: gaitFor(limbs),
+    /** Effective edge of the core cube, 0.25..4. */
+    coreScale,
+    /** Hit points, before the equipment bonus that `loadout` carries. */
+    durability: Math.round(40 + coreScale * coreScale * 60 + mass * 5),
     // 0 = feather, 1 = tank. Drives ZMF drag, spool and camera weight.
     weightClass: clamp01((mass - 2) / 26),
     agility: clamp01((thrustToMass - 18) / 42),
@@ -843,24 +930,56 @@ export function presetBiped() {
   const a = new Assembly('STRIDER');
   const core = a.addCore();
 
-  const chest = a.addBlockOnFace(core.id, 2, 1, { size: [1.5, 1, 1] });
+  // The waist is a CUSTOM bone twisting on Y off the STRIDE, not a new bone
+  // type: the torso counter-rotating against the pelvis is most of what makes
+  // a walk read as a walk.
+  //
+  // It carries the TORSO rather than sitting under the legs on purpose. A
+  // bone mounted on a downward face flips its whole frame, and everything
+  // built below it would then have to be built upside down.
+  const spine = a.addBoneOnFace(core.id, 2, BONE.CUSTOM, {
+    length: 0.5, gauge: 'thick', limit: 30,
+    custom: { axis: 'y', wave: 'sine', amp: 11, freq: 1, phase: 0, offset: 0, source: 'stride' },
+  });
+  const chest = a.addBlockOnBone(spine.id, 0.5, 1, { size: [1.5, 1, 1] });
   const waist = a.addBlockOnFace(core.id, 3, 2, { size: [1.25, 0.75, 1] });
 
   const head = a.addBoneOnFace(chest.id, 2, BONE.FACE, { length: 1.2, gauge: 'thin' });
-  a.addBlockOnBone(head.id, 0.6, 4, { size: [0.75, 0.75, 0.75] });
+  const skull = a.addBlockOnBone(head.id, 0.6, 4, { size: [0.75, 0.75, 0.75] });
 
   for (const face of [0, 1]) {
-    const shoulder = a.addBlockOnFace(chest.id, face, 1, { size: [0.5, 0.75, 0.75] });
-    const arm = a.addBoneOnFace(shoulder.id, 3, BONE.ARM, { length: 2.5, gauge: 'thin' });
-    a.addBlockOnBone(arm.id, 2, 5, { size: [0.75, 0.75, 0.75] });
+    const pauldron = a.addBlockOnFace(chest.id, face, 1, { size: [0.5, 0.75, 0.75] });
+    // Shoulder: an ARM bone at the root of the chain, turned down so the whole
+    // limb hinges from here only a little. The forearm below it is chained,
+    // so the rig damps and delays it again on its own.
+    const upper = a.addBoneOnFace(pauldron.id, 3, BONE.ARM, {
+      length: 1.3, gauge: 'mid', gain: 0.45,
+    });
+    a.addBlockOnBone(upper.id, 0.9, 5, { size: [0.6, 0.6, 0.6] });
+    const fore = a.addBoneOnTip(upper.id, BONE.ARM, {
+      length: 1.2, gauge: 'thin', gain: 1, lag: 0.06,
+    });
+    const hand = a.addBlockOnBone(fore.id, 1, 5, { size: [0.75, 0.75, 0.75] });
+    a.addEquipOnFace(hand.id, face, face === 0 ? EQUIP.BEAM : EQUIP.GATLING, { size: 0.6 });
   }
+
+  // Weapon order is tree order, and the plate you deploy holding should be one
+  // you can actually shoot with, so nothing melee goes above the arms here.
+  a.addEquipOnFace(chest.id, 1, EQUIP.MISSILE, { size: 0.7 });
+  a.addEquipOnFace(chest.id, 5, EQUIP.BOOST, { size: 0.8 });
+  a.addEquipOnFace(skull.id, 2, EQUIP.BOOST, { size: 0.35 });
 
   for (const face of [0, 1]) {
     const hip = a.addBlockOnFace(waist.id, face, 2, { size: [0.5, 0.75, 0.75] });
-    const thigh = a.addBoneOnFace(hip.id, 3, BONE.LEG, { length: 2, gauge: 'mid' });
+    // 股関節: the leg bone at the root of the chain, taking the full stride.
+    const thigh = a.addBoneOnFace(hip.id, 3, BONE.LEG, { length: 2, gauge: 'mid', gain: 1 });
     a.addBlockOnBone(thigh.id, 1.5, 1, { size: [0.75, 0.75, 0.75] });
-    const shin = a.addBoneOnTip(thigh.id, BONE.LEG, { length: 2, gauge: 'thin' });
-    a.addBlockOnBone(shin.id, 1.5, 2, { size: [0.75, 0.5, 1] });
+    // The knee runs a hair behind the thigh, so the shin whips through.
+    const shin = a.addBoneOnTip(thigh.id, BONE.LEG, {
+      length: 2, gauge: 'thin', gain: 1, lag: 0.07,
+    });
+    const foot = a.addBlockOnBone(shin.id, 1.5, 2, { size: [0.75, 0.5, 1] });
+    a.addEquipOnFace(foot.id, 5, EQUIP.BOOST, { size: 0.45 });
   }
 
   return a;
@@ -870,22 +989,30 @@ export function presetHopper() {
   const a = new Assembly('POGO');
   const core = a.addCore();
 
-  const leg = a.addBoneOnFace(core.id, 3, BONE.LEG, { length: 3, gauge: 'thick' });
-  a.addBlockOnBone(leg.id, 2.5, 6, { size: [1, 0.5, 1.25] });
+  // One leg, wound tighter than standard: the hop is the whole machine.
+  const leg = a.addBoneOnFace(core.id, 3, BONE.LEG, { length: 3, gauge: 'thick', gain: 1.2 });
+  const foot = a.addBlockOnBone(leg.id, 2.5, 6, { size: [1, 0.5, 1.25] });
+  a.addEquipOnFace(foot.id, 5, EQUIP.BOOST, { size: 0.55 });
 
   const eye = a.addBoneOnFace(core.id, 4, BONE.FACE, { length: 1.2, gauge: 'thin' });
-  a.addBlockOnBone(eye.id, 0.6, 15, { size: [0.75, 0.5, 0.5] });
+  const lens = a.addBlockOnBone(eye.id, 0.6, 15, { size: [0.75, 0.5, 0.5] });
+  a.addEquipOnFace(lens.id, 4, EQUIP.SHOT, { size: 0.5 });
 
   const hood = a.addBlockOnFace(core.id, 2, 5, { size: [1.25, 0.5, 1] });
+  a.addEquipOnFace(hood.id, 2, EQUIP.BOOST, { size: 0.6 });
+
   for (const face of [0, 1]) {
     const pod = a.addBlockOnFace(hood.id, face, 2, { size: [0.5, 0.5, 0.5] });
-    const arm = a.addBoneOnFace(pod.id, 3, BONE.ARM, { length: 1.5, gauge: 'thin' });
-    a.addBlockOnBone(arm.id, 0.75, 5, { size: [0.5, 0.5, 0.5] });
+    // Short arms swinging hard: nothing to shoot with up close but the blades.
+    const arm = a.addBoneOnFace(pod.id, 3, BONE.ARM, { length: 1.5, gauge: 'thin', gain: 1.4 });
+    const claw = a.addBlockOnBone(arm.id, 0.75, 5, { size: [0.5, 0.5, 0.5] });
+    a.addEquipOnFace(claw.id, face, EQUIP.BLADE, { size: 0.5 });
   }
 
   // Two free-floating bits, riding the core segment with nothing touching them.
   for (const side of [-1, 1]) {
-    a.addBlock(core.id, { pos: [side * 1.9, 1.5, -0.4] }, 15, { size: [0.5, 0.5, 0.75] });
+    const bit = a.addBlock(core.id, { pos: [side * 1.9, 1.5, -0.4] }, 15, { size: [0.5, 0.5, 0.75] });
+    a.addEquipOnFace(bit.id, 4, EQUIP.BEAM, { size: 0.4 });
   }
   return a;
 }
@@ -894,6 +1021,9 @@ export function presetHopper() {
  * Four legs, hung straight down off outriggers. A bone mount rotation is read
  * in its parent's frame, so a knee chained off a sideways hip would fold back
  * into the body; the sideways stance comes from the animator's splay instead.
+ *
+ * This is the heavy: the one preset carrying GRAVITY, so it trades the air
+ * for durability, and it needs the extra HP to stand still and shoot.
  */
 export function presetMultileg() {
   const a = new Assembly('CRAWLER');
@@ -901,16 +1031,21 @@ export function presetMultileg() {
   const spine = a.addBlockOnFace(core.id, 5, 1, { size: [1.25, 0.75, 1.25] });
 
   const head = a.addBoneOnFace(core.id, 4, BONE.FACE, { length: 1.2, gauge: 'thin' });
-  a.addBlockOnBone(head.id, 0.6, 12, { size: [0.75, 0.5, 0.75] });
+  const turret = a.addBlockOnBone(head.id, 0.6, 12, { size: [0.75, 0.5, 0.75] });
+  a.addEquipOnFace(turret.id, 4, EQUIP.GATLING, { size: 0.55 });
+
+  a.addEquipOnFace(spine.id, 2, EQUIP.GRAVITY, { size: 0.9 });
+  a.addEquipOnFace(core.id, 2, EQUIP.BOOST, { size: 0.7 });
 
   for (const host of [core, spine]) {
     for (const face of [0, 1]) {
       const outrigger = a.addBlockOnFace(host.id, face, 2, { size: [0.75, 0.5, 0.75] });
+      if (host === spine) a.addEquipOnFace(outrigger.id, 2, EQUIP.MISSILE, { size: 0.5 });
       const hip = a.addBoneOnFace(outrigger.id, 3, BONE.LEG, {
-        length: 1.25, gauge: 'mid', limit: 80, invert: face === 1,
+        length: 1.25, gauge: 'mid', limit: 80, invert: face === 1, gain: 1,
       });
       const knee = a.addBoneOnTip(hip.id, BONE.LEG, {
-        length: 1.5, gauge: 'thin', limit: 90, invert: face === 1,
+        length: 1.5, gauge: 'thin', limit: 90, invert: face === 1, gain: 1, lag: 0.08,
       });
       a.addBlockOnBone(knee.id, 1.1, 8, { size: [0.5, 0.5, 0.75] });
     }
@@ -919,7 +1054,8 @@ export function presetMultileg() {
   const tail = a.addBoneOnFace(spine.id, 5, BONE.CUSTOM, {
     length: 2.5, gauge: 'thin', custom: { axis: 'x', amp: 24, freq: 1.6, phase: 0, source: 'speed' },
   });
-  a.addBlockOnBone(tail.id, 1.8, 15, { size: [0.5, 0.5, 0.75] });
+  const tip = a.addBlockOnBone(tail.id, 1.8, 15, { size: [0.5, 0.5, 0.75] });
+  a.addEquipOnFace(tip.id, 2, EQUIP.BEAM, { size: 0.45 });
   return a;
 }
 
@@ -927,19 +1063,30 @@ export function presetMultileg() {
 export function presetBits() {
   const a = new Assembly('FUNNEL');
   const core = a.addCore();
-  a.addBlockOnFace(core.id, 4, 9, { size: [0.75, 0.5, 0.5] });
+  const crown = a.addBlockOnFace(core.id, 4, 9, { size: [0.75, 0.5, 0.5] });
+  a.addEquipOnFace(crown.id, 4, EQUIP.BEAM, { size: 0.5 });
+  a.addEquipOnFace(core.id, 5, EQUIP.BOOST, { size: 0.7 });
 
   const ring = 6;
   for (let i = 0; i < ring; i++) {
     const t = (i / ring) * Math.PI * 2;
-    a.addBlock(core.id, {
+    const bit = a.addBlock(core.id, {
       pos: [Math.cos(t) * 1.8, 0.35 + Math.sin(t * 2) * 0.3, Math.sin(t) * 1.8],
       rot: new THREE.Quaternion().setFromAxisAngle(UP, -t).toArray(),
     }, 15, { size: [0.5, 0.25, 0.75] });
+    // Every other bit spins on the spot; the rest carry the guns.
+    if (i % 2 === 0) {
+      a.addEquipOnFace(bit.id, 2, EQUIP.ROLLING, {
+        size: 0.4, spin: { dir: i % 4 === 0 ? 1 : -1, rpm: 90 },
+      });
+    } else {
+      a.addEquipOnFace(bit.id, 2, EQUIP.SHOT, { size: 0.4 });
+    }
   }
 
-  const leg = a.addBoneOnFace(core.id, 3, BONE.LEG, { length: 2, gauge: 'mid' });
-  a.addBlockOnBone(leg.id, 1.5, 2, { size: [1, 0.5, 1] });
+  const leg = a.addBoneOnFace(core.id, 3, BONE.LEG, { length: 2, gauge: 'mid', gain: 1.1 });
+  const pad = a.addBlockOnBone(leg.id, 1.5, 2, { size: [1, 0.5, 1] });
+  a.addEquipOnFace(pad.id, 3, EQUIP.MISSILE, { size: 0.45 });
   return a;
 }
 

@@ -34,9 +34,10 @@ export class Robot {
     this.body = new ZMFBody(this.stats, world, { rideHeight });
     this.animator = new Animator(this.rig, this.stats);
 
-    // Durability follows the chassis, then whatever the plates add to it.
-    this.hp = (100 + this.stats.blockCount * 8) * (1 + (this.stats.hpBonus ?? 0));
-    this.maxHp = this.hp;
+    // Durability follows the core and the machine's weight, then whatever
+    // the plates add to it.
+    this.maxHp = Math.round(this.stats.durability * (1 + (this.stats.hpBonus ?? 0)));
+    this.hp = this.maxHp;
     this.weapons = new WeaponSystem(this);
     this.alive = true;
     this.radius = Math.max(1.0, this.stats.extent * 0.8);
@@ -87,6 +88,7 @@ export class Robot {
   }
 
   update(input, dt) {
+    if (!this.alive) return;
     if (this.lockTarget) {
       // keep the tracked handle pointing at live data
       this.body.target = { position: this.lockTarget.position, radius: this.lockTarget.radius };
@@ -149,8 +151,28 @@ export class Robot {
   rearm() { this.weapons.reset(); return this; }
 
   damage(n) {
+    if (!this.alive) return;
     this.hp = Math.max(0, this.hp - n);
-    if (this.hp <= 0) this.alive = false;
+    if (this.hp <= 0) {
+      this.alive = false;
+      // The wreck is produced by the caller, which owns the debris pool; all
+      // this has to do is stop being a machine.
+      this.object3D.visible = false;
+      this.weapons.reset();
+      this.rig.setBoostGlow?.(0);
+      this.rig.setBladeGlow?.(0);
+    }
+  }
+
+  /** Put it back together at `position`, whole and reloaded. */
+  revive(position) {
+    this.hp = this.maxHp;
+    this.alive = true;
+    this.object3D.visible = true;
+    this.body.reset(position ?? this.position.clone());
+    this.rearm();
+    this.syncTransform();
+    return this;
   }
 
   dispose() {

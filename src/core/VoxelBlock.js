@@ -16,6 +16,22 @@ import { DEFAULT_VOX, VOX_LEVELS, chunkSizeFor } from './constants.js';
 
 const _c = new THREE.Color();
 
+/**
+ * The brush is an axis-aligned cube: every cell within `r` on each axis.
+ *
+ * Round brushes do not survive being sampled onto a grid. A sphere at radius
+ * 1 collapses to the centre plus its six face neighbours — a 3D plus sign —
+ * and a tetrahedron, while solid, leaves a lopsided wedge that is impossible
+ * to aim. A cube gives exactly what the cursor promises: press once, get a
+ * (2r+1)^3 block, in line with the grid you are building on.
+ *
+ * There is no slack term. The radius is whole cells, so the shape is exact
+ * and repeatable — the same click always removes the same box.
+ */
+export function inBrush(dx, dy, dz, r) {
+  return Math.abs(dx) <= r && Math.abs(dy) <= r && Math.abs(dz) <= r;
+}
+
 export class VoxelBlock {
   /**
    * @param {number} n           sculpt resolution (cells per edge)
@@ -65,6 +81,70 @@ export class VoxelBlock {
         }
       }
     }
+  }
+
+  /**
+   * Re-grid the contents for a box that has grown around them, so the shape
+   * stays exactly where it is in space while the block gets bigger.
+   *
+   * The grid stays n^3 — it always spans the block's own box — so the cells
+   * get larger and the old contents occupy a sub-box of the new grid:
+   * `keep` is how much of each new axis the old contents cover (0..1), and
+   * `offset` is how much empty space comes before them.
+   *
+   * Each new cell samples the whole range of old cells it now covers and
+   * takes any solid one. Nearest-neighbour would drop one-cell details on
+   * the way down; "anything solid wins" can only thicken, never erase.
+   */
+  regrid(keep, offset) {
+    const n = this.n;
+    const src = this.data;
+    const out = new Uint8Array(this.total);
+    let solid = 0;
+
+    // Per axis, the old-cell span each new cell covers.
+    const span = (axis) => {
+      const k = Math.max(1e-6, keep[axis]);
+      const o = offset[axis] ?? 0;
+      const lo = new Int32Array(n);
+      const hi = new Int32Array(n);
+      for (let i = 0; i < n; i++) {
+        const a = ((i / n) - o) / k;
+        const b = (((i + 1) / n) - o) / k;
+        lo[i] = Math.max(0, Math.ceil(a * n - 1e-6));
+        hi[i] = Math.min(n - 1, Math.floor(b * n - 1e-6));
+        // A new cell entirely outside the old box samples nothing.
+        if (b <= 0 || a >= 1) { lo[i] = 1; hi[i] = 0; }
+      }
+      return { lo, hi };
+    };
+
+    const sx = span(0);
+    const sy = span(1);
+    const sz = span(2);
+
+    for (let z = 0; z < n; z++) {
+      for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) {
+          let v = 0;
+          for (let oz = sz.lo[z]; oz <= sz.hi[z] && !v; oz++) {
+            for (let oy = sy.lo[y]; oy <= sy.hi[y] && !v; oy++) {
+              const row = oy * n + oz * n * n;
+              for (let ox = sx.lo[x]; ox <= sx.hi[x]; ox++) {
+                const c = src[ox + row];
+                if (c) { v = c; break; }
+              }
+            }
+          }
+          if (v) { out[x + y * n + z * n * n] = v; solid++; }
+        }
+      }
+    }
+
+    this.data = out;
+    this.solid = solid;
+    this.markAllDirty();
+    return this;
   }
 
   index(x, y, z) { return x + y * this.n + z * this.n * this.n; }
@@ -137,14 +217,12 @@ export class VoxelBlock {
   brush(cx, cy, cz, radius, value) {
     let changed = false;
     const r = Math.max(0, radius);
-    const r2 = (r + 0.35) * (r + 0.35);
     const lo = (v) => Math.max(0, Math.ceil(v - r));
     const hi = (v) => Math.min(this.n - 1, Math.floor(v + r));
     for (let z = lo(cz); z <= hi(cz); z++) {
       for (let y = lo(cy); y <= hi(cy); y++) {
         for (let x = lo(cx); x <= hi(cx); x++) {
-          const dx = x - cx, dy = y - cy, dz = z - cz;
-          if (dx * dx + dy * dy + dz * dz > r2) continue;
+          if (!inBrush(x - cx, y - cy, z - cz, r)) continue;
           if (this.set(x, y, z, value)) changed = true;
         }
       }
@@ -157,14 +235,12 @@ export class VoxelBlock {
     let changed = false;
     const v = colorIndex + 1;
     const r = Math.max(0, radius);
-    const r2 = (r + 0.35) * (r + 0.35);
     const lo = (a) => Math.max(0, Math.ceil(a - r));
     const hi = (a) => Math.min(this.n - 1, Math.floor(a + r));
     for (let z = lo(cz); z <= hi(cz); z++) {
       for (let y = lo(cy); y <= hi(cy); y++) {
         for (let x = lo(cx); x <= hi(cx); x++) {
-          const dx = x - cx, dy = y - cy, dz = z - cz;
-          if (dx * dx + dy * dy + dz * dz > r2) continue;
+          if (!inBrush(x - cx, y - cy, z - cz, r)) continue;
           const i = this.index(x, y, z);
           if (this.data[i] && this.data[i] !== v) {
             this.data[i] = v;

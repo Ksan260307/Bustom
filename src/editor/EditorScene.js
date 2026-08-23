@@ -5,7 +5,7 @@ import { Rig, ridesFarHalf } from '../core/Rig.js';
 import { Assembly, computeStats, faceAnchor, alignYToFace } from '../core/Assembly.js';
 import { Animator } from '../anim/Animator.js';
 import {
-  SIZE_STEP, EQUIP, EQUIP_META, EQUIP_THICKNESS, EQUIP_SIZE_DEFAULT,
+  SIZE_STEP, SIZE_MAX, EQUIP, EQUIP_META, EQUIP_THICKNESS, EQUIP_SIZE_DEFAULT,
 } from '../core/constants.js';
 
 // ============================================================
@@ -405,6 +405,33 @@ export class EditorScene {
     this._syncSelectionVisuals();
     this.onChange(this.stats);
     this.onSelect(this.selectedParts());
+  }
+
+  /**
+   * Turn the walk preview on or off. Switching it OFF snaps straight back to
+   * the rest pose — easing out of a stride over a second reads as "it did not
+   * reset", and every measurement the editor makes (bounds, ground offset,
+   * the framing) assumes the machine is standing still.
+   */
+  setPreviewMotion(on) {
+    this.previewMotion = !!on;
+    if (!this.previewMotion) this.resetPose();
+    return this;
+  }
+
+  /** Put every joint back to rest and the body back on the floor, now. */
+  resetPose() {
+    if (!this.rig) return this;
+    this.rig.resetPose();
+    this.rig.root.position.set(0, this.groundOffset, 0);
+    this.rig.root.rotation.set(0, 0, 0);
+    this.rig.root.updateMatrixWorld(true);
+    if (this.animator) {
+      this.animator.bodyBob = 0;
+      this.animator.bodyLean.set(0, 0);
+    }
+    this._syncSelectionVisuals();
+    return this;
   }
 
   /** Recompute stats without touching the hierarchy. */
@@ -860,6 +887,62 @@ export class EditorScene {
     return true;
   }
 
+  /**
+   * Shift the selection by a world-space delta. Same path the gizmo drag
+   * uses, so multi-selections move as one rigid group and children are not
+   * moved twice.
+   */
+  nudgeSelected(delta, label = '微調整') {
+    const roots = this._dragRoots();
+    if (!roots.length) return false;
+    this.onBeforeChange(label);
+
+    // _applyWorldTransform takes an absolute matrix, so the delta has to be
+    // applied on top of where each part currently is.
+    _delta.makeTranslation(delta.x, delta.y, delta.z);
+    let needsRebuild = false;
+    for (const id of roots) {
+      const node = this.rig.nodes.get(id);
+      if (!node) continue;
+      node.group.updateWorldMatrix(true, false);
+      _next.multiplyMatrices(_delta, node.group.matrixWorld);
+      if (!this._applyWorldTransform(id, _next)) needsRebuild = true;
+    }
+    if (needsRebuild) {
+      // Something crossed a bone's midpoint and changed which half it rides.
+      this.rebuild();
+      return true;
+    }
+
+    this.refreshStats();
+    this._syncSelectionVisuals();
+    this.onSelect(this.selectedParts());
+    return true;
+  }
+
+  /**
+   * A nudge in the direction the player is looking rather than in world axes.
+   * "Left" has to mean left on screen, or arrow keys are a puzzle.
+   */
+  nudgeSelectedByView(right, up, forward, step) {
+    if (!this.selection.size) return false;
+    this.camera.updateMatrixWorld(true);
+
+    // Screen right and the horizontal "into the screen", both flattened so a
+    // tilted camera still nudges along the floor.
+    _v.setFromMatrixColumn(this.camera.matrixWorld, 0).setY(0);
+    if (_v.lengthSq() < 1e-6) _v.set(1, 0, 0);
+    _v.normalize();
+    _v2.set(_v.z, 0, -_v.x);              // right x world-up = into the screen
+
+    _s.set(
+      (_v.x * right + _v2.x * forward) * step,
+      up * step,
+      (_v.z * right + _v2.z * forward) * step,
+    );
+    return this.nudgeSelected(_s);
+  }
+
   /** Which way and how fast a ROLLING plate turns. */
   setEquipSpinSelected(spin) {
     const id = this.selected;
@@ -927,6 +1010,18 @@ export class EditorScene {
     if (!part || part.kind !== 'bone') return false;
     this.onBeforeChange('ボーン寸法');
     this.assembly.setBoneShape(id, shape);
+    this.rebuild();
+    return true;
+  }
+
+  /** How much of its attribute's motion the selected bone takes, and when. */
+  setBoneMotionSelected(motion) {
+    const id = this.selected;
+    if (!id) return false;
+    const part = this.assembly.get(id);
+    if (!part || part.kind !== 'bone') return false;
+    this.onBeforeChange('関節の効き');
+    this.assembly.setBoneMotion(id, motion);
     this.rebuild();
     return true;
   }
@@ -1191,11 +1286,43 @@ export class EditorScene {
     const d = (this.brushRadiusCells(vox) * 2 + 1) / n;
     this.voxCursor.scale.set(d * sx, d * sy, d * sz);
     this.voxCursor.material.color.set(
-      this.tool === TOOL.CARVE ? 0xff6a5c
-        : this.tool === TOOL.ADD ? 0x8effc9
-          : this.assembly.palette.get(this.colorIndex),
+      cell.grow ? 0xffd166                      // about to enlarge the block
+        : this.tool === TOOL.CARVE ? 0xff6a5c
+          : this.tool === TOOL.ADD ? 0x8effc9
+            : this.assembly.palette.get(this.colorIndex),
     );
     this.voxCursor.visible = true;
+  }
+
+  /**
+   * Enlarge the block one step on the face the brush ran off, then work out
+   * where the cursor lands on the new, bigger grid.
+   * @returns {boolean} whether there is room to keep going
+   */
+  _growForAdd(node, grow) {
+    const part = node.part;
+    if (part.size[grow.axis] >= SIZE_MAX - 1e-6) {
+      this.onReject?.(`ブロックはこれ以上大きくできません（上限 ${SIZE_MAX}）`);
+      this.hoverVoxel = null;
+      return false;
+    }
+    const hadChildren = part.children.length > 0;
+    if (!this.assembly.growBlock(part.id, grow.axis, grow.dir, SIZE_STEP)) return false;
+
+    // The box, the contents, the mount and every child mount moved. A lone
+    // block can be patched in place; anything with parts hanging off it is
+    // cheaper and safer to rebuild than to fix up node by node.
+    if (hadChildren) {
+      this.rebuild();
+    } else {
+      this.rig.refreshSize(part.id);
+      this.rig.refreshBlock(part.id);
+      this.rig.refreshMount(part.id);
+    }
+    this.rig.root.updateMatrixWorld(true);
+    this.refreshStats();
+    this._hoverVoxel();
+    return !!this.hoverVoxel;
   }
 
   /** Brush radius in cells at the current resolution. */
@@ -1207,6 +1334,11 @@ export class EditorScene {
    * Convert a surface hit into voxel coordinates. Geometry is in unit-cube
    * space, so the mesh's own local frame is already 0..1 on every axis.
    */
+  /**
+   * Which cell a click lands on. For ADD the probe steps OUT of the surface,
+   * so it can legitimately land one cell past the edge of the block — that is
+   * the case that used to just fail, and is now a request to grow the block.
+   */
   _voxelAt(node, hit, outside) {
     const n = node.part.vox.n;
     const step = 0.5 / n;
@@ -1216,11 +1348,22 @@ export class EditorScene {
     const probe = hit.point.clone().addScaledVector(worldNormal, outside ? step * 2 : -step * 2);
     node.mesh.worldToLocal(probe);
 
-    const x = Math.floor(probe.x * n);
-    const y = Math.floor(probe.y * n);
-    const z = Math.floor(probe.z * n);
-    if (x < 0 || y < 0 || z < 0 || x >= n || y >= n || z >= n) return null;
-    return { x, y, z };
+    const cell = {
+      x: Math.floor(probe.x * n),
+      y: Math.floor(probe.y * n),
+      z: Math.floor(probe.z * n),
+    };
+    const over = [cell.x, cell.y, cell.z].findIndex((v) => v < 0 || v >= n);
+    if (over < 0) return cell;
+    if (!outside) return null;
+
+    // Just past a face: say which one. The probe steps a full cell clear of
+    // the surface it hit, so landing one or two cells outside is the normal
+    // case, not a stray click.
+    const v = [cell.x, cell.y, cell.z][over];
+    if (v < -2 || v > n + 1) return null;
+    cell.grow = { axis: over, dir: v < 0 ? -1 : 1 };
+    return cell;
   }
 
   /**
@@ -1230,7 +1373,9 @@ export class EditorScene {
   beginStroke() {
     if (!SCULPT_TOOLS.has(this.tool)) return false;
     if (this.hoverVoxel) {
-      this.onBeforeChange({ carve: '削る', add: '盛る', paint: '塗る' }[this.tool]);
+      this.onBeforeChange(this.hoverVoxel.grow && this.tool === TOOL.ADD
+        ? '盛る（ブロック拡張）'
+        : { carve: '削る', add: '盛る', paint: '塗る' }[this.tool]);
     }
     this.painting = true;
     this._applySculpt();
@@ -1238,9 +1383,18 @@ export class EditorScene {
   }
 
   _applySculpt() {
-    const id = this.selected;
-    const node = id ? this.rig.nodes.get(id) : null;
+    let id = this.selected;
+    let node = id ? this.rig.nodes.get(id) : null;
     if (!node || !node.part.vox || !this.hoverVoxel) return;
+
+    // Adding past the edge enlarges the block rather than doing nothing.
+    if (this.hoverVoxel.grow && this.tool === TOOL.ADD) {
+      if (!this._growForAdd(node, this.hoverVoxel.grow)) return;
+      id = this.selected;
+      node = this.rig.nodes.get(id);
+      if (!node || !this.hoverVoxel || this.hoverVoxel.grow) return;
+    }
+
     const { x, y, z } = this.hoverVoxel;
     const vox = node.part.vox;
     const r = this.brushRadiusCells(vox);
@@ -1359,6 +1513,7 @@ export class EditorScene {
   }
 
   exit() {
+    if (this.previewMotion) this.setPreviewMotion(false);
     this.active = false;
     this.painting = false;
     // Two editors share one canvas, so the inactive one must stop listening
