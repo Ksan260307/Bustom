@@ -55,6 +55,10 @@ class Assertion {
     if (!(this.actual >= n)) this._fail(`expected >= ${n}, got ${fmt(this.actual)}`);
   }
 
+  toBeLessThanOrEqual(n) {
+    if (!(this.actual <= n)) this._fail(`expected <= ${n}, got ${fmt(this.actual)}`);
+  }
+
   toBeCloseTo(n, digits = 2) {
     const tol = 10 ** -digits / 2;
     if (!(Math.abs(this.actual - n) <= tol)) this._fail(`expected ~${n}, got ${fmt(this.actual)}`);

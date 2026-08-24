@@ -19,11 +19,19 @@ import { clamp01 } from '../zmf/math.js';
 const ZOOM_PER_WHEEL_UNIT = 0.0013;
 
 const _v = new THREE.Vector3();
+const _corner = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _screenDir = new THREE.Vector2();
 
 /** Seconds between read-out redraws. Output only; never affects the fight. */
 const HUD_INTERVAL = 1 / 30;
+
+/** The practice field's three, and the corners they stand in. */
+const REGULARS = [
+  { preset: 'biped', x: 24, z: 18, style: 'orbit', range: 24 },
+  { preset: 'multileg', x: -28, z: 6, style: 'rusher', range: 16 },
+  { preset: 'hopper', x: 6, z: -32, style: 'flyer', range: 30 },
+];
 
 /** Distances, in metres, at which a machine's limbs are posed less often. */
 const POSE_NEAR = 26;
@@ -44,8 +52,31 @@ export class FieldScene {
     this.post = post ?? new PostFX(renderer);
     this._ownsPost = !post;
 
+    /**
+     * The opponents ON THE FIELD right now, wrecks included until they are
+     * cleared away. This is what everything else reads: the read-out, the
+     * lock, the hit tests.
+     */
     this.enemies = [];
+    /**
+     * Machines that have been built and are waiting to be used again.
+     *
+     * A rig is new geometry and new materials, so throwing one away at the
+     * end of a wave and building its twin at the head of the next is a
+     * visible hitch for no gain. Parked here, the same handful of machines
+     * carries a run of forty waves.
+     */
+    this.retired = [];
     this.ais = [];
+    /**
+     * The rules of the current run, or null for the free-play arena.
+     *
+     * With no rules in charge the field is what it has always been: three
+     * opponents that come straight back, forever, which is the right thing
+     * for trying a machine out. With rules in charge the field stops
+     * deciding who comes back and simply reports what happened.
+     */
+    this.director = null;
     this.lock = null;
     this.tracers = [];
     this.fireCooldown = 0;
@@ -94,25 +125,99 @@ export class FieldScene {
     this.cameraRig.fitTo(this.player.stats);
     this.input.profile.massSensitivityScale = 1 / (1 + this.player.stats.weightClass * 0.5);
     this.respawn();
-    if (!this.enemies.length) this._spawnEnemies();
+    if (!this.director && !this.enemies.length) this._spawnEnemies();
     return this;
   }
 
-  _spawnEnemies() {
-    const specs = [
-      { preset: 'biped', x: 24, z: 18, style: 'orbit', range: 24 },
-      { preset: 'multileg', x: -28, z: 6, style: 'rusher', range: 16 },
-      { preset: 'hopper', x: 6, z: -32, style: 'flyer', range: 30 },
-    ];
-    for (const s of specs) {
-      const asm = PRESETS[s.preset].build();
-      asm.name = `EN-${s.preset.toUpperCase()}`;
-      const bot = new Robot(asm, this.world, {
-        x: s.x, z: s.z, name: asm.name, random: this.random,
-      });
+  // ---------------------------------------------------------- who is on the field
+
+  /**
+   * Hand the field over to a set of rules, or take it back.
+   *
+   * Passing null puts it back the way the debug arena wants it: the three
+   * regulars, respawning forever.
+   */
+  setDirector(director) {
+    this.director = director ?? null;
+    this.retireEnemies();
+    if (director) {
+      director.begin();
+      return this;
+    }
+    // Free play: the standing three, built once and then put back on their
+    // feet. Building them again on every visit would leak a rig a time.
+    if (!this.enemies.length) this._spawnEnemies();
+    for (const e of this.enemies) {
+      e.setToughness(1);
+      e.revive(this.player ? this._enemySpawn(e) : null);
+    }
+    return this;
+  }
+
+  /** Take every opponent off the field, keeping the machines for reuse. */
+  retireEnemies() {
+    this.pendingRespawns = this.pendingRespawns.filter((j) => j.robot === this.player);
+    for (const e of this.enemies) {
+      e.alive = false;
+      // Marked as already dealt with, not as freshly dead: taking a machine
+      // off the field is not a kill, and must not throw a wreck or put a
+      // point on anybody's score.
+      e.wrecked = true;
+      e.object3D.visible = false;
+      e.shield = null;
+      this.retired.push(e);
+    }
+    this.enemies.length = 0;
+    if (this.lock && !this.lock.robot.alive) {
+      this.lock = null;
+      this.player.setTarget(null);
+      this.player.setLocked(false);
+    }
+    return this;
+  }
+
+  /**
+   * Put one opponent on the field and hand it back.
+   *
+   * A retired machine of the same build is reused rather than rebuilt.
+   * Building a rig means new geometry and new materials, and doing that for
+   * six machines at the head of every wave is a visible hitch at exactly
+   * the moment the player is being asked to fight.
+   */
+  spawnEnemy({ preset = 'biped', style = 'orbit', range = 24, toughness = 1, at = null } = {}) {
+    const shelved = this.retired.findIndex((e) => e.presetKey === preset);
+    let bot = shelved >= 0 ? this.retired.splice(shelved, 1)[0] : null;
+    if (!bot) {
+      const asm = PRESETS[preset].build();
+      asm.name = `EN-${preset.toUpperCase()}`;
+      bot = new Robot(asm, this.world, { name: asm.name, random: this.random });
+      // Tagged with what it was built from, so the next wave can reuse it
+      // rather than build a second machine of exactly the same kind.
+      bot.presetKey = preset;
       this.scene.add(bot.object3D);
-      this.enemies.push(bot);
-      this.ais.push(new SimpleAI(bot, { style: s.style, range: s.range }));
+      this.ais.push(new SimpleAI(bot, { style, range }));
+    }
+    this.enemies.push(bot);
+    const ai = this.ais.find((a) => a.robot === bot);
+    if (ai) { ai.style = style; ai.preferredRange = range; ai.reset(); }
+
+    bot.setToughness(toughness);
+    bot.revive(at ?? this._enemySpawn(bot));
+    bot.hp = bot.maxHp;
+    return bot;
+  }
+
+  /** The regulars of the practice field, at their usual corners. */
+  _spawnEnemies() {
+    for (const spec of REGULARS) {
+      // Placed rather than scattered: the corner each of them stands in is
+      // part of what makes the practice field the same place every time, so
+      // it must not come out of the fight's number stream.
+      const bot = this.spawnEnemy({ ...spec, at: _corner.set(spec.x, 2, spec.z) });
+      bot.body.reset(new THREE.Vector3(
+        spec.x, Math.max(0.5, -bot.rig.restLowestY), spec.z,
+      ));
+      bot.syncTransform();
     }
   }
 
@@ -141,10 +246,17 @@ export class FieldScene {
     this.input.clearState?.();
 
     this.respawn();
-    for (const e of this.enemies) {
-      e.wrecked = false;
-      e.revive(this._enemySpawn(e));
-      e.poseInterval = 1;
+    if (this.director) {
+      // Under a set of rules the roster is theirs to decide; putting the
+      // last wave back on the field would fight whatever they do next.
+      this.retireEnemies();
+      this.director.begin();
+    } else {
+      for (const e of this.enemies) {
+        e.wrecked = false;
+        e.revive(this._enemySpawn(e));
+        e.poseInterval = 1;
+      }
     }
     for (const ai of this.ais) ai.reset?.();
     return this;
@@ -394,7 +506,9 @@ export class FieldScene {
       robot.wrecked = true;
       this.debris.burst(robot, { power: robot === this.player ? 1.15 : 1 });
       this.hitPulse = Math.max(this.hitPulse, robot === this.player ? 0.9 : 0.55);
-      this.pendingRespawns.push({ robot, at: this.time + FieldScene.RESPAWN_DELAY });
+      // With rules in charge, whether anything comes back is their call.
+      if (this.director) this.director.onDown(robot);
+      else this.pendingRespawns.push({ robot, at: this.time + FieldScene.RESPAWN_DELAY });
       if (this.lock?.robot === robot) {
         this.lock = null;
         this.player.setTarget(null);
@@ -520,6 +634,7 @@ export class FieldScene {
     }
 
     this._checkDeaths();
+    this.director?.update(dt);
     this._updateRespawns(dt);
     this.debris.update(dt);
 
@@ -627,6 +742,7 @@ export class FieldScene {
       gait: p.stats.gait,
       legs: p.stats.legs,
       weapons: p.weapons.readout(),
+      mission: this.director?.readout ?? null,
     }, dt);
   }
 

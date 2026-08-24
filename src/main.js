@@ -4,7 +4,10 @@ import { EditorScene, TOOL } from './editor/EditorScene.js';
 import { History } from './editor/History.js';
 import { PartLibrary } from './editor/PartLibrary.js';
 import { FieldScene } from './game/FieldScene.js';
+import { SoloRun } from './game/SoloRun.js';
+import { TitleScene } from './game/TitleScene.js';
 import { PostFX } from './game/PostFX.js';
+import { seedFromClock } from './core/Random.js';
 import { EditorUI } from './ui/EditorUI.js';
 import { InputManager, DEFAULT_BINDINGS } from './zmf/InputManager.js';
 import { KineticFeedback } from './zmf/KineticFeedback.js';
@@ -22,10 +25,11 @@ export const MAX_CATCH_UP = 4;
 // ============================================================
 //  BroStom — application shell.
 //
-//  Three modes over one renderer:
+//  Four screens over one renderer:
+//    title  the front page, with your own machine turning on it
 //    edit   the machine
 //    part   one part on its own, saved to a reusable library
-//    field  the debug arena
+//    field  the arena — free play, or a solo run with rules on top
 //
 //  The two editing modes are the SAME EditorScene class over two documents,
 //  each with its own undo stack. Everything the machine editor can do — free
@@ -48,6 +52,8 @@ const TOOL_KEYS = {
 };
 
 const EDIT_MODES = new Set(['edit', 'part']);
+/** The two screens that are the arena: same scene, different rules. */
+const FIELD_MODES = new Set(['field', 'solo']);
 
 /** Arrow key -> [screen right, screen forward]. */
 const NUDGE = {
@@ -125,6 +131,8 @@ export class App {
       post: this.post,
     });
 
+    this.titleScene = new TitleScene({ renderer: this.renderer, post: this.post });
+
     this.ui = new EditorUI(this.overlay, this);
     this.ui.renderStats(this.editor.stats);
     this.ui.renderInspector(null);
@@ -132,7 +140,7 @@ export class App {
     this.ui.syncHistory();
 
     this.mode = null;
-    this.setMode('edit');
+    this.setMode('title');
 
     this._bindGlobalKeys();
     this._onResize = () => this.resize();
@@ -580,16 +588,28 @@ export class App {
     const previous = this.mode;
     this.mode = mode;
 
-    if (previous === 'field') this.field.exit();
+    if (FIELD_MODES.has(previous)) this.field.exit();
     if (previous === 'edit') this.mainEditor.exit();
     if (previous === 'part') this.partEditor.exit();
+    if (previous === 'title') this.titleScene.exit();
 
-    if (mode === 'field') {
+    if (FIELD_MODES.has(mode)) {
       this.hudCanvas.classList.remove('hidden');
       this.field.load(this.mainAssembly);
+      // Free play has no rules in charge; a solo run does, and it is the
+      // rules that decide who turns up and when the run is over.
+      this.field.setDirector(mode === 'solo' ? new SoloRun(this.field) : null);
+      // A fresh draw per run, so two runs are not the same fight — the run
+      // is still decided by its seed, it is just a different one each time.
+      if (mode === 'solo') this.field.restart(seedFromClock());
       this.field.enter();
       // Straight into the action — the pause menu is for Esc, not for entry.
       this.resumeField();
+    } else if (mode === 'title') {
+      this.hudCanvas.classList.add('hidden');
+      // Whatever is on the workbench is what stands on the title screen.
+      this.titleScene.load(this.mainAssembly);
+      this.titleScene.enter();
     } else {
       this.hudCanvas.classList.add('hidden');
       this.editor.enter();
@@ -606,7 +626,8 @@ export class App {
   }
 
   pauseField() {
-    if (this.mode !== 'field') return;
+    if (!FIELD_MODES.has(this.mode)) return;
+    if (this.ui.result.open) return;      // the run is already over
     this.field.setPaused(true);
     this.input.exitPointerLock();
     this.feedback.suspend();
@@ -614,7 +635,7 @@ export class App {
   }
 
   resumeField() {
-    if (this.mode !== 'field') return;
+    if (!FIELD_MODES.has(this.mode)) return;
     this.field.setPaused(false);
     this.ui.setPaused(false);
     this.input.requestPointerLock();
@@ -623,9 +644,42 @@ export class App {
   }
 
   restartField() {
-    if (this.mode !== 'field') return;
-    this.field.respawn();
+    if (!FIELD_MODES.has(this.mode)) return;
+    this.ui.result.close();
+    // In free play "restart" means stand back up. In a run it means throw
+    // the run away and start a new one, from wave one, on a new draw.
+    if (this.mode === 'solo') this.field.restart(seedFromClock());
+    else this.field.respawn();
     this.resumeField();
+  }
+
+  /** Start a solo run, or start this one over if you are already in it. */
+  startSolo() {
+    if (this.mode === 'solo') { this.restartField(); return this; }
+    this.ui.result.close();
+    this.setMode('solo');
+    return this;
+  }
+
+  /** Back to the front page from wherever you are. */
+  goTitle() {
+    this.ui.result.close();
+    this.setMode('title');
+    return this;
+  }
+
+  /**
+   * Called the frame a run ends. The fight stops but the frame keeps being
+   * drawn, so the result sits over the wreck rather than over a black
+   * screen — and the pause menu stays out of it, because pausing something
+   * that has finished is not a thing the player can want.
+   */
+  _showResult() {
+    this.field.setPaused(true);
+    this.input.exitPointerLock();
+    this.feedback.suspend();
+    this.ui.result.show(this.field.director.result);
+    return this;
   }
 
   // ---------------------------------------------------------- input
@@ -646,7 +700,8 @@ export class App {
         if (this.ui.help.open) { this.ui.help.close(); return; }
         if (this.ui.share.open) { this.ui.share.close(); return; }
         if (this.ui.keyConfig.open) { this.ui.keyConfig.close(); return; }
-        if (this.mode === 'field') {
+        if (this.ui.result.open) return;   // the run is over; pick a button
+        if (FIELD_MODES.has(this.mode)) {
           if (this.field.paused) this.resumeField();
           else this.pauseField();
         } else if (this.editor.tool !== TOOL.SELECT) {
@@ -658,6 +713,11 @@ export class App {
         }
         return;
       }
+
+      // On the title screen the menu has the keyboard. Falling through would
+      // let a shortcut fire on top of a menu choice — Enter picking "edit"
+      // and then the editor's own Enter throwing you into the field.
+      if (this.mode === 'title') return;
 
       // Ctrl shortcuts, before the plain-key tool bindings swallow the letter.
       if (e.ctrlKey || e.metaKey) {
@@ -709,7 +769,7 @@ export class App {
 
     // Losing the pointer lock in any other way should also stop the action.
     this._onLock = () => {
-      if (this.mode === 'field' && !document.pointerLockElement && !this.field.paused) {
+      if (FIELD_MODES.has(this.mode) && !document.pointerLockElement && !this.field.paused) {
         this.pauseField();
       }
     };
@@ -726,6 +786,7 @@ export class App {
     this.mainEditor.resize(w, h);
     this.partEditor.resize(w, h);
     this.field.resize(w, h);
+    this.titleScene.resize(w, h);
   }
 
   /**
@@ -744,6 +805,14 @@ export class App {
    */
   frame() {
     const elapsed = Math.min(this.clock.getDelta(), 0.25);
+
+    if (this.mode === 'title') {
+      // A turntable and a menu. Nothing here is a fight, so it simply
+      // follows the clock.
+      this.titleScene.update(Math.min(elapsed, 1 / 20));
+      this.titleScene.render();
+      return;
+    }
 
     if (EDIT_MODES.has(this.mode)) {
       // The workbench has no simulation to keep honest; it just follows the
@@ -766,6 +835,10 @@ export class App {
 
     this.field.present(elapsed);
     this.field.render();
+
+    // Asked here rather than inside the rules: whether a screen comes up is
+    // not something the fight should be deciding.
+    if (this.field.director?.finished && !this.ui.result.open) this._showResult();
   }
 
   dispose() {
@@ -775,6 +848,8 @@ export class App {
     document.removeEventListener('pointerlockchange', this._onLock);
     this.mainEditor.dispose();
     this.partEditor.dispose();
+    this.titleScene.dispose();
+    this.ui.title.dispose();
     this.post.dispose();
     this.input.dispose();
     this.renderer.dispose();

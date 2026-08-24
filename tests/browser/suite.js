@@ -12,6 +12,8 @@ import { ColorWheel } from '../../src/ui/ColorWheel.js';
 import { Hud } from '../../src/game/Hud.js';
 import * as PostFXModule from '../../src/game/PostFX.js';
 import { ACTIONS } from '../../src/zmf/InputManager.js';
+import { FieldScene } from '../../src/game/FieldScene.js';
+import { loadBest, recordBest } from '../../src/ui/Title.js';
 
 window.__postfxModule = PostFXModule;
 
@@ -123,12 +125,14 @@ function strokeAt(x, y, z) {
 // ============================================================
 
 describe('boot', () => {
-  it('constructs without throwing and starts in the editor', () => {
+  it('constructs without throwing and opens on the title screen', () => {
     app = boot();
-    expect(app.mode).toBe('edit');
+    expect(app.mode, 'the front page, not the workbench').toBe('title');
+    expect(app.ui.title.open).toBe(true);
     expect(app.assembly).toBeTruthy();
     expect(app.editor.rig).toBeTruthy();
     expect(app.editor.tool).toBe(TOOL.SELECT);
+    app.setMode('edit');
   });
 
   it('renders an editor frame', () => {
@@ -138,7 +142,7 @@ describe('boot', () => {
 
   it('builds the whole editor DOM', () => {
     for (const id of ['topbar', 'partbar', 'leftpanel', 'rightpanel', 'hint',
-      'fieldbar', 'pause', 'toast']) {
+      'fieldbar', 'pause', 'toast', 'title', 'result']) {
       expect(document.getElementById(id), id).toBeTruthy();
     }
     expect(document.querySelectorAll('.toolbtn').length).toBe(11);
@@ -2631,6 +2635,259 @@ describe('the fight runs on its own clock', () => {
   });
 });
 
+describe('the title screen', () => {
+  it('is what you land on, with nothing running behind it', () => {
+    app.goTitle();
+    expect(app.mode).toBe('title');
+    expect(app.ui.title.open).toBe(true);
+    expect(document.getElementById('title').classList.contains('hidden')).toBe(false);
+    expect(app.field.active, 'no fight is running behind a menu').toBe(false);
+    expect(app.hudCanvas.classList.contains('hidden'), 'and no read-out').toBe(true);
+  });
+
+  it('shows the machine you actually have', () => {
+    app.setMode('edit');
+    app.loadPreset('multileg');
+    app.goTitle();
+    expect(app.titleScene.rig, 'something is on the stand').toBeTruthy();
+    expect(app.titleScene.rig.nodes.size).toBe(app.assembly.size);
+
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.goTitle();
+    expect(app.titleScene.rig.nodes.size, 'and it follows the workbench')
+      .toBe(app.assembly.size);
+  });
+
+  it('stands the machine on the floor and frames it by its size', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.goTitle();
+    const small = app.titleScene.camDistance;
+    expect(app.titleScene.rig.root.position.y)
+      .toBeCloseTo(-app.titleScene.rig.restLowestY, 5);
+
+    app.setMode('edit');
+    app.editor.select(app.assembly.rootId);
+    app.editor.resizeSelected([3, 3, 3]);
+    app.goTitle();
+    expect(app.titleScene.camDistance, 'a bigger machine is watched from further back')
+      .toBeGreaterThan(small);
+    app.setMode('edit');
+    app.loadPreset('biped');
+  });
+
+  it('renders, and turns', () => {
+    app.goTitle();
+    const before = app.titleScene.stand.rotation.y;
+    shouldNotThrow(() => step(20), 'title frame');
+    expect(app.titleScene.stand.rotation.y).not.toBe(before);
+    expect(app.renderer.info.render.calls).toBeGreaterThan(0);
+  });
+
+  it('offers a way into each part of the game', () => {
+    app.goTitle();
+    const ids = app.ui.title.items.map((i) => i.id);
+    for (const want of ['solo', 'edit', 'field', 'keys', 'help']) {
+      expect(ids, want).toContain(want);
+    }
+    expect(document.querySelectorAll('#title .titleitem').length).toBe(ids.length);
+  });
+
+  it('can be driven from the keyboard, and wraps at both ends', () => {
+    app.goTitle();
+    app.ui.title.index = 0;
+    app.ui.title.move(-1);
+    expect(app.ui.title.index, 'up from the top goes to the bottom')
+      .toBe(app.ui.title.items.length - 1);
+    app.ui.title.move(1);
+    expect(app.ui.title.index).toBe(0);
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'ArrowDown', bubbles: true }));
+    expect(app.ui.title.index, 'the arrow keys move the highlight').toBe(1);
+    expect(app.ui.title.items[1].id).toBe('edit');
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Enter', bubbles: true }));
+    expect(app.mode, 'and Enter takes it').toBe('edit');
+  });
+
+  it('leaves the keyboard alone once it is off screen', () => {
+    app.setMode('edit');
+    const at = app.ui.title.index;
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'ArrowDown', bubbles: true }));
+    expect(app.ui.title.index, 'the editor gets its own arrow keys back').toBe(at);
+    expect(app.mode).toBe('edit');
+  });
+
+  it('shows the best run so far, once there has been one', () => {
+    localStorage.removeItem('brostom.solo.best.v1');
+    app.goTitle();
+    expect(document.querySelector('.titlebest').textContent).toContain('まだ');
+
+    expect(recordBest({ score: 4200, wave: 7, kills: 19, time: 90 })).toBe(true);
+    app.ui.title.render();
+    const line = document.querySelector('.titlebest').textContent;
+    expect(line).toContain('4,200');
+    expect(line).toContain('7');
+
+    expect(recordBest({ score: 10, wave: 1, kills: 0, time: 4 }), 'a worse run is not the best')
+      .toBe(false);
+    expect(loadBest().score).toBe(4200);
+    localStorage.removeItem('brostom.solo.best.v1');
+    app.setMode('edit');
+  });
+});
+
+describe('solo play', () => {
+  /** Advance the RULES without paying for a rendered frame each time. */
+  const play = (seconds) => {
+    for (let i = 0; i < Math.round(seconds * 60); i++) app.field.update(1 / 60);
+  };
+  /** Put the whole wave down, the way a very good player would. */
+  const clearWave = () => {
+    for (const m of app.field.director.members) m.damage(999999);
+    play(0.1);
+  };
+  const downPlayer = () => {
+    app.field.player.damage(999999);
+    play(0.1);
+  };
+
+  it('starts a run from the title, with rules in charge', () => {
+    app.setMode('edit');
+    bare();
+    app.goTitle();
+    app.ui.title.choose('solo');
+    expect(app.mode).toBe('solo');
+    expect(app.field.director, 'somebody is deciding what happens').toBeTruthy();
+    expect(app.field.paused).toBe(false);
+    expect(app.field.director.lives).toBeGreaterThan(0);
+  });
+
+  it('opens quiet, then puts a wave on the field', () => {
+    const d = app.field.director;
+    expect(d.wave, 'a beat to read the screen first').toBe(0);
+    play(3);
+    expect(d.wave).toBe(1);
+    expect(d.remaining).toBeGreaterThan(0);
+    expect(app.field.enemies.filter((e) => e.alive).length).toBe(d.remaining);
+  });
+
+  it('reuses the machines it already built instead of piling up new ones', () => {
+    const f = app.field;
+    const d = f.director;
+    const built = f.enemies.length + f.retired.length;
+    clearWave();
+    play(4);
+    expect(d.wave).toBe(2);
+    expect(f.enemies.length, 'the field holds this wave and nothing else')
+      .toBe(d.members.length);
+    expect(f.enemies.filter((e) => e.alive).length).toBe(d.members.length);
+    // Wave two is bigger than wave one, so one machine may be new — but the
+    // wave-one machines have to come back rather than be left as litter.
+    expect(f.enemies.length + f.retired.length - built, 'the shelf is used')
+      .toBeLessThan(d.members.length);
+  });
+
+  it('pays for the wave, and the next one is bigger', () => {
+    const d = app.field.director;
+    const before = d.score;
+    const size = d.members.length;
+    clearWave();
+    expect(d.kills, 'every one of them counted').toBeGreaterThanOrEqual(size);
+    expect(d.score, 'kills plus the bonus for clearing').toBeGreaterThan(before);
+    play(4);
+    expect(d.members.length).toBeGreaterThanOrEqual(size);
+  });
+
+  it('sends them in tougher than they were built', () => {
+    const one = app.field.enemies.find((e) => e.alive && e.baseMaxHp);
+    expect(one, 'toughness is measured against what it was built with').toBeTruthy();
+    expect(one.maxHp).toBeGreaterThan(one.baseMaxHp);
+  });
+
+  it('costs a life to go down, and puts you back on the field', () => {
+    const d = app.field.director;
+    const lives = d.lives;
+    downPlayer();
+    expect(d.lives).toBe(lives - 1);
+    expect(app.field.player.alive, 'the wreck is worth a moment').toBe(false);
+    play(3.5);
+    expect(app.field.player.alive, 'and then you are back').toBe(true);
+    expect(app.field.player.hp).toBe(app.field.player.maxHp);
+  });
+
+  it('ends the run when the lives are gone, and says how it went', () => {
+    const d = app.field.director;
+    localStorage.removeItem('brostom.solo.best.v1');
+    while (d.lives > 0) { downPlayer(); if (d.state === 'down') play(3.5); }
+    play(3.5);
+    expect(d.finished).toBe(true);
+
+    step(1);                                   // the frame that notices
+    expect(app.ui.result.open, 'the result comes up on its own').toBe(true);
+    expect(app.field.paused, 'and the fight stops').toBe(true);
+    expect(document.querySelector('.resultrows').textContent).toContain('スコア');
+    expect(loadBest(), 'a finished run is remembered').toBeTruthy();
+    expect(loadBest().score).toBe(d.score);
+  });
+
+  it('a finished run stays finished until you ask for another', () => {
+    const d = app.field.director;
+    const frozen = { ...d.result };
+    play(5);
+    step(2);
+    expect(d.result).toEqual(frozen);
+  });
+
+  it('playing again is a clean sheet', () => {
+    app.startSolo();
+    const d = app.field.director;
+    expect(app.ui.result.open, 'the result gets out of the way').toBe(false);
+    expect(app.field.paused).toBe(false);
+    expect(d.wave).toBe(0);
+    expect(d.score).toBe(0);
+    expect(d.lives).toBeGreaterThan(0);
+    expect(d.finished).toBe(false);
+    play(3);
+    expect(d.wave).toBe(1);
+  });
+
+  it('pausing a run offers to start it over rather than to respawn', () => {
+    app.pauseField();
+    expect(app.field.paused).toBe(true);
+    expect(document.getElementById('pause').classList.contains('hidden')).toBe(false);
+    expect(app.ui.pauseRestartBtn.textContent).toContain('最初から');
+    app.resumeField();
+    expect(app.field.paused).toBe(false);
+  });
+
+  it('leaving for the title stops the run', () => {
+    app.goTitle();
+    expect(app.mode).toBe('title');
+    expect(app.field.active).toBe(false);
+    expect(app.ui.result.open).toBe(false);
+  });
+
+  it('the practice field has no rules, and its regulars keep coming back', () => {
+    app.setMode('field');
+    expect(app.field.director, 'nobody is keeping score out here').toBe(null);
+    expect(app.field.enemies.filter((e) => e.alive).length).toBe(3);
+
+    const victim = app.field.enemies.find((e) => e.alive);
+    victim.damage(999999);
+    play(0.1);
+    expect(victim.alive).toBe(false);
+    play(FieldScene.RESPAWN_DELAY + 0.5);
+    expect(victim.alive, 'it comes back by itself').toBe(true);
+  });
+
+  it('and the read-out only carries a run when there is one', () => {
+    step(2);
+    expect(app.field.director?.readout ?? null).toBe(null);
+    app.setMode('edit');
+  });
+});
+
 describe('sculpting', () => {
   it('carves, adds and paints at the default resolution', () => {
     app.loadPreset('core');
@@ -3077,6 +3334,17 @@ describe('field mode', () => {
     app.setMode('field');
     app.input.setEnabled(true);
     app.field.respawn();
+
+    // Point at something before pressing lock. Acquiring a target from
+    // wherever the camera happens to face has its own test; this one is
+    // about what CLOSING on a locked target does to the chassis, and it
+    // should not fail because the opponents wandered off screen.
+    const mark = app.field.enemies.find((e) => e.alive);
+    app.field.player.body.angular.reset(
+      mark.position.clone().sub(app.field.player.position).setY(0).normalize(),
+    );
+    app.field.cameraRig.snap(app.field.player.position, app.field.player.body.forward);
+    step(4);
 
     app.input.buffer.push({ action: 'lock', t: app.input.time });
     step(30);

@@ -18,6 +18,7 @@ import { h, slider, vectorField, collapsible, toolSection, resizable, append } f
 import { KeyConfig } from './KeyConfig.js';
 import { ShareDialog } from './ShareDialog.js';
 import { Help } from './Help.js';
+import { TitleScreen, ResultScreen } from './Title.js';
 
 export { h, slider, vectorField };
 
@@ -91,7 +92,9 @@ export class EditorUI {
       ...Object.entries(PRESETS).map(([k, v]) => h('option', { value: k }, v.label)),
     );
 
+    this.titleBtn = h('button', { class: 'ghost', title: 'タイトルへ', onClick: () => app.goTitle() }, '⌂');
     this.editBtn = h('button', { class: 'active', onClick: () => app.setMode('edit') }, 'EDIT');
+    this.soloBtn = h('button', { onClick: () => app.startSolo() }, '⚔ ソロプレイ');
     this.partBtn = h('button', { onClick: () => app.openPartEditor() }, 'パーツ編集');
     this.testBtn = h('button', { class: 'primary', onClick: () => app.setMode('field') }, '▶ TEST FIELD');
 
@@ -117,8 +120,10 @@ export class EditorUI {
       h('button', { class: 'ghost', onClick: () => app.exportJson() }, '書出'),
       h('button', { class: 'ghost', onClick: () => app.importJson() }, '取込'),
       h('div', { class: 'spacer' }),
+      this.titleBtn,
       this.editBtn,
       this.partBtn,
+      this.soloBtn,
       this.testBtn,
     );
 
@@ -392,8 +397,12 @@ export class EditorUI {
     this.fieldWeaponHint = h('span', { class: 'fieldkeys hot' });
     this.fieldMoveHint = h('span', { class: 'fieldkeys' });
 
+    this.fieldLabel = h('span', {
+      style: 'color:var(--accent);font-family:var(--mono);letter-spacing:.14em',
+    }, 'DEBUG FIELD');
+
     this.fieldBar = h('div', { id: 'fieldbar', class: 'hidden' },
-      h('span', { style: 'color:var(--accent);font-family:var(--mono);letter-spacing:.14em' }, 'DEBUG FIELD'),
+      this.fieldLabel,
       h('div', { class: 'sep' }),
       this.fieldWeaponHint,
       h('div', { class: 'sep' }),
@@ -403,15 +412,20 @@ export class EditorUI {
       h('button', { onClick: () => this.help.show('field') }, '使い方'),
     );
 
+    this.pauseRestartBtn = h('button', {
+      class: 'wide', onClick: () => app.restartField(),
+    }, '⟲ リスポーン');
+
     this.pauseMenu = h('div', { id: 'pause', class: 'hidden' },
       h('div', { class: 'pausebox' },
         h('div', { class: 'pausetitle' }, 'PAUSED'),
         h('div', { class: 'pausesub' }, 'ESC で再開'),
         h('button', { class: 'primary wide', onClick: () => app.resumeField() }, '▶ 再開する'),
-        h('button', { class: 'wide', onClick: () => app.restartField() }, '⟲ リスポーン'),
+        this.pauseRestartBtn,
         h('button', { class: 'wide', onClick: () => this.keyConfig.show() }, '⌨ キー設定'),
         h('button', { class: 'wide', onClick: () => this.help.show('field') }, '？ 使い方'),
         h('button', { class: 'wide', onClick: () => app.setMode('edit') }, '← 編集画面に戻る'),
+        h('button', { class: 'wide', onClick: () => app.goTitle() }, '⌂ タイトルへ'),
       ),
     );
 
@@ -422,11 +436,13 @@ export class EditorUI {
     });
     this.share = new ShareDialog(app);
     this.help = new Help(app);
+    this.title = new TitleScreen(app);
+    this.result = new ResultScreen(app);
 
     this.root.append(
       this.topbar, this.partBar, this.leftPanel, this.rightPanel, this.hint,
       this.fieldBar, this.pauseMenu, this.keyConfig.el, this.share.el,
-      this.help.el, this.toast,
+      this.help.el, this.title.el, this.result.el, this.toast,
     );
 
     this.renderPalette();
@@ -576,6 +592,8 @@ export class EditorUI {
   syncMode(mode) {
     const editing = mode === 'edit' || mode === 'part';
     const isPart = mode === 'part';
+    const isTitle = mode === 'title';
+    const isSolo = mode === 'solo';
 
     this.editBtn.classList.toggle('active', mode === 'edit');
     this.partBtn.classList.toggle('active', isPart);
@@ -585,7 +603,15 @@ export class EditorUI {
     }
     this.topbar.classList.toggle('hidden', mode !== 'edit');
     this.partBar.classList.toggle('hidden', !isPart);
-    this.fieldBar.classList.toggle('hidden', editing);
+    this.fieldBar.classList.toggle('hidden', editing || isTitle);
+
+    // The title owns the whole screen; a run keeps its own read-out.
+    this.title.setOpen(isTitle);
+    if (!isSolo) this.result.close();
+    this.fieldLabel.textContent = isSolo ? 'SOLO PLAY' : 'DEBUG FIELD';
+    // In a run, restarting means starting the run over, not just standing
+    // back up — those are different enough to be worth different words.
+    this.pauseRestartBtn.textContent = isSolo ? '⟲ 最初からやり直す' : '⟲ リスポーン';
 
     // The library is a machine-editor concern; on the workbench you ARE the part.
     this.librarySection.classList.toggle('hidden', isPart);

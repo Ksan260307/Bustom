@@ -5,6 +5,7 @@ import {
 } from '../core/constants.js';
 import { SHAPE_GROUPS, SHAPES } from '../core/Shapes.js';
 import { ACTION_GROUPS, ACTION_LABEL, keyLabel } from '../zmf/InputManager.js';
+import { SoloRun, SOLO_RULES } from '../game/SoloRun.js';
 import { ASSEMBLE_TOOLS, SCULPT_LIST } from './EditorUI.js';
 
 // ============================================================
@@ -96,7 +97,8 @@ export class Help {
       { id: 'shapes', label: '形', body: () => this._shapes() },
       { id: 'bones', label: 'ボーン', body: () => this._bones() },
       { id: 'equip', label: '装備', body: () => this._equip() },
-      { id: 'field', label: 'テスト', body: () => this._field() },
+      { id: 'field', label: '操作', body: () => this._field() },
+      { id: 'solo', label: 'ソロプレイ', body: () => this._solo() },
     ];
   }
 
@@ -105,10 +107,12 @@ export class Help {
   _start() {
     return [
       h('h4', {}, 'ブロックでロボを組んで、戦わせる'),
-      para('画面はふたつあります。'),
+      para('画面は4つあります。'),
       keyTable([
+        ['タイトル', '遊びかたを選ぶ入口。組んだ機体がここに立ちます'],
+        ['ソロプレイ', 'ウェーブで攻めてくる敵を、残機のあるうちに倒し続ける'],
         ['編集', 'ブロックとボーンで機体を組み、装備を貼る'],
-        ['テスト', '組んだ機体で実際に飛び、撃ち、戦ってみる'],
+        ['テストフィールド', 'ルール無しの練習場。動きと武器を確かめる'],
         ['パーツ', '部品だけを作り、パーツ庫に貯めて呼び出す'],
       ]),
       h('h4', {}, '最初の一歩'),
@@ -116,7 +120,7 @@ export class Help {
         h('li', {}, '上の「プリセット」から機体を選ぶ。まずはこれで十分です'),
         h('li', {}, '左の「ブロック」でブロックを、「レッグ」などでボーンを生やす'),
         h('li', {}, '「装備プレート」で武器やブーストを貼る（ブーストが無いとダッシュできません）'),
-        h('li', {}, '右上の「テスト」で出撃'),
+        h('li', {}, '右上の「テスト」で試し撃ち、慣れたら「ソロプレイ」へ'),
       ),
       h('h4', {}, '覚えておくと楽なこと'),
       keyTable([
@@ -275,7 +279,43 @@ export class Help {
         ['ダッシュ', '移動キーを2回続けて押す'],
         ['ブースト', `${EQUIP_META.boost.label}プレートを付けていないと使えません`],
         ['武器', '装備した武器はサブウエポンのように切り替えて撃ちます'],
-        ['Esc', '一時停止（そのまま編集画面へ戻れます）'],
+        ['Esc', '一時停止（そのまま編集画面やタイトルへ戻れます）'],
+      ]),
+    ];
+  }
+
+  /**
+   * The rules of a run. Numbers that the game actually runs on are pulled
+   * from the run itself rather than typed in here, for the same reason the
+   * rest of this file is generated: help that repeats a number by hand is
+   * help that is wrong the next time the number changes.
+   */
+  _solo() {
+    const waves = [1, 3, 5, 8].map((n) => {
+      const specs = SoloRun.waveSpecs(n);
+      const names = [...new Set(specs.map((x) => x.label))].join(' / ');
+      return [`WAVE ${n}`, `${specs.length}機（${names}）${specs[0].ace ? ' ＋ 強化個体' : ''}`];
+    });
+    return [
+      h('h4', {}, 'ウェーブを生き延びる'),
+      para('敵はウェーブ単位で出てきます。そのウェーブを全滅させると次が来ます。',
+        '進むほど数が増え、1機あたりも硬くなります。'),
+      keyTable(waves),
+      h('h4', {}, '残機とスコア'),
+      keyTable([
+        ['残機', `${SOLO_RULES.lives}機。やられるたびに1つ減り、0になった時点で終了`],
+        ['ウェーブ突破', '機体が少し修復され、弾も補充されます'],
+        ['スコア', '撃破ごとに加算（後半のウェーブほど高い）＋ウェーブ突破ボーナス'],
+        ['強化個体', `${SOLO_RULES.aceEvery}ウェーブごとに1機。硬いぶん撃破点は${SOLO_RULES.aceScore}倍`],
+        ['記録', 'ベストスコアはタイトル画面に残ります'],
+      ]),
+      h('h4', {}, '持ち込む機体'),
+      para('編集画面で組んだ機体がそのまま出ます。',
+        h('b', {}, '武器を積んでいないと素の機関砲だけ'),
+        'になるので、出撃前に装備プレートを確認してください。'),
+      keyTable([
+        ['Esc', '一時停止。最初からやり直す・タイトルへ戻る'],
+        ['やり直し', '毎回ちがう試合になります（同じ乱数の引き直し）'],
       ]),
     ];
   }

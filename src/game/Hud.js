@@ -103,6 +103,77 @@ export class Hud {
     this._drawCrosshair(s, ctx);
     this._drawTelemetry(s, ctx);
     this._drawWeapons(s, ctx);
+    if (s.mission) this._drawMission(s.mission, ctx);
+  }
+
+  /**
+   * The run: which wave, how many are left, the score and the lives.
+   *
+   * All of it lives along the TOP edge, because everything the player reads
+   * while actually fighting — speed, energy, the rack — is already along the
+   * bottom, and the middle belongs to the reticle.
+   */
+  _drawMission(m, ctx) {
+    const pad = 22;
+    ctx.save();
+
+    // ---- wave and what is left of it, top left
+    ctx.textAlign = 'left';
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#9fc4dd';
+    ctx.font = '600 9px ui-monospace, Menlo, Consolas, monospace';
+    ctx.fillText('WAVE', pad, pad + 4);
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = '#dff0ff';
+    ctx.font = '700 26px ui-monospace, Menlo, Consolas, monospace';
+    ctx.fillText(String(m.wave).padStart(2, '0'), pad, pad + 30);
+
+    ctx.font = '600 10px ui-monospace, Menlo, Consolas, monospace';
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#9fc4dd';
+    ctx.fillText('のこり', pad + 58, pad + 18);
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = m.remaining > 0 ? '#dff0ff' : '#8effc9';
+    ctx.font = '700 16px ui-monospace, Menlo, Consolas, monospace';
+    ctx.fillText(String(m.remaining), pad + 58, pad + 34);
+
+    // ---- score and lives, top right
+    const rx = this.w - pad;
+    ctx.textAlign = 'right';
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#9fc4dd';
+    ctx.font = '600 9px ui-monospace, Menlo, Consolas, monospace';
+    ctx.fillText('SCORE', rx, pad + 4);
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = '#dff0ff';
+    ctx.font = '700 22px ui-monospace, Menlo, Consolas, monospace';
+    ctx.fillText(m.score.toLocaleString('en-US'), rx, pad + 28);
+
+    // Lives are pips rather than a number: how many tries you have left is
+    // something to take in at a glance, not to read.
+    const pips = Math.max(0, m.lives);
+    for (let i = 0; i < Math.max(pips, 3); i++) {
+      const on = i < pips;
+      ctx.globalAlpha = on ? 0.95 : 0.22;
+      ctx.fillStyle = '#4fd2ff';
+      ctx.strokeStyle = '#9fc4dd';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(rx - i * 13 - 4, pad + 42, 4, 0, TAU);
+      if (on) ctx.fill(); else ctx.stroke();
+    }
+
+    // ---- the banner: what just happened, briefly, where the eyes are
+    if (m.banner) {
+      const a = clamp01(m.bannerFade ?? 1);
+      ctx.textAlign = 'center';
+      ctx.globalAlpha = a * 0.95;
+      ctx.fillStyle = '#dff0ff';
+      ctx.font = '700 34px ui-monospace, Menlo, Consolas, monospace';
+      ctx.fillText(m.banner, this.w / 2, this.h * 0.3);
+    }
+
+    ctx.restore();
   }
 
   /**

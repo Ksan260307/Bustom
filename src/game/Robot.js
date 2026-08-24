@@ -58,6 +58,14 @@ export class Robot {
     this.hp = this.maxHp;
     this.weapons = new WeaponSystem(this);
     this.alive = true;
+    /**
+     * Set by the arena once it has thrown the wreck, so one death produces
+     * one wreck however many frames it takes to be noticed. It has to be
+     * cleared when the machine comes back — carried into the next life it
+     * makes the next death silent: no wreck, no shake, and nothing told to
+     * whatever is keeping score.
+     */
+    this.wrecked = false;
     /** The barrier a SHIELD plate puts up, while it lasts. */
     this.shield = null;
     this.radius = Math.max(1.0, this.stats.extent * 0.8);
@@ -191,6 +199,20 @@ export class Robot {
   /** Reload every magazine and drop the blades. Used on respawn. */
   rearm() { this.weapons.reset(); return this; }
 
+  /**
+   * Scale how much punishment this machine takes before it comes apart.
+   *
+   * Always measured against the durability it was BUILT with, never against
+   * whatever it was set to last time: applied to the current figure, a
+   * machine reused across ten waves would end up ten multipliers tough.
+   */
+  setToughness(scale = 1) {
+    this.baseMaxHp = this.baseMaxHp ?? this.maxHp;
+    this.maxHp = Math.max(1, Math.round(this.baseMaxHp * scale));
+    this.hp = Math.min(this.hp, this.maxHp);
+    return this;
+  }
+
   damage(n) {
     if (!this.alive) return;
     // A raised barrier takes the hit first, and only what it cannot absorb
@@ -220,6 +242,7 @@ export class Robot {
   revive(position) {
     this.hp = this.maxHp;
     this.alive = true;
+    this.wrecked = false;
     this.object3D.visible = true;
     this.body.reset(position ?? this.position.clone());
     this.rearm();
