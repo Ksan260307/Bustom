@@ -101,15 +101,35 @@ export class ZMFBody {
     this.floating = this.hoverHeight > 0;
   }
 
+  /**
+   * Put the machine back to how it comes out of the box.
+   *
+   * This used to leave the environment probe, the weight layers and the
+   * thruster timers holding whatever the previous life ended with — so a
+   * machine that respawned after dying in mid-air spent its first moments
+   * on the ground believing it was still falling, and two runs of the same
+   * fight could not be made to agree.
+   */
   reset(position = new THREE.Vector3(0, this.rideHeight, 0)) {
     this.position.copy(position);
     this.inertia.reset();
     this.angular.reset(new THREE.Vector3(0, 0, 1));
     this.assist.clear();
+    this.env.reset();
+    this.layers.reset();
+    this.space.clear();
+
     this.energy = 1;
     this.hover = 0;
     this.gravityScale = 1;
     this.airborneTime = 0;
+    this.strain = 0;
+    this.boosting = false;
+    this.boostOutput = 0;
+    this.dashCooldown = 0;
+    this.dashFlash = 0;
+    this.jumpCooldown = 0;
+    this.locked = false;
   }
 
   get velocity() { return this.inertia.velocity; }

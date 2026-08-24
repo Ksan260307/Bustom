@@ -80,6 +80,36 @@ export class Animator {
   }
 
   /**
+   * Back to a machine that has just been built: standing still, mid-stride
+   * of nothing, no swing left over.
+   *
+   * A machine that comes back from a wreck used to keep the pose and the
+   * momentum of its previous life — it respawned already walking, and
+   * because the limbs decide where its guns point, the first shots of the
+   * new life came out of a barrel that was still finishing the old one.
+   */
+  reset() {
+    this.time = 0;
+    this.gaitPhase = 0;
+    this.gaitFreq = 0;
+    this.hopCharge = 0;
+    this.bodyBob = 0;
+    this.bodyLean.set(0, 0);
+    this.aimBlend = 0;
+    this.travel.set(0, 1);
+    this.travelBlend = 0;
+    this.localVel.set(0, 0, 0);
+    this._prevLocalVel.set(0, 0, 0);
+    this.legSway.set(0, 0);
+    for (const node of this.rig.joints) {
+      node.target.identity();
+      node.spinPhase = undefined;
+    }
+    this.rig.resetPose();
+    return this;
+  }
+
+  /**
    * Resolve, once, the body-frame axes each joint should rotate about.
    *
    * Rotating a bone about axis A moves its tip along (A x S), where S is the

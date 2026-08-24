@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+
+/** Scratch, so drawing the read-out allocates nothing per frame. */
+const _right = new THREE.Vector3();
 import { clamp01, damp, lerp } from '../zmf/math.js';
 import { LOCK_COLOR } from '../core/constants.js';
 
@@ -317,9 +320,9 @@ export class Hud {
 
   _drawOffscreenChevron(s, ctx, target) {
     const v = target.position.clone().sub(s.camera.position);
-    const right = new THREE.Vector3().crossVectors(s.camera.up, v).normalize();
+    const right = _right.crossVectors(s.camera.up, v).normalize();
     const cx = this.w / 2, cy = this.h / 2;
-    const side = -Math.sign(right.dot(new THREE.Vector3(1, 0, 0))) || 1;
+    const side = -Math.sign(right.x) || 1;
     const x = cx + side * this.w * 0.34;
     ctx.save();
     ctx.globalAlpha = 0.7;

@@ -5,6 +5,7 @@ import { Projectiles } from './Weapons.js';
 import { Debris } from './Debris.js';
 import { Hud } from './Hud.js';
 import { PostFX } from './PostFX.js';
+import { Random, seedFromClock } from '../core/Random.js';
 import { CameraDynamics } from '../zmf/CameraDynamics.js';
 import { PRESETS } from '../core/Assembly.js';
 import { clamp01 } from '../zmf/math.js';
@@ -20,6 +21,13 @@ const ZOOM_PER_WHEEL_UNIT = 0.0013;
 const _v = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _screenDir = new THREE.Vector2();
+
+/** Seconds between read-out redraws. Output only; never affects the fight. */
+const HUD_INTERVAL = 1 / 30;
+
+/** Distances, in metres, at which a machine's limbs are posed less often. */
+const POSE_NEAR = 26;
+const POSE_FAR = 55;
 
 export class FieldScene {
   constructor({ renderer, hudCanvas, input, feedback, post = null }) {
@@ -43,6 +51,18 @@ export class FieldScene {
     this.fireCooldown = 0;
     /** Decaying kick from landing a shot, folded into the feedback bus. */
     this.hitPulse = 0;
+    /**
+     * Two streams, deliberately. `random` decides anything the fight
+     * depends on — where a machine dodges, where a pellet goes — so a match
+     * is reproducible from its seed. `visualRandom` decides sparks and
+     * screen jitter, and is kept apart so that drawing more debris on a
+     * faster machine cannot nudge a bullet.
+     */
+    this.seed = seedFromClock();
+    this.random = new Random(this.seed);
+    this.visualRandom = new Random(this.seed ^ 0x5bf03635);
+    /** Real time owed to the read-out, which redraws on its own slower beat. */
+    this.hudBank = 0;
     this.shieldBubbles = new Map();
     this.time = 0;
     this.active = false;
@@ -50,7 +70,7 @@ export class FieldScene {
 
     this._buildTracerPool();
     this.projectiles = new Projectiles(this.scene, this.world);
-    this.debris = new Debris(this.scene, this.world);
+    this.debris = new Debris(this.scene, this.world, { random: this.visualRandom });
     /** Machines waiting to be put back together: { robot, at }. */
     this.pendingRespawns = [];
   }
@@ -67,7 +87,9 @@ export class FieldScene {
     // coming back; everything else is flushed by the respawn below.
     this.pendingRespawns = this.pendingRespawns.filter((j) => j.robot !== this.player);
     if (this.player) { this.scene.remove(this.player.object3D); this.player.dispose(); }
-    this.player = new Robot(assembly.clone(), this.world, { isPlayer: true });
+    this.player = new Robot(assembly.clone(), this.world, {
+      isPlayer: true, random: this.random,
+    });
     this.scene.add(this.player.object3D);
     this.cameraRig.fitTo(this.player.stats);
     this.input.profile.massSensitivityScale = 1 / (1 + this.player.stats.weightClass * 0.5);
@@ -85,11 +107,47 @@ export class FieldScene {
     for (const s of specs) {
       const asm = PRESETS[s.preset].build();
       asm.name = `EN-${s.preset.toUpperCase()}`;
-      const bot = new Robot(asm, this.world, { x: s.x, z: s.z, name: asm.name });
+      const bot = new Robot(asm, this.world, {
+        x: s.x, z: s.z, name: asm.name, random: this.random,
+      });
       this.scene.add(bot.object3D);
       this.enemies.push(bot);
       this.ais.push(new SimpleAI(bot, { style: s.style, range: s.range }));
     }
+  }
+
+  /**
+   * Start the match over from a known point.
+   *
+   * `respawn` only puts the player back; the other machines keep whatever
+   * damage and position they had. That is right for dying mid-fight and
+   * wrong for anything that needs a known starting point — a replay, or a
+   * test that has to run the same match twice. This resets everything the
+   * fight is made of, including the number stream, so the same seed really
+   * does give the same match.
+   */
+  restart(seed = this.seed) {
+    this.seed = seed >>> 0;
+    this.random.reseed(this.seed);
+    this.visualRandom.reseed(this.seed ^ 0x5bf03635);
+    this.time = 0;
+    this.hitPulse = 0;
+    this.hudBank = 0;
+    this.pendingRespawns.length = 0;
+    this.fireCooldown = 0;
+    // Put the tracers out, but keep the pool: it is built once, and
+    // emptying the array leaves the built-in gun with nothing to draw with.
+    for (const t of this.tracers) { t.life = 0; t.line.visible = false; }
+    this.input.clearState?.();
+
+    this.respawn();
+    for (const e of this.enemies) {
+      e.wrecked = false;
+      e.revive(this._enemySpawn(e));
+      e.poseInterval = 1;
+    }
+    for (const ai of this.ais) ai.reset?.();
+    return this;
   }
 
   respawn() {
@@ -268,6 +326,27 @@ export class FieldScene {
   /** What the view is worth without a scope on it — the rig decides. */
   get baseFov() { return this.cameraRig.baseFov; }
 
+  /**
+   * Decide how often each machine re-poses itself.
+   *
+   * The player is always every step — it is the one the camera is on and
+   * the one the player is steering. The others step down with distance
+   * from the player, which is a fact about the fight rather than about the
+   * screen, so two runs of the same match make the same choices.
+   *
+   * A machine close enough to matter, or shooting, stays at full rate: the
+   * cost saved is not worth a muzzle that lags behind the arm holding it.
+   */
+  _shareOutWork() {
+    const from = this.player.position;
+    for (const e of this.enemies) {
+      if (!e.alive) continue;
+      const d = from.distanceTo(e.position);
+      e.poseInterval = d < POSE_NEAR ? 1 : d < POSE_FAR ? 2 : 3;
+    }
+    this.player.poseInterval = 1;
+  }
+
   /** A bubble around anything carrying a live barrier. */
   _updateShields(dt) {
     // Hide everything first: the machines get rebuilt whenever the player
@@ -355,8 +434,8 @@ export class FieldScene {
   /** Somewhere well clear of the player, and inside the arena, to put an
    *  opponent back. */
   _enemySpawn(robot) {
-    const angle = Math.random() * Math.PI * 2;
-    const r = 34 + Math.random() * 26;
+    const angle = this.random.unit() * Math.PI * 2;
+    const r = this.random.range(34, 60);
     _v.set(
       this.player.position.x + Math.cos(angle) * r,
       Math.max(0.5, -robot.rig.restLowestY),
@@ -394,9 +473,9 @@ export class FieldScene {
     }
 
     // slight scatter so continuous fire reads as a stream, not a laser
-    to.x += (Math.random() - 0.5) * 0.9;
-    to.y += (Math.random() - 0.5) * 0.9;
-    to.z += (Math.random() - 0.5) * 0.9;
+    to.x += this.random.signed() * 0.45;
+    to.y += this.random.signed() * 0.45;
+    to.z += this.random.signed() * 0.45;
 
     const slot = this.tracers.find((t) => t.life <= 0) ?? this.tracers[0];
     slot.life = 0.07;
@@ -408,7 +487,7 @@ export class FieldScene {
 
     if (this.lock && this.lock.robot.alive) {
       const miss = this.player.position.distanceTo(this.lock.robot.position) * 0.006;
-      if (Math.random() > miss) this.lock.robot.damage(1.6);
+      if (this.random.unit() > miss) this.lock.robot.damage(1.6);
     }
   }
 
@@ -425,13 +504,14 @@ export class FieldScene {
 
   update(dt) {
     if (!this.active) return;
-    if (this.paused) { this._drawHud(0); return; }
+    if (this.paused) return;
     this.time += dt;
     const p = this.player;
 
     if (this.input.consume('reset', 0.2)) this.respawn();
 
     this._updateLock(dt);
+    this._shareOutWork();
     p.update(this.input, dt);
 
     for (const ai of this.ais) {
@@ -460,8 +540,26 @@ export class FieldScene {
       }
     }
 
-    this._updateScope();
     this._updateShields(dt);
+  }
+
+  /**
+   * Everything that only decides what the frame LOOKS like: camera, screen
+   * effects, the read-out. Runs once per displayed frame on real elapsed
+   * time, never on the simulation clock.
+   *
+   * Kept apart from `update` on purpose. Anything in here may read the
+   * fight but must not change it — that separation is what lets the
+   * simulation be replayed, and what lets this half be skipped or throttled
+   * when frames get expensive without the match drifting.
+   */
+  present(elapsed) {
+    if (!this.active) return;
+    if (this.paused) { this._drawHud(0); return; }
+    const dt = Math.max(1e-4, Math.min(elapsed, 1 / 15));
+    const p = this.player;
+
+    this._updateScope();
 
     // ---- camera
     const tel = p.body.telemetry();
@@ -509,7 +607,13 @@ export class FieldScene {
       dir: _screenDir,
     }, this.time);
 
-    this._drawHud(dt);
+    // The read-out is a 2D canvas redrawn from scratch, and nothing on it
+    // changes fast enough to be worth doing every frame at 144Hz.
+    this.hudBank += dt;
+    if (this.hudBank >= HUD_INTERVAL) {
+      this._drawHud(this.hudBank);
+      this.hudBank = 0;
+    }
   }
 
   _drawHud(dt) {

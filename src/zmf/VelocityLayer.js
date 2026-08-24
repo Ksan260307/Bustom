@@ -46,6 +46,20 @@ export class VelocityLayerSystem {
     /** Acceleration snatch: a brief jerk spike right after a layer change. */
     this.snatch = 0;
     this.transition = 0; // 0..1, how far through a change we are
+    this._initial = initial;
+  }
+
+  /** Back to the weight it started at, mid-blend or not. */
+  reset() {
+    this.layer = LAYERS[this._initial];
+    this.pending = this.layer;
+    this.mass = this.layer.mass;
+    this.jerk = this.layer.jerk;
+    this.viscosity = this.layer.viscosity;
+    this.turn = this.layer.turn;
+    this.snatch = 0;
+    this.transition = 0;
+    return this;
   }
 
   set(key) {

@@ -12,6 +12,7 @@ import { WeaponSystem } from './Weapons.js';
 
 const _v = new THREE.Vector3();
 const _aim = new THREE.Vector3();
+const _flat = new THREE.Vector3();
 
 export class Robot {
   /**
@@ -23,6 +24,23 @@ export class Robot {
     this.world = world;
     this.isPlayer = !!opts.isPlayer;
     this.name = opts.name ?? assembly.name;
+    /** The fight's replayable number stream, when it has one. */
+    this.random = opts.random ?? null;
+
+    /**
+     * How often this machine's limbs are re-posed, in simulation steps.
+     *
+     * Posing a machine is the most expensive thing done per machine per
+     * step, and a machine forty metres away gains nothing from a fresh
+     * pose sixty times a second. Note what this is derived FROM: the
+     * distance between two machines, which is part of the fight. It is
+     * never derived from frame time or from where the camera happens to
+     * be pointed, because both of those differ between one run and the
+     * next — and the posed limbs decide where a shot leaves the barrel, so
+     * anything that changes them changes the fight.
+     */
+    this.poseInterval = 1;
+    this._poseCountdown = 0;
 
     this.rig = new Rig(assembly);
     this.stats = computeStats(assembly, this.rig);
@@ -97,8 +115,29 @@ export class Robot {
     }
     this.body.update(input, dt);
     this.syncTransform();
-    this._animate(dt);
+
+    // Skipped steps are folded into the next one, so a machine posed every
+    // third step still swings its legs at the right speed.
+    this._poseSkipped = (this._poseSkipped ?? 0) + dt;
+    if (--this._poseCountdown <= 0) {
+      this._animate(this._poseSkipped);
+      this._poseSkipped = 0;
+      this._poseCountdown = Math.max(1, this.poseInterval | 0);
+    }
     this._updateFx(dt);
+
+    // World transforms are refreshed HERE, once, after the machine is posed
+    // and before anything reads it. Everything downstream — where a muzzle
+    // is, where a blade reaches, what the debris copies — used to force its
+    // own full traversal of ~200 objects, several times per machine per
+    // frame, all recomputing the same matrices.
+    this.object3D.updateMatrixWorld(true);
+  }
+
+  /** Bring world transforms up to date if nothing has this step. */
+  refreshTransforms() {
+    this.object3D.updateMatrixWorld(true);
+    return this;
   }
 
   syncTransform() {
@@ -184,7 +223,14 @@ export class Robot {
     this.object3D.visible = true;
     this.body.reset(position ?? this.position.clone());
     this.rearm();
+    // Stand it up straight again. Nothing about the life it just lost
+    // should follow it into the next one.
+    this.animator.reset();
+    this._poseCountdown = 0;
+    this._poseSkipped = 0;
+    this.poseInterval = 1;
     this.syncTransform();
+    this.object3D.updateMatrixWorld(true);
     return this;
   }
 
@@ -226,12 +272,25 @@ export class SimpleAI {
   constructor(robot, opts = {}) {
     this.robot = robot;
     this.input = new SyntheticInput();
-    this.t = Math.random() * 10;
+    this.random = robot.random ?? null;
     this.preferredRange = opts.range ?? 26;
     this.style = opts.style ?? 'orbit';   // orbit | rusher | flyer
-    this.phase = Math.random() * Math.PI * 2;
+    // Drawn once and kept, so restarting the match puts this machine back
+    // into the same rhythm it started with rather than a new one.
+    this.startT = this.random ? this.random.unit() * 10 : 0;
+    this.startPhase = this.random ? this.random.unit() * Math.PI * 2 : 0;
+    this.reset();
+  }
+
+  /** Back to the state it was built in. */
+  reset() {
+    this.t = this.startT;
+    this.phase = this.startPhase;
     this.jinkTimer = 0;
     this.jinkDir = 1;
+    this.input.move.set(0, 0, 0);
+    this.input.intensity = 0;
+    return this;
   }
 
   update(playerPos, dt) {
@@ -242,7 +301,9 @@ export class SimpleAI {
     _v.copy(playerPos).sub(r.position);
     const range = _v.length();
     _v.y = 0;
-    const flat = _v.lengthSq() > 1e-4 ? _v.clone().normalize() : new THREE.Vector3(0, 0, 1);
+    // Reused rather than cloned: this runs for every machine, every step.
+    const flat = _flat.copy(_v);
+    if (flat.lengthSq() > 1e-4) flat.normalize(); else flat.set(0, 0, 1);
 
     // face roughly toward the player
     const fwd = r.body.forward;
@@ -253,8 +314,9 @@ export class SimpleAI {
     // approach / retreat along the range error, strafe for the rest
     this.jinkTimer -= dt;
     if (this.jinkTimer <= 0) {
-      this.jinkTimer = 0.7 + Math.random() * 1.4;
-      this.jinkDir = Math.random() < 0.5 ? -1 : 1;
+      const rng = this.random;
+      this.jinkTimer = rng ? rng.range(0.7, 2.1) : 1.4;
+      this.jinkDir = rng ? rng.sign() : 1;
     }
 
     const err = (range - this.preferredRange) / this.preferredRange;

@@ -10,6 +10,15 @@ import { InputManager, DEFAULT_BINDINGS } from './zmf/InputManager.js';
 import { KineticFeedback } from './zmf/KineticFeedback.js';
 import { SIZE_STEP } from './core/constants.js';
 
+/** How long one simulation step covers. Everything in the fight uses this. */
+export const STEP = 1 / 60;
+/**
+ * The most steps one frame may run. Past this the game shows time passing
+ * more slowly rather than trying to catch up, which is the only choice that
+ * cannot make a struggling machine struggle harder.
+ */
+export const MAX_CATCH_UP = 4;
+
 // ============================================================
 //  BroStom — application shell.
 //
@@ -131,6 +140,9 @@ export class App {
     this.resize();
 
     this.clock = new THREE.Clock();
+    /** Real time owed to the simulation but not yet stepped. */
+    this.stepBank = 0;
+    this.stepsThisFrame = 0;
     this.renderer.setAnimationLoop(() => this.frame());
   }
 
@@ -716,18 +728,44 @@ export class App {
     this.field.resize(w, h);
   }
 
+  /**
+   * One displayed frame.
+   *
+   * The fight advances in FIXED steps, however fast the screen happens to
+   * be. Feeding the real frame time straight into the simulation made the
+   * result depend on the machine it ran on: the same inputs gave a
+   * different fight on a slow frame, nothing could be replayed, and a long
+   * frame integrated one huge step that threw machines through walls.
+   *
+   * Leftover time is carried to the next frame, and at most `MAX_CATCH_UP`
+   * steps run in one go. Dropping the rest is deliberate — the alternative
+   * is that a slow frame schedules more work, which makes the next frame
+   * slower still, and the game spirals down instead of degrading.
+   */
   frame() {
-    const dt = Math.min(this.clock.getDelta(), 1 / 20);
+    const elapsed = Math.min(this.clock.getDelta(), 0.25);
 
     if (EDIT_MODES.has(this.mode)) {
-      this.editor.update(dt);
+      // The workbench has no simulation to keep honest; it just follows the
+      // clock so dragging stays smooth at any refresh rate.
+      this.editor.update(Math.min(elapsed, 1 / 20));
       this.editor.render();
-    } else {
-      this.input.update(dt);
-      this.field.update(dt);
-      this.field.render();
-      this.input.endFrame();
+      return;
     }
+
+    this.stepBank = Math.min(this.stepBank + elapsed, STEP * MAX_CATCH_UP);
+    let steps = 0;
+    while (this.stepBank >= STEP && steps < MAX_CATCH_UP) {
+      this.input.update(STEP);
+      this.field.update(STEP);
+      this.input.endFrame();
+      this.stepBank -= STEP;
+      steps++;
+    }
+    this.stepsThisFrame = steps;
+
+    this.field.present(elapsed);
+    this.field.render();
   }
 
   dispose() {

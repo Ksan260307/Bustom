@@ -366,13 +366,22 @@ export class Rig {
    * turning while you look at it.
    */
   updateRollers(dt) {
-    for (const r of [...this.rollers, ...this.rings]) {
-      const { dir, rpm } = r.part.spin;
-      r.angle = (r.angle + dir * rpm * (Math.PI / 30) * dt) % (Math.PI * 2);
-      r.spin.quaternion.setFromAxisAngle(r.axis, r.angle);
-    }
+    // Two loops rather than one over a joined array: the spread allocated a
+    // fresh array for every machine on every frame, to iterate a list that
+    // is usually empty.
+    for (const r of this.rollers) this._advanceSpin(r, dt);
+    for (const r of this.rings) this._advanceSpin(r, dt);
     return this;
   }
+
+  _advanceSpin(r, dt) {
+    const { dir, rpm } = r.part.spin;
+    r.angle = (r.angle + dir * rpm * (Math.PI / 30) * dt) % (Math.PI * 2);
+    r.spin.quaternion.setFromAxisAngle(r.axis, r.angle);
+  }
+
+  /** Does anything on this machine turn under its own power? */
+  get hasMovingParts() { return this.rollers.length > 0 || this.rings.length > 0; }
 
   /**
    * The flame a BOOST plate throws while the thruster is lit. It fires along

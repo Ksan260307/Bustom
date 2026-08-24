@@ -2446,6 +2446,191 @@ describe('the look of it', () => {
   });
 });
 
+describe('the fight runs on its own clock', () => {
+  /** Everything about the fight that a run has to reproduce exactly. */
+  const snapshot = () => {
+    const f = app.field;
+    const bits = [];
+    for (const r of [f.player, ...f.enemies]) {
+      bits.push(r.position.toArray().map((v) => v.toFixed(5)).join(','));
+      bits.push(r.body.inertia.velocity.toArray().map((v) => v.toFixed(5)).join(','));
+      bits.push(r.hp.toFixed(3), String(r.alive));
+    }
+    // Sorted: which slot of the pool a round happens to occupy is an
+    // implementation detail, not part of the fight.
+    bits.push(f.projectiles.pool
+      .filter((x) => x.life > 0)
+      .map((x) => x.mesh.position.toArray().map((v) => v.toFixed(4)).join(','))
+      .sort()
+      .join('|'));
+    return bits.join(';');
+  };
+
+  /**
+   * Play the same scripted match. `frameTime` is what the display is
+   * managing; the fight must not be able to tell the difference.
+   */
+  const play = ({ seed = 4242, frames = 90, frameTime = 1 / 60, before = null } = {}) => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.input.setEnabled(true);
+    // A known starting point for every machine, not just the player: two
+    // runs cannot match if the second one starts with the first one's
+    // damage still on the board.
+    app.field.restart(seed);
+    app.stepBank = 0;
+    before?.();
+
+    const realDelta = app.clock.getDelta.bind(app.clock);
+    app.clock.getDelta = () => frameTime;
+    try {
+      for (let i = 0; i < frames; i++) {
+        // The script is written in SECONDS, not in frames, and every change
+        // lands on a fifth of a second. Keyed off the frame counter it would
+        // be a different script at a different frame rate, and the test
+        // would be comparing two different matches rather than one match
+        // shown at two speeds.
+        const t = i * frameTime;
+        app.input.keys.clear();
+        if (t >= 0.2) app.input.keys.add('KeyW');
+        if (t >= 0.4 && Math.floor(t / 0.2) % 2 === 0) app.input.keys.add('Mouse0');
+        app.frame();
+      }
+    } finally {
+      app.input.keys.clear();
+      app.clock.getDelta = realDelta;
+    }
+    const out = snapshot();
+    app.setMode('edit');
+    return out;
+  };
+
+  it('the same seed and the same keys give the same match', () => {
+    const a = play({ seed: 4242 });
+    expect(a.length, 'something happened').toBeGreaterThan(50);
+    expect(play({ seed: 4242 }), 'twice over').toBe(a);
+  });
+
+  it('a different seed gives a different match', () => {
+    expect(play({ seed: 4242 })).not.toBe(play({ seed: 777 }));
+  });
+
+  it('a slow display does not change the fight', () => {
+    // Half the frames at twice the frame time is the same amount of time.
+    // Before the fixed step, this alone changed the outcome — which meant a
+    // match could never be replayed, and a dropped frame quietly rewrote it.
+    const fast = play({ seed: 4242, frames: 120, frameTime: 1 / 60 });
+    const slow = play({ seed: 4242, frames: 60, frameTime: 1 / 30 });
+    expect(slow).toBe(fast);
+  });
+
+  it('a frame too fast to need a step still shows a frame', () => {
+    app.setMode('edit');
+    app.setMode('field');
+    const realDelta = app.clock.getDelta.bind(app.clock);
+    app.clock.getDelta = () => 1 / 400;      // way above the step rate
+    try {
+      app.stepBank = 0;
+      const before = app.field.player.position.clone();
+      app.frame();
+      expect(app.stepsThisFrame, 'no simulation step was owed yet').toBe(0);
+      expect(app.field.player.position.distanceTo(before), 'and nothing moved').toBe(0);
+      // Summed, not read off the last frame: the owed time comes due on
+      // whichever frame crosses the step, and the frames after it are short
+      // again. Checking only the final frame asks the wrong question.
+      let paid = 0;
+      for (let i = 0; i < 8; i++) { app.frame(); paid += app.stepsThisFrame; }
+      expect(paid, 'the owed time adds up and is paid').toBeGreaterThan(0);
+    } finally {
+      app.clock.getDelta = realDelta;
+      app.setMode('edit');
+    }
+  });
+
+  it('a very long frame is capped rather than caught up all at once', () => {
+    app.setMode('edit');
+    app.setMode('field');
+    const realDelta = app.clock.getDelta.bind(app.clock);
+    app.clock.getDelta = () => 2.0;          // a two-second stall
+    try {
+      app.stepBank = 0;
+      app.frame();
+      // Running two seconds of simulation in one frame makes the next frame
+      // later still. The game slows down instead, which is recoverable.
+      expect(app.stepsThisFrame).toBeLessThan(8);
+      expect(app.stepsThisFrame).toBeGreaterThan(0);
+    } finally {
+      app.clock.getDelta = realDelta;
+      app.setMode('edit');
+    }
+  });
+
+  it('where the camera points does not change the fight', () => {
+    const straight = play({ seed: 4242 });
+    const swung = play({
+      seed: 4242,
+      before: () => { app.field.cameraRig.orbitBy(2.4, 0.7); app.field.cameraRig.zoomBy(3); },
+    });
+    expect(swung, 'the camera is output, not input').toBe(straight);
+  });
+
+  it('how often the read-out is drawn does not change the fight', () => {
+    const normal = play({ seed: 4242 });
+    const hudOff = play({ seed: 4242, before: () => { app.field.hudBank = -999; } });
+    expect(hudOff).toBe(normal);
+  });
+
+  it('posing distant machines less often is decided by the fight, not the screen', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.field.respawn();
+    step(4);
+
+    const player = app.field.player;
+    const far = app.field.enemies.find((e) => e.alive);
+    far.body.reset(new THREE.Vector3(0, 3, 140));
+    far.syncTransform();
+    step(2);
+    expect(far.poseInterval, 'far away, posed less often').toBeGreaterThan(1);
+    expect(player.poseInterval, 'the one you are flying, always').toBe(1);
+
+    far.body.reset(new THREE.Vector3(0, 3, 4));
+    far.syncTransform();
+    step(2);
+    expect(far.poseInterval, 'up close, every step').toBe(1);
+    app.setMode('edit');
+  });
+
+  it('a machine posed less often still keeps up with the walk', () => {
+    // The skipped time is handed to the next pose, so the legs swing at the
+    // right speed — they are just sampled less finely.
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.field.respawn();
+    app.input.setEnabled(true);
+
+    const gait = (interval) => {
+      app.field.respawn();
+      const r = app.field.player;
+      app.input.keys.add('KeyW');
+      step(120);
+      app.input.keys.clear();
+      r.poseInterval = interval;
+      const before = r.animator.gaitPhase;
+      step(30);
+      return (r.animator.gaitPhase - before + 1) % 1;
+    };
+    const full = gait(1);
+    const thin = gait(3);
+    expect(Math.abs(thin - full), 'the cycle advances at the same rate')
+      .toBeLessThan(0.2);
+    app.setMode('edit');
+  });
+});
+
 describe('sculpting', () => {
   it('carves, adds and paints at the default resolution', () => {
     app.loadPreset('core');

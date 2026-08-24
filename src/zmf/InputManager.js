@@ -224,13 +224,28 @@ export class InputManager {
 
   setEnabled(on) {
     this.enabled = on;
-    if (!on) {
-      this.keys.clear();
-      this.move.set(0, 0, 0);
-      this.mouse.dx = this.mouse.dy = this.mouse.wheel = 0;
-      this.cameraLook.yaw = this.cameraLook.pitch = 0;
-      this.zoomDelta = 0;
-    }
+    if (!on) this.clearState();
+  }
+
+  /**
+   * Forget everything half-finished: keys believed to be down, buffered
+   * commands, a dash that was one tap from firing.
+   *
+   * Anything left over crosses into the next match. A double-tap started in
+   * the editor should not launch a dash the moment the arena opens, and a
+   * fight replayed from its start has to begin with the same empty hands
+   * every time or it is not the same fight.
+   */
+  clearState() {
+    this.keys.clear();
+    this.pressed.clear();
+    this.buffer.length = 0;
+    this.dash = null;
+    this.move.set(0, 0, 0);
+    this.mouse.dx = this.mouse.dy = this.mouse.wheel = 0;
+    this.cameraLook.yaw = this.cameraLook.pitch = 0;
+    this.zoomDelta = 0;
+    return this;
   }
 
   requestPointerLock() {

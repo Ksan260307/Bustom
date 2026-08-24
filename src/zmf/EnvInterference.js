@@ -42,6 +42,18 @@ export class EnvironmentInterference {
    * @param {number} radius           collision radius of the machine
    * @param {number} rideHeight       distance from the body origin down to the feet
    */
+  /** Forget what was underneath and beside the machine. */
+  reset() {
+    this.repulsion.set(0, 0, 0);
+    this.groundNormal.set(0, 1, 0);
+    this.grounded = 0;
+    this.groundY = 0;
+    this.contact = null;
+    this.slideFactor = 0;
+    this.impactImpulse = 0;
+    return this;
+  }
+
   probe(position, velocity, inputDir, radius, rideHeight, dt) {
     this.repulsion.set(0, 0, 0);
     this.impactImpulse = 0;

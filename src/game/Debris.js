@@ -18,9 +18,16 @@ const _q = new THREE.Quaternion();
 const _axis = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 
-const rand = (a, b) => a + Math.random() * (b - a);
+/**
+ * Wreckage is decoration: it never touches anything that decides the
+ * fight, so it draws from the presentation stream. Keeping it off the
+ * simulation stream means throwing more sparks can never move a bullet.
+ */
+let rng = null;
+const rand = (a, b) => (rng ? rng.range(a, b) : a + Math.random() * (b - a));
 
 function randomAxis(out) {
+  if (rng) return rng.direction(out);
   return out.set(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize();
 }
 
@@ -29,10 +36,11 @@ export class Debris {
    * @param {THREE.Scene} scene
    * @param {import('./World.js').World} world
    */
-  constructor(scene, world, { maxPieces = 120, blasts = 6 } = {}) {
+  constructor(scene, world, { maxPieces = 120, blasts = 6, random = null } = {}) {
     this.scene = scene;
     this.world = world;
     this.maxPieces = maxPieces;
+    this.random = random;
 
     this.group = new THREE.Group();
     this.group.name = 'debris';
@@ -103,6 +111,7 @@ export class Debris {
    * @param {{power?: number, sparks?: number}} [opts]
    */
   burst(robot, { power = 1, sparks = 18 } = {}) {
+    rng = this.random;
     robot.object3D.updateMatrixWorld(true);
     const centre = _v.copy(robot.position).clone();
     // Half the machine's extent: a fireball measured off the full bounding
@@ -139,7 +148,7 @@ export class Debris {
         mesh,
         vel,
         axis: randomAxis(new THREE.Vector3()),
-        spin: rand(3, 11) * (Math.random() < 0.5 ? -1 : 1),
+        spin: rand(3, 11) * (rng ? rng.sign() : (Math.random() < 0.5 ? -1 : 1)),
         life: rand(3.2, 4.6),
         fade: 1.1,
         spark: false,
@@ -177,7 +186,7 @@ export class Debris {
    * A flash on its own, with no wreck behind it — what a grenade leaves.
    * Same effect the destruction burst uses, so explosions all read alike.
    */
-  blast(at, scale = 1) { return this._blast(at, scale); }
+  blast(at, scale = 1) { rng = this.random; return this._blast(at, scale); }
 
   _blast(at, scale) {
     const b = this.blasts.find((x) => x.life <= 0) ?? this.blasts[0];

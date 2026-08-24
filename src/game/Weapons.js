@@ -25,6 +25,8 @@ const _seg = new THREE.Vector3();
 const _near = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 const _zero = new THREE.Vector3();
+/** +Z, the axis every bolt and beam is modelled along. */
+const _FORWARD = new THREE.Vector3(0, 0, 1);
 
 /**
  * Closest approach of the segment a→b to a sphere. Writes the contact point
@@ -185,7 +187,7 @@ export class Projectiles {
     _seg.copy(to).sub(from);
     const len = Math.max(0.01, _seg.length());
     b.mesh.position.copy(from).addScaledVector(_seg, 0.5);
-    b.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), _seg.normalize());
+    b.mesh.quaternion.setFromUnitVectors(_FORWARD, _seg.normalize());
     b.mesh.scale.set(width, width, len);
     return b;
   }
@@ -242,7 +244,8 @@ export class Projectiles {
     _dir.copy(s.velocity);
     if (_dir.lengthSq() < 1e-8) return;
     _dir.normalize();
-    s.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), _dir);
+    // Allocating a constant here cost one vector per live round per frame.
+    s.mesh.quaternion.setFromUnitVectors(_FORWARD, _dir);
     if (s.kind === 'missile') {
       const k = s.radius;
       s.mesh.scale.set(k * 0.9, k * 0.9, k * 2.6);
@@ -377,7 +380,17 @@ export class Projectiles {
 
   get liveCount() { return this.pool.reduce((n, s) => n + (s.life > 0 ? 1 : 0), 0); }
 
-  clear() { for (const s of this.pool) this._kill(s); return this; }
+  /**
+   * Empty the pool. The cursor goes back to the start too, so a cleared
+   * pool is indistinguishable from a fresh one — otherwise the same volley
+   * lands in different slots depending on what was fired before it, which
+   * makes two runs of the same match look different when they are not.
+   */
+  clear() {
+    for (const s of this.pool) this._kill(s);
+    this._cursor = 0;
+    return this;
+  }
 
   dispose() {
     this.clear();
@@ -410,6 +423,13 @@ export class WeaponSystem {
   /** @param {import('./Robot.js').Robot} robot */
   constructor(robot) {
     this.robot = robot;
+    /**
+     * Where scatter comes from. Handed in by whoever owns the fight so
+     * every machine draws from the same replayable stream; a private
+     * generator would make the salvo depend on how many machines happened
+     * to fire before it.
+     */
+    this.random = robot.random ?? null;
     this.slots = [];
     /** Which plate the trigger is wired to. */
     this.activeIndex = 0;
@@ -512,8 +532,9 @@ export class WeaponSystem {
     let blade = 0;
 
     // World transforms are read straight off the posed rig, so a plate on a
-    // swinging arm really does fire from where the arm is pointing.
-    this.robot.object3D.updateMatrixWorld(true);
+    // swinging arm really does fire from where the arm is pointing. The
+    // machine refreshes them once after posing itself; re-forcing a full
+    // traversal here only recomputed matrices that were already correct.
 
     const live = this.active;
     this.scoped = !!scoping && !!live?.meta.scope;
@@ -631,17 +652,19 @@ export class WeaponSystem {
           _dir.applyAxisAngle(_localUp, (i - (shots - 1) / 2) * meta.spread);
         } else {
           // Scatter in both axes, so held fire reads as a stream not a line.
-          _dir.applyAxisAngle(_localUp, (Math.random() - 0.5) * meta.spread);
-          _dir.applyAxisAngle(_right, (Math.random() - 0.5) * meta.spread);
+          const rng = this.random;
+          _dir.applyAxisAngle(_localUp, (rng ? rng.signed() * 0.5 : 0) * meta.spread);
+          _dir.applyAxisAngle(_right, (rng ? rng.signed() * 0.5 : 0) * meta.spread);
         }
       }
       // A salvo is thrown WIDE and then homes back in. Without the scatter
       // five homing missiles fly as one missile with five sprites in it.
       let speed = meta.speed;
       if (meta.scatter && shots > 1) {
+        const rng = this.random;
         _dir.applyAxisAngle(direction, (i / shots) * Math.PI * 2);
-        _dir.applyAxisAngle(_right, (Math.random() - 0.5) * meta.scatter);
-        speed *= 0.8 + Math.random() * 0.4;
+        _dir.applyAxisAngle(_right, (rng ? rng.signed() * 0.5 : 0) * meta.scatter);
+        if (rng) speed *= 0.8 + rng.unit() * 0.4;
       }
       projectiles.spawn({
         position,
