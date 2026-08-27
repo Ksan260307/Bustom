@@ -4,15 +4,25 @@
   "version": "0.1.0",
   "type": "module",
   "description": "BroStom - block robot assembly & battle game",
+  "author": "Ksan",
+  "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:browser": "vite --open /tests.html"
+    "test:browser": "vite --open /tests.html",
+    "build:release": "vite build --mode release",
+    "game": "npm run build:release && electron .",
+    "game:dev": "electron . --dev-server=http://localhost:3000",
+    "pack": "npm run build:release && electron-builder --dir",
+    "dist:win": "npm run build:release && electron-builder --win",
+    "dist:linux": "npm run build:release && electron-builder --linux"
   },
   "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
     "vite": "^5.4.10",
     "vitest": "^2.1.9"
   },
@@ -21,7 +31,40 @@
     "qrcode-generator": "^2.0.4",
     "three": "^0.169.0"
   },
+  "build": {
+    "appId": "com.ksan.brostom",
+    "productName": "BroStom",
+    "executableName": "BroStom",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "dir"
+      ],
+      "signAndEditExecutable": false
+    },
+    "linux": {
+      "target": [
+        "dir"
+      ],
+      "category": "Game"
+    },
+    "mac": {
+      "target": [
+        "dir"
+      ],
+      "category": "public.app-category.games"
+    }
+  },
   "allowScripts": {
-    "esbuild@0.21.5": true
+    "esbuild@0.21.5": true,
+    "electron@33.4.11": true
   }
 }

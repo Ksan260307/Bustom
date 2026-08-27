@@ -2718,6 +2718,93 @@ describe('the title screen', () => {
     expect(app.mode).toBe('edit');
   });
 
+  it('hovering an entry does not rebuild the button under the cursor', () => {
+    // This is a whole bug in one test.
+    //
+    // The menu used to redraw itself on hover, which destroyed the very
+    // button the pointer was over. A real click is a press and a release on
+    // the SAME element; with the element swapped out in between, the browser
+    // fires no click at all. The menu still lit up under the cursor, so it
+    // looked alive while being completely dead to the mouse — and every
+    // test passed, because calling .click() or choose() never goes near
+    // hit-testing or the press/release pair.
+    app.goTitle();
+    app.ui.title.index = 0;
+    app.ui.title.render();
+
+    const target = document.querySelectorAll('#title .titleitem')[1];
+    target.dispatchEvent(new MouseEvent('mouseenter'));
+
+    expect(document.contains(target), 'the same node survives being hovered').toBe(true);
+    expect(target.classList.contains('active'), 'and it is the one lit up').toBe(true);
+    expect(app.ui.title.index).toBe(1);
+
+    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    expect(document.contains(target), 'still there between press and release').toBe(true);
+    target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    target.click();
+    expect(app.mode, 'so the press actually lands').toBe('edit');
+  });
+
+  it('moving the highlight by keyboard keeps the same buttons too', () => {
+    app.goTitle();
+    app.ui.title.index = 0;
+    app.ui.title.render();
+    const before = [...document.querySelectorAll('#title .titleitem')];
+
+    app.ui.title.move(1);
+    const after = [...document.querySelectorAll('#title .titleitem')];
+    expect(after.every((el, i) => el === before[i]), 'the same nodes, repainted').toBe(true);
+    expect(after[1].classList.contains('active')).toBe(true);
+    expect(after[0].classList.contains('active')).toBe(false);
+    app.setMode('edit');
+  });
+
+  it('offers fullscreen everywhere, and quitting only where there is something to quit', () => {
+    app.goTitle();
+    const ids = () => app.ui.title.items.map((i) => i.id);
+    expect(ids(), 'fullscreen works in both places').toContain('fullscreen');
+    expect(ids(), 'a browser tab has no game to quit').not.toContain('quit');
+
+    // Stand in for the desktop shell's bridge. The menu is composed on read
+    // for exactly this reason: what the platform offers is not known when
+    // the screen is built.
+    const calls = [];
+    window.desktop = {
+      platform: 'desktop',
+      quit: () => calls.push('quit'),
+      toggleFullscreen: async () => true,
+      isFullscreen: async () => false,
+      steam: {
+        status: async () => ({ available: false, reason: 'test', appId: 0, playerName: '' }),
+        unlock: (id) => calls.push(`unlock:${id}`),
+      },
+    };
+    try {
+      app.ui.title.render();
+      expect(ids(), 'a shipped game needs a way out').toContain('quit');
+      expect(document.querySelectorAll('#title .titleitem').length).toBe(ids().length);
+      app.ui.title.choose('quit');
+      expect(calls, 'and it goes through the bridge, not through the page').toEqual(['quit']);
+    } finally {
+      delete window.desktop;
+    }
+
+    app.ui.title.render();
+    expect(ids(), 'and it goes away again in a browser').not.toContain('quit');
+    app.setMode('edit');
+  });
+
+  it('asking for fullscreen in a browser does not throw', async () => {
+    // Refused without a user gesture, which is the normal case in a test.
+    // The point is that it resolves either way instead of throwing.
+    app.goTitle();
+    const before = app.ui.title.index;
+    app.ui.title.choose('fullscreen');
+    expect(app.ui.title.index, 'the menu is unmoved by the answer').toBe(before);
+    app.setMode('edit');
+  });
+
   it('shows the best run so far, once there has been one', () => {
     localStorage.removeItem('brostom.solo.best.v1');
     app.goTitle();

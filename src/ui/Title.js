@@ -1,4 +1,5 @@
 import { h } from './dom.js';
+import { onDesktop, quitGame, toggleFullscreen, steamStatus } from '../platform/desktop.js';
 
 // ============================================================
 //  The title screen and the result screen.
@@ -60,7 +61,11 @@ export class TitleScreen {
      * then the workshop, then the things you only want once you have
      * played. `run` is called on the app, never on the scene.
      */
-    this.items = [
+    /**
+     * The menu, before the platform has its say. Everything in here works
+     * anywhere the game runs.
+     */
+    this.baseItems = [
       {
         id: 'solo',
         label: 'ソロプレイ',
@@ -95,6 +100,7 @@ export class TitleScreen {
 
     this.listEl = h('div', { class: 'titlemenu' });
     this.bestEl = h('div', { class: 'titlebest' });
+    this.platformEl = h('span', { class: 'titleplatform' });
 
     this.el = h('div', { id: 'title', class: 'hidden' },
       h('div', { class: 'titleinner' },
@@ -107,13 +113,40 @@ export class TitleScreen {
         h('div', { class: 'titlefoot' },
           h('span', {}, h('kbd', {}, '↑'), h('kbd', {}, '↓'), ' 選択'),
           h('span', {}, h('kbd', {}, 'Enter'), ' 決定'),
+          h('span', {}, h('kbd', {}, 'F11'), ' 全画面'),
           h('span', {}, h('kbd', {}, 'F1'), ' 使い方'),
+          this.platformEl,
         ),
       ),
     );
 
     this._onKey = (e) => this._key(e);
     window.addEventListener('keydown', this._onKey);
+  }
+
+  /**
+   * The menu as it stands on THIS machine.
+   *
+   * Composed on read rather than built once, because what the platform can
+   * offer is not known for certain when this object is constructed — and
+   * because a browser tab genuinely has no "quit the game" to offer.
+   */
+  get items() {
+    const extra = [{
+      id: 'fullscreen',
+      label: 'フルスクリーン',
+      note: '画面いっぱいに表示する（F11）',
+      run: () => { toggleFullscreen(); },
+    }];
+    if (onDesktop()) {
+      extra.push({
+        id: 'quit',
+        label: 'ゲームを終了',
+        note: 'ウインドウを閉じてゲームを終わる',
+        run: () => quitGame(),
+      });
+    }
+    return [...this.baseItems, ...extra];
   }
 
   setOpen(on) {
@@ -130,8 +163,26 @@ export class TitleScreen {
   /** Move the highlight, wrapping at both ends. */
   move(delta) {
     const n = this.items.length;
-    this.index = ((this.index + delta) % n + n) % n;
-    this.render();
+    return this.highlight(((this.index + delta) % n + n) % n);
+  }
+
+  /**
+   * Put the highlight on one entry.
+   *
+   * This repaints the existing buttons rather than rebuilding them, and
+   * that is not an optimisation — it is the difference between a menu that
+   * works and one that does not. Rebuilding on hover destroys the very
+   * button the pointer is over: the mouse goes down on one element and up
+   * on its replacement, the browser sees no single target for the pair, and
+   * NO CLICK IS EVER FIRED. The menu still lights up under the cursor, so
+   * it looks alive while being completely dead.
+   */
+  highlight(index) {
+    this.index = index;
+    const nodes = this.listEl.children;
+    for (let i = 0; i < nodes.length; i++) {
+      nodes[i].classList.toggle('active', i === this.index);
+    }
     return this;
   }
 
@@ -165,11 +216,13 @@ export class TitleScreen {
     this.listEl.replaceChildren(...this.items.map((item, i) => h('button', {
       class: `titleitem${i === this.index ? ' active' : ''}`,
       onClick: () => { this.index = i; this.choose(); },
-      onMouseEnter: () => { this.index = i; this.render(); },
+      onMouseEnter: () => this.highlight(i),
     },
       h('span', { class: 'ti-label' }, item.label),
       h('span', { class: 'ti-note' }, item.note),
     )));
+
+    this._showPlatform();
 
     const best = loadBest();
     this.bestEl.replaceChildren(
@@ -179,6 +232,21 @@ export class TitleScreen {
           ' / WAVE ', h('b', {}, String(best.wave)))
         : h('span', { class: 'dim' }, 'まだ記録がありません'),
     );
+    return this;
+  }
+
+  /**
+   * Name the platform in the footer, once. Asked for at most once per
+   * session: it cannot change while the game is running, and the answer
+   * crosses a process boundary.
+   */
+  _showPlatform() {
+    if (!onDesktop() || this._platformAsked) return this;
+    this._platformAsked = true;
+    steamStatus().then((s) => {
+      if (!s.available) return;
+      this.platformEl.textContent = s.playerName ? `STEAM ・ ${s.playerName}` : 'STEAM';
+    });
     return this;
   }
 

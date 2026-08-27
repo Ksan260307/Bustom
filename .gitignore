@@ -2,3 +2,12 @@ node_modules/
 dist/
 .vite/
 *.log
+
+# desktop builds
+release/
+release2/
+
+# Per-developer: the App ID Steam looks for when the game is started outside
+# the client. Never checked in, since it differs between the placeholder and
+# the real one.
+steam_appid.txt
