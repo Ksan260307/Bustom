@@ -752,6 +752,11 @@ export class App {
       }
 
       if (editing) {
+        // Framing. F is a tool key here, so these follow the other
+        // convention: full stop for the selection, Home for the lot.
+        if (e.code === 'Period') { e.preventDefault(); this.editor.frameSelection(); return; }
+        if (e.code === 'Home') { e.preventDefault(); this.editor.frameAll(); return; }
+
         const tool = TOOL_KEYS[e.code];
         if (tool) { e.preventDefault(); this.setTool(tool); }
         if (e.code === 'KeyT') { e.preventDefault(); this.setGizmoMode('translate'); }

@@ -62,6 +62,7 @@ export class VoxelBlock {
     this._dirty = new Uint8Array(this.chunkCount).fill(1);
     this._geometry = null;
     this._paletteVersion = -1;
+    this._pristineFor = null;
 
     if (old && resample) this._resampleFrom(old);
     return this;
@@ -188,11 +189,13 @@ export class VoxelBlock {
       }
     }
     this._geometry = null;
+    this._pristineFor = null;
   }
 
   markAllDirty() {
     this._dirty.fill(1);
     this._geometry = null;
+    this._pristineFor = null;
   }
 
   // ---------------------------------------------------------- bulk ops
@@ -250,8 +253,24 @@ export class VoxelBlock {
    *
    * Colour is ignored: repainting a sphere leaves it a sphere. Only which
    * cells are solid decides.
+   *
+   * The answer is CACHED, because saving asks this about every block and a
+   * save happens on every edit (that is what the undo stack is made of). The
+   * cache is thrown away wherever the grid is marked dirty — which is every
+   * path that writes a cell, since that is also how the mesh knows to
+   * rebuild. Tying it to the existing dirty flags rather than to a flag of
+   * its own is what makes it impossible to answer "untouched" about a grid
+   * somebody has touched.
    */
   isPristine(shape) {
+    if (this._pristineFor === shape) return this._pristineValue;
+    const answer = this._scanPristine(shape);
+    this._pristineFor = shape;
+    this._pristineValue = answer;
+    return answer;
+  }
+
+  _scanPristine(shape) {
     const mask = shapeMask(shape);
     const n = this.n;
     const step = 2 / n;

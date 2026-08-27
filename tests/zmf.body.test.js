@@ -389,8 +389,12 @@ describe('ground lock-on', () => {
     input.move.set(0, 0, 1);
     input.intensity = 1;
     // Long enough to have turned, short enough that it has not yet arrived:
-    // once it flies past the target the correct answer is to turn round again.
-    run(b, input, 3);
+    // once it flies past the target the correct answer is to turn round
+    // again, which looks exactly like failing this test. Two seconds leaves
+    // the machine some twenty metres short of it. Moving the target further
+    // out instead does not work — the assist ignores anything past its
+    // range, and then nothing turns at all.
+    run(b, input, 2);
 
     expect(b.forward.x, 'it turned to face the target').toBeGreaterThan(0.7);
     expect(Math.abs(b.forward.y), 'without tipping the chassis').toBeLessThan(0.05);

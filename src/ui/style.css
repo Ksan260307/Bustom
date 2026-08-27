@@ -1146,3 +1146,39 @@ button:disabled:hover { background: rgba(255, 255, 255, 0.045); border-color: va
 .resultbuttons { display: flex; flex-direction: column; gap: 6px; }
 .resultbuttons button { padding: 9px 12px; margin-top: 0; }
 
+
+/* ---------------------------------------------------------- parts list */
+
+.tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.treerow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  text-align: left;
+  font-size: 10px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.treerow:hover { background: rgba(255, 255, 255, 0.06); }
+
+.treerow.active {
+  background: var(--accent-dim);
+  border-color: rgba(79, 210, 255, 0.4);
+  color: #eafaff;
+}
+
+.treerow .tk { color: var(--dim); width: 10px; flex: none; }
+.treerow.active .tk { color: var(--accent); }
+.treerow .tn { overflow: hidden; text-overflow: ellipsis; }

@@ -19,6 +19,7 @@ const DEG = Math.PI / 180;
 const TAU = Math.PI * 2;
 
 const _q = new THREE.Quaternion();
+const _euler = new THREE.Euler();
 const _q2 = new THREE.Quaternion();
 const _v = new THREE.Vector3();
 const _axis = new THREE.Vector3();
@@ -243,8 +244,10 @@ export class Animator {
     this.bodyBob = damp(this.bodyBob, bobTarget, bobHalfLife, dt);
 
     const localVel = this.localVel.copy(s.velocity).applyQuaternion(_q.copy(s.bodyQ).invert());
-    this.bodyLean.x = damp(this.bodyLean.x, clamp(localVel.z * 0.012, -0.20, 0.20), 0.15, dt);
-    this.bodyLean.y = damp(this.bodyLean.y, clamp(-localVel.x * 0.010, -0.16, 0.16), 0.15, dt);
+    // Lean INTO the run. A machine that stays bolt upright while sprinting is
+    // the other half of looking rigid: the legs move and the body does not.
+    this.bodyLean.x = damp(this.bodyLean.x, clamp(localVel.z * 0.019, -0.28, 0.28), 0.15, dt);
+    this.bodyLean.y = damp(this.bodyLean.y, clamp(-localVel.x * 0.014, -0.20, 0.20), 0.15, dt);
 
     // ---- travel direction
     // Rotated toward the target rather than lerped: a straight reversal would
@@ -587,7 +590,18 @@ export class Animator {
    * lock exists they abandon the gait and point down the firing line.
    */
   _arms(s, dt) {
-    const swingAmp = lerp(4, 26, clamp01(this.gaitFreq / 2.6)) * DEG;
+    const drive = clamp01(this.gaitFreq / 2.6);
+    const swingAmp = lerp(4, 34, drive) * DEG;
+    /**
+     * How far a chained arm folds at rest, before any swing.
+     *
+     * An arm that runs with its elbow locked straight is the single thing
+     * that makes a walking machine read as a mannequin being dragged along —
+     * the legs can be doing everything right and it still looks rigid. The
+     * fold grows with the stride, so standing still keeps the arms nearly
+     * straight and a run carries them up.
+     */
+    const fold = lerp(5, 42, drive) * DEG;
 
     for (const node of this.rig.armBones) {
       const phaseSide = node.side >= 0 ? 0 : 0.5;
@@ -599,10 +613,13 @@ export class Animator {
       const p = this._phaseFor(node, phaseSide + chainLag);
       const swing = -Math.sin(p * TAU) * swingAmp * chainFalloff;
       const idleFloat = Math.sin(this.time * 1.3 + node.restPos.x * 2) * 3 * DEG;
+      // Negative folds the tip forward: the elbow closes rather than opening
+      // backwards into a shape no arm makes.
+      const bend = depth > 0 ? -fold : 0;
 
       _q.setFromAxisAngle(
         this._strideAxis(node),
-        (swing + idleFloat + s.thrust * 12 * DEG) * Animator.gainOf(node),
+        (swing + bend + idleFloat + s.thrust * 12 * DEG) * Animator.gainOf(node),
       );
 
       if (s.aimDir && this.aimBlend > 0.001) {
@@ -711,7 +728,8 @@ export class Animator {
   /** Visual-only body offset: bob and lean, applied by the caller. */
   applyBodyCarriage(object) {
     object.position.y += this.bodyBob;
-    _q.setFromEuler(new THREE.Euler(this.bodyLean.x, 0, this.bodyLean.y, 'XZY'));
+    _euler.set(this.bodyLean.x, 0, this.bodyLean.y, 'XZY');
+    _q.setFromEuler(_euler);
     object.quaternion.multiply(_q);
   }
 }

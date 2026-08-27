@@ -26,7 +26,9 @@ describe('share codes', () => {
 
   it('keeps everything that makes a build what it is', async () => {
     const a = PRESETS.biped.build();
-    const chest = [...a.parts.values()].find((p) => p.size?.[0] === 1.5);
+    // By name, not by size: picking a part out by how wide it happens to be
+    // means the test breaks the next time anyone redraws the machine.
+    const chest = [...a.parts.values()].find((p) => p.label === 'CHEST');
     const shotId = a.addEquipOnFace(chest.id, 4, EQUIP.SHOT, {
       size: 0.9, bulletColor: 0x6bff6b,
     }).id;
@@ -80,10 +82,17 @@ describe('share codes', () => {
 
   it('compresses hard enough to fit in a QR', async () => {
     for (const key of Object.keys(PRESETS)) {
+      const raw = JSON.stringify(PRESETS[key].build().toJSON());
       const info = await measureShare(PRESETS[key].build());
       expect(info.bytes, key).toBeLessThan(QR_BYTE_LIMIT);
-      expect(info.bytes, `${key} is much smaller than the raw JSON`)
-        .toBeLessThan(JSON.stringify(PRESETS[key].build().toJSON()).length / 2);
+      // Only claimed where there is something to squeeze: a bare core is a
+      // few hundred bytes of JSON with no redundancy in it, and base64 adds
+      // a third back on top. Halving that would be a claim about arithmetic,
+      // not about the codec.
+      if (raw.length > 2000) {
+        expect(info.bytes, `${key} is much smaller than the raw JSON`)
+          .toBeLessThan(raw.length / 2);
+      }
     }
   });
 

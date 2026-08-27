@@ -7,6 +7,7 @@ import {
   EQUIP_SIZE_MIN, EQUIP_SIZE_MAX, EQUIP_SIZE_STEP,
   SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_WAVES, CUSTOM_SOURCES,
   CIRCLE_RADIUS_MIN, CIRCLE_RADIUS_MAX, CIRCLE_RADIUS_STEP, EQUIP,
+  RING_PLANES, RING_PLANE_DEFAULT,
   BONE_GAIN_MAX, BONE_LAG_MAX,
 } from '../core/constants.js';
 import { PRESETS } from '../core/Assembly.js';
@@ -295,6 +296,10 @@ export class EditorUI {
     this.previewToggle = h('input', {
       type: 'checkbox', onChange: (e) => app.editor.setPreviewMotion(e.target.checked),
     });
+    this.ringGuideToggle = h('input', {
+      type: 'checkbox', checked: 'checked',
+      onChange: (e) => app.editor.setRingGuides(e.target.checked),
+    });
 
     // Each tool brings its own settings and takes them away again: with a
     // dozen sliders stacked up, the panel is longer than the screen and the
@@ -330,6 +335,7 @@ export class EditorUI {
             ...this.toolSections,
             h('label', { class: 'checkline' }, this.symmetryToggle, '左右対称でつける'),
             h('label', { class: 'checkline' }, this.previewToggle, '歩行プレビュー'),
+            h('label', { class: 'checkline' }, this.ringGuideToggle, 'サークルの円線を表示'),
           ),
         ),
       ),
@@ -358,10 +364,26 @@ export class EditorUI {
 
     // Anchored to the right, so its width grip is on the LEFT edge: that is
     // the side that actually moves when the panel gets wider.
+    this.treeEl = h('div', { class: 'tree' });
+    this.treeCount = h('span', { class: 'note', style: 'margin:0' }, '0');
+    this.treeSection = collapsible(
+      'パーツ一覧',
+      h('div', { class: 'body' },
+        h('div', { class: 'row tight' },
+          h('span', { class: 'note', style: 'margin:0' }, '見えない所のパーツもここから選べます'),
+          h('div', { class: 'spacer' }),
+          this.treeCount,
+        ),
+        this.treeEl,
+      ),
+      { open: false },
+    );
+
     this.rightScroll = h('div', { class: 'panelscroll' });
     this.rightPanel = resizable(
       h('div', { class: 'panel', id: 'rightpanel' },
         append(this.rightScroll,
+          this.treeSection,
           this.librarySection,
           collapsible('色', h('div', { class: 'body' },
             this.paletteEl,
@@ -383,6 +405,8 @@ export class EditorUI {
       h('span', {}, h('b', {}, '右ドラッグ'), '平行移動'),
       h('span', {}, h('b', {}, 'クリック'), '設置 / 選択'),
       h('span', {}, h('b', {}, 'Ctrl+click'), '複数選択'),
+      h('span', {}, h('b', {}, '同じ所を再クリック'), '奥のパーツ'),
+      h('span', {}, h('b', {}, '. / Home'), '選択に寄る / 全体'),
       h('span', {}, h('b', {}, 'T / R'), 'ギズモ'),
       h('span', {}, h('b', {}, 'J'), '連結'),
       h('span', {}, h('b', {}, 'Ctrl+Z'), '元に戻す'),
@@ -631,9 +655,71 @@ export class EditorUI {
   // ---------------------------------------------------------- inspector
 
   /** @param {Array} parts every selected part */
+  /**
+   * The parts list: every part in the build, as the tree it actually is.
+   *
+   * The 3D view can only ever select what a ray can reach, and a machine
+   * worth building hides things on purpose — a core inside a hull, a bone
+   * inside a limb, a plate under armour. Before this there was no way to
+   * select those at all. Indentation is the parent chain, so it also answers
+   * "what is this hanging off?", which the viewport cannot show either.
+   */
+  renderTree() {
+    const app = this.app;
+    const asm = app.assembly;
+    const selected = new Set(app.editor.selection ?? []);
+    const rows = [];
+
+    const KIND = {
+      core: { icon: '◈', label: 'コア' },
+      block: { icon: '▪', label: 'ブロック' },
+      bone: { icon: '⌇', label: 'ボーン' },
+      equip: { icon: '⬢', label: 'プレート' },
+    };
+
+    const walk = (id, depth) => {
+      const part = asm.get(id);
+      if (!part) return;
+      const kind = KIND[part.kind] ?? KIND.block;
+      // A name the builder gave it beats the shape it happens to be cut
+      // from: "PELVIS" says more about a row than "面取り" ever will.
+      const named = part.label && part.label !== 'BLOCK' ? part.label : null;
+      const name = part.kind === 'bone'
+        ? (BONE_META[part.boneType]?.label ?? 'ボーン')
+        : part.kind === 'equip'
+          ? (EQUIP_META[part.equipType]?.label ?? 'プレート')
+          : part.kind === 'core' ? 'コア'
+            : named ?? (SHAPES[part.shape ?? SHAPE_DEFAULT]?.label ?? 'ブロック');
+
+      const row = h('button', {
+        class: `treerow${selected.has(id) ? ' active' : ''}`,
+        style: `padding-left:${6 + depth * 11}px`,
+        title: `${kind.label} / ${id}`,
+        onClick: (e) => {
+          app.editor.select(id, e.ctrlKey || e.metaKey);
+          // Selecting something you cannot see is only useful if the view
+          // then goes and finds it.
+          if (!(e.ctrlKey || e.metaKey)) app.editor.frameSelection();
+        },
+      },
+        h('span', { class: 'tk' }, kind.icon),
+        h('span', { class: 'tn' }, name),
+      );
+      rows.push(row);
+      for (const child of part.children) walk(child, depth + 1);
+    };
+
+    if (asm.rootId) walk(asm.rootId, 0);
+    this.treeEl.replaceChildren(...rows);
+    this.treeCount.textContent = `${asm.size}`;
+    return this;
+  }
+
   renderInspector(parts) {
     const list = Array.isArray(parts) ? parts : (parts ? [parts] : []);
     this.inspectorEl.replaceChildren();
+
+    this.renderTree();
 
     if (!list.length) {
       this.inspectorEl.append(h('div', { class: 'inspector-empty' },
@@ -796,6 +882,22 @@ export class EditorUI {
       if (part.spin) {
         const parent = app.assembly.get(part.parent);
         rows.push(h('h3', { class: 'inline' }, '回転'));
+
+        // A gimmick that never stops is a gimmick you cannot build on: the
+        // ring carries its riders out from under the cursor. This stops it
+        // here and only here — in the field it turns regardless.
+        const running = app.editor.gimmickRunning(part.id);
+        rows.push(h('div', { class: 'row tight' },
+          ...[[true, '動かす'], [false, '止める']].map(([on, label]) => h('button', {
+            class: running === on ? 'active' : '',
+            onClick: () => {
+              app.editor.setGimmickRunning(part.id, on);
+              this.renderInspector(app.editor.selectedParts());
+            },
+          }, label)),
+          h('div', { class: 'spacer' }),
+          h('span', { class: 'note', style: 'margin:0' }, '編集中だけ'),
+        ));
         rows.push(h('div', { class: 'row tight' },
           ...[[1, '正転 ↻'], [-1, '逆転 ↺']].map(([d, label]) => h('button', {
             class: part.spin.dir === d ? 'active' : '',
@@ -812,15 +914,50 @@ export class EditorUI {
             min: CIRCLE_RADIUS_MIN, max: CIRCLE_RADIUS_MAX, step: CIRCLE_RADIUS_STEP,
             value: part.ringRadius, fixed: 2, unit: ' m',
           }, (v) => app.editor.setEquipRingSelected(v)));
+
+          // Which way the circle lies. Without this the answer is decided
+          // entirely by which face the plate went on, and a plate on a chest
+          // draws its circle standing on edge — where nothing is standing.
+          rows.push(h('h3', { class: 'inline' }, '円線の向き'));
+          rows.push(h('div', { class: 'row tight' },
+            ...RING_PLANES.map((planeOpt) => h('button', {
+              class: (part.ringPlane ?? RING_PLANE_DEFAULT) === planeOpt.id ? 'active' : '',
+              title: planeOpt.note,
+              onClick: () => {
+                app.editor.setEquipRingPlaneSelected(planeOpt.id);
+                this.renderInspector(app.editor.selectedParts());
+              },
+            }, planeOpt.label))));
+
           const riders = app.editor.rig.nodes.get(part.id)?.ring?.members?.length ?? 0;
           rows.push(h('div', { class: 'stat' },
             h('span', { class: 'k' }, '回るパーツ'),
             h('span', { class: `v ${riders ? 'good' : 'warn'}` }, `${riders}`)));
+
+          // Zero riders is the one state that reads as "broken", so it says
+          // what would fix it instead of just showing a 0.
+          if (!riders) {
+            rows.push(h('div', { class: 'inspector-empty warn' },
+              '線の上にパーツがありません。よくある原因は4つ:',
+              h('br'), '① 円線の向きが違う（上のボタンで変える）',
+              h('br'), '② 円の', h('b', {}, '中'), 'に置いてある（線の上に動かすか半径を合わせる）',
+              h('br'), '③ 線から', h('b', {}, '軸の方向に離れている'),
+              '（半径は合っていても、線の高さから外れていると乗りません）',
+              h('br'), '④ 回したいパーツが、プレートより先の',
+              h('b', {}, '関節にぶら下がっている'),
+              '（関節から先は、その関節が動かすので巻き取りません）',
+              h('br'), 'パーツを先に置いてからプレートを貼ると、',
+              h('b', {}, '半径はそれに合わせて決まります'), '。'));
+          }
+
           rows.push(h('div', { class: 'note' },
-            '貼った場所を中心に、この半径の円に入っている',
-            h('b', {}, '同じブロックの上のパーツ'), 'がまとめて回ります。',
-            h('br'), '判定は軸に対して横方向の距離だけなので、',
-            h('br'), '高く伸びたパーツも円の中に入っていれば一緒に回ります。'));
+            '貼った場所を中心に、この半径の', h('b', {}, '円線'), 'が出ます。',
+            h('br'), 'その線に', h('b', {}, '触れているパーツ'), 'が、線に沿って回ります',
+            '（別のブロックに付いていても構いません）。',
+            h('br'), '円の中に置いただけ・線から高さがずれているものは回りません。',
+            h('br'), '線の上に立っていれば、足元が触れているので、',
+            h('br'), '高く伸びたパーツもまるごと一緒に回ります。',
+            h('br'), '円線は編集画面だけの表示です（左パネルで消せます）。'));
         } else {
           rows.push(h('div', { class: 'note' },
             '貼った面の向きが回転軸になります。ブロックごと、載っているものも一緒に回ります。'));

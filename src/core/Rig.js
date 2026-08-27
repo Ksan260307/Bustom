@@ -1,5 +1,8 @@
 import * as THREE from 'three';
-import { BONE_META, EQUIP_META, EQUIP_THICKNESS, equipShape } from './constants.js';
+import {
+  BONE_META, EQUIP_META, EQUIP_THICKNESS, equipShape, snapCircleRadius,
+} from './constants.js';
+import { touchesLine } from './Assembly.js';
 
 // ============================================================
 //  Rig : turns an Assembly (data) into a live Three.js hierarchy.
@@ -51,6 +54,40 @@ export function ridesFarHalf(part, parentPart) {
   return part.mount.pos[1] >= parentPart.length / 2;
 }
 
+/** The colour of the building aid a CIRCLE plate draws around itself. */
+const RING_GUIDE_COLOR = 0x4fd2ff;
+
+const _ringInv = new THREE.Quaternion();
+const _ringBase = new THREE.Matrix4();
+const _ringBaseInv = new THREE.Matrix4();
+const _ringHome = new THREE.Matrix4();
+const _ringLocal2 = new THREE.Matrix4();
+const _ringPos = new THREE.Vector3();
+const _ringQuat = new THREE.Quaternion();
+const _ringScale = new THREE.Vector3();
+const _hostInv = new THREE.Matrix4();
+const _fitPos = new THREE.Vector3();
+const _fitQuat = new THREE.Quaternion();
+const _one = new THREE.Vector3(1, 1, 1);
+
+/**
+ * Groups whose transform is written every frame by something.
+ *
+ * Crossing one of these leaves the rigid body the plate belongs to, which is
+ * where a circle's reach stops.
+ */
+const ANIMATED_FRAMES = new Set(['joint', 'spin', 'ring']);
+
+const _tiltPitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+const _tiltRoll = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2);
+
+/** The extra turn a CIRCLE plate's chosen plane asks for, or null for none. */
+function ringTilt(plane) {
+  if (plane === 'pitch') return _tiltPitch;
+  if (plane === 'roll') return _tiltRoll;
+  return null;
+}
+
 export class Rig {
   /** @param {import('./Assembly.js').Assembly} assembly */
   constructor(assembly, opts = {}) {
@@ -68,6 +105,9 @@ export class Rig {
     /** blocks a ROLLING plate keeps turning */
     this.rollers = [];
     this.rings = [];
+    /** The circle lines a CIRCLE plate draws. Editor only; see _buildRings. */
+    this.ringGuides = [];
+    this.showRingGuides = false;
     /** pickable meshes, tagged with userData.partId */
     this.pickables = [];
     /** geometry + materials this rig created itself and must dispose */
@@ -123,6 +163,9 @@ export class Rig {
   _buildBlock(part, parentGroup, parentPart) {
     const group = new THREE.Group();
     group.name = `block:${part.id}`;
+    // So a walk over the scene graph can tell which part a group IS, not
+    // merely which part its meshes belong to.
+    group.userData.partId = part.id;
     this._placeOnParent(group, part, parentPart);
 
     // A ROLLING plate turns the block it is stuck to, so the block's contents
@@ -161,15 +204,26 @@ export class Rig {
   /**
    * Hand every CIRCLE plate the parts it is meant to turn.
    *
-   * A rolling plate spins the block it is stuck to. A circle plate spins
-   * everything STANDING AROUND it — a turret ring rather than a wheel — so
-   * it cannot be done while building: the parts it collects are its own
-   * siblings, and they do not exist yet when the plate is reached.
+   * A rolling plate spins the block it is stuck to. A circle plate lays down
+   * a LINE — a circle of the given radius, centred on the plate — and
+   * carries whatever is sitting on that line around it. So it cannot be done
+   * while building: the parts it collects are scattered all over the machine,
+   * and most of them do not exist yet when the plate is reached.
    *
-   * Membership is measured in the plane of the ring, so a tall tower inside
-   * the circle turns with it however high it reaches.
+   * On the line, not inside it. A disc that turned everything within its
+   * radius made the radius slider mean "how much of the machine comes with
+   * me", which is not a thing anyone wants to dial in. A line means you can
+   * see where to put things, which is why the editor draws it.
+   *
+   * Membership is the plain question of whether the part's body reaches the
+   * line — which is why a tower standing on the plate turns with it however
+   * high it goes, and why something at the same radius but a metre above the
+   * plane does not.
    */
   _buildRings() {
+    // Everything below reads world matrices to compare parts that live in
+    // different branches, so they have to be current first.
+    this.root.updateMatrixWorld(true);
     for (const node of this.equipNodes) {
       const part = node.part;
       if (!EQUIP_META[part.equipType]?.ring || !part.spin) continue;
@@ -180,35 +234,211 @@ export class Rig {
       base.name = 'ringbase';
       base.position.fromArray(part.mount.pos);
       base.quaternion.fromArray(part.mount.rot);
+      // Turn the whole ring frame, not just the drawing: membership is
+      // measured in this frame, so tilting it moves both the line and the
+      // question of who is standing on it. They cannot be allowed to differ.
+      const tilt = ringTilt(part.ringPlane);
+      if (tilt) base.quaternion.multiply(tilt);
       const spin = new THREE.Group();
       spin.name = 'ring';
       base.add(spin);
       (host.spin ?? host.group).add(base);
 
-      const inv = base.quaternion.clone().invert();
+      const baseLocal = _ringBase.compose(base.position, base.quaternion, _one);
+      const baseLocalInv = _ringBaseInv.copy(baseLocal).invert();
+      // Candidates are not necessarily mounted on the same block as the
+      // plate, so their own matrices are in all sorts of frames. Everything
+      // is brought into the HOST's frame first, which is the one the plate
+      // and its ring live in.
+      const hostFrame = host.spin ?? host.group;
+      const intoHost = _hostInv.copy(hostFrame.matrixWorld).invert();
+
       const members = [];
-      for (const id of this.assembly.get(part.parent).children) {
-        if (id === part.id) continue;
-        const other = this.nodes.get(id);
-        if (!other || other.group.parent !== (host.spin ?? host.group)) continue;
-        // Distance across the ring, ignoring how far along the axis it sits.
-        const local = other.group.position.clone().sub(base.position).applyQuaternion(inv);
-        if (Math.hypot(local.x, local.z) > part.ringRadius) continue;
-        other.group.position.copy(local);
-        other.group.quaternion.premultiply(inv);
-        spin.add(other.group);
-        members.push(id);
+      for (const candidate of this._ringCandidates(host, part)) {
+        const home = _ringHome.multiplyMatrices(intoHost, candidate.matrixWorld);
+        const local = _ringLocal2.multiplyMatrices(baseLocalInv, home);
+        local.decompose(_ringPos, _ringQuat, _ringScale);
+
+        const other = this.nodes.get(candidate.userData.partId);
+        if (!other) continue;
+        if (!touchesLine(other.part, _ringPos, _ringQuat, part.ringRadius)) continue;
+
+        // Its home is remembered in the HOST's frame, which nothing animates
+        // — so the ring can be moved later and still put its riders back
+        // exactly where they belong. See syncRings.
+        other.ringHome = home.clone();
+        other.ringFrame = hostFrame;
+        candidate.position.copy(_ringPos);
+        candidate.quaternion.copy(_ringQuat);
+        spin.add(candidate);
+        members.push(other.part.id);
       }
+
+      // The line itself, drawn at the plate's own radius. Hidden by default:
+      // it is a building aid, and a machine in the field should not be
+      // wearing its scaffolding. The editor switches it on.
+      const guide = new THREE.Mesh(
+        new THREE.TorusGeometry(Math.max(0.05, part.ringRadius), 0.035, 6, 96),
+        new THREE.MeshBasicMaterial({
+          color: RING_GUIDE_COLOR, transparent: true, opacity: 0.85,
+          blending: THREE.AdditiveBlending, depthWrite: false,
+        }),
+      );
+      guide.rotation.x = -Math.PI / 2;      // the ring's plane is the plate's
+      guide.visible = this.showRingGuides;
+      guide.renderOrder = 3;
+      base.add(guide);
+      this._owned.push(guide.geometry);
+      this._ownedMaterials.push(guide.material);
+      this.ringGuides.push(guide);
 
       node.ring = {
         part,
+        base,
         spin,
         axis: new THREE.Vector3(0, 1, 0),   // the ring's own frame is the plate's
         angle: 0,
         members,
+        guide,
       };
       this.rings.push(node.ring);
     }
+  }
+
+  /**
+   * The circle that would pick up the most of what is already standing
+   * around this plate, or null when there is nothing to measure.
+   *
+   * Asked for once, when a plate is first stuck on. A fixed default cannot
+   * do this job: two metres is wider than most machines, so a new plate
+   * used to draw its line out past everything and carry nothing at all. It
+   * looked broken, and the only way out was to guess at the radius slider
+   * until something moved. The parts are right there when the plate goes
+   * on — so the plate looks.
+   *
+   * Measured over the same candidates the ring would really collect, from
+   * the real built positions. Working it out from mounts instead would get
+   * a part hanging off a different block wrong, which is exactly the case
+   * worth getting right.
+   */
+  fitRingRadius(plateId) {
+    const node = this.nodes.get(plateId);
+    const part = node?.part;
+    if (!part || !EQUIP_META[part.equipType]?.ring) return null;
+    const host = part.parent ? this.nodes.get(part.parent) : null;
+    if (!host) return null;
+
+    // The plate's own frame, tilt included: the same one membership uses.
+    _ringQuat.fromArray(part.mount.rot);
+    const tilt = ringTilt(part.ringPlane);
+    if (tilt) _ringQuat.multiply(tilt);
+    _ringPos.fromArray(part.mount.pos);
+    const baseInv = _ringBaseInv.compose(_ringPos, _ringQuat, _one).invert();
+    this.root.updateMatrixWorld(true);
+
+    const hostFrame = host.spin ?? host.group;
+    const intoHost = _hostInv.copy(hostFrame.matrixWorld).invert();
+
+    const seen = [];
+    const measure = (candidatePart, homeMatrix) => {
+      _ringLocal2.multiplyMatrices(baseInv, homeMatrix)
+        .decompose(_fitPos, _fitQuat, _ringScale);
+      const flat = Math.hypot(_fitPos.x, _fitPos.z);
+      if (flat < 1e-6) return;                       // sitting on the plate
+      seen.push({ part: candidatePart, pos: _fitPos.clone(), quat: _fitQuat.clone(), flat });
+    };
+
+    // Whatever this ring already carries. They are inside it by now, so the
+    // walk below cannot see them — and leaving them out would fit the circle
+    // to everything EXCEPT the parts it is currently turning.
+    for (const id of node.ring?.members ?? []) {
+      const rider = this.nodes.get(id);
+      if (rider?.ringHome) measure(rider.part, rider.ringHome);
+    }
+    for (const candidate of this._ringCandidates(host, part)) {
+      const other = this.nodes.get(candidate.userData.partId);
+      if (!other) continue;
+      measure(other.part, _ringHome.multiplyMatrices(intoHost, candidate.matrixWorld));
+    }
+    if (!seen.length) return null;
+
+    // Every candidate's own distance is a circle worth trying; the winner
+    // touches the most of them, and is the tightest when several tie.
+    let best = null;
+    let bestCount = 0;
+    for (const candidate of seen) {
+      const radius = snapCircleRadius(candidate.flat);
+      let count = 0;
+      for (const other of seen) {
+        if (touchesLine(other.part, other.pos, other.quat, radius)) count++;
+      }
+      if (count > bestCount || (count === bestCount && count > 0 && radius < best)) {
+        best = radius;
+        bestCount = count;
+      }
+    }
+    return bestCount ? best : null;
+  }
+
+  /**
+   * Every part a circle could pick up.
+   *
+   * The rule the builder is given is the one they can see: a part rides the
+   * circle when its body touches the LINE. So the search has to reach
+   * wherever the line does, and which block a part happens to hang off is
+   * bookkeeping they should never have to think about. It kept leaking out
+   * as "the gimmick does not work" — first for a pod on the block next
+   * door, then for one on the body below a plate stuck on the head.
+   *
+   * So the walk follows the plate's own line of hosts all the way down to
+   * the machine's root, joints and all, and takes every branch hanging off
+   * it. Going UP through a joint costs nothing: a part above the plate is
+   * simply carried by that joint as well once the ring has it, which is what
+   * being bolted to a ring on a nodding head should look like.
+   *
+   * Going DOWN through one is different, and stops the walk. Past a joint
+   * the part already has something animating it — the hand belongs to the
+   * arm — and a ring that took it would leave the arm swinging empty.
+   *
+   * The plate's own hosts are never candidates. A ring cannot carry what it
+   * is standing on, and re-parenting one of them would tie the tree in a
+   * knot.
+   */
+  _ringCandidates(host, plate) {
+    const hostFrame = host.spin ?? host.group;
+
+    // The plate's hosts, all the way up. The walk starts at the far end of
+    // this and follows it back down, so every branch off it is in reach.
+    const spine = new Set();
+    let top = hostFrame;
+    for (let g = hostFrame; g; g = g.parent) {
+      spine.add(g);
+      top = g;
+    }
+
+    const found = [];
+    const walk = (group) => {
+      for (const child of group.children) {
+        if (!child.isObject3D || child.isMesh) continue;
+        // The plate's own line: never a candidate, always followed.
+        if (spine.has(child)) {
+          walk(child);
+          continue;
+        }
+        // Another frame's business: a joint, something already spinning, or
+        // a circle that got here first.
+        if (ANIMATED_FRAMES.has(child.name) || child.name === 'ringbase') continue;
+        const id = child.userData.partId;
+        if (id && id !== plate.id) {
+          // A subtree root: whatever is mounted on it comes along with it.
+          found.push(child);
+          continue;
+        }
+        walk(child);
+      }
+    };
+    walk(top);
+    return found;
   }
 
   /** The ROLLING plate mounted directly on this part, if any. */
@@ -375,9 +605,88 @@ export class Rig {
   }
 
   _advanceSpin(r, dt) {
+    if (r.paused) return;
     const { dir, rpm } = r.part.spin;
     r.angle = (r.angle + dir * rpm * (Math.PI / 30) * dt) % (Math.PI * 2);
     r.spin.quaternion.setFromAxisAngle(r.axis, r.angle);
+  }
+
+  /**
+   * Put every ring back where its plate is, and its riders back where theirs
+   * are.
+   *
+   * The ring lives in a frame of its own, written once when the rig is
+   * built. Drag the plate and the frame stays behind, so the line is left
+   * hanging in the air next to a plate that has walked off — and the parts
+   * riding it walk off too, since they are parented into that frame.
+   *
+   * Everything here is DERIVED from the mounts, so re-deriving it costs
+   * nothing and cannot drift. Which parts are on the line is a separate
+   * question, settled when the rig is rebuilt: re-collecting mid-drag would
+   * mean parts joining and leaving the ring on every mouse move.
+   */
+  syncRings() {
+    for (const r of this.rings) {
+      const mount = r.part.mount;
+      if (!mount) continue;
+      r.base.position.fromArray(mount.pos);
+      r.base.quaternion.fromArray(mount.rot);
+      const tilt = ringTilt(r.part.ringPlane);
+      if (tilt) r.base.quaternion.multiply(tilt);
+
+      // The riders are parented into the ring, but they belong where they
+      // were put. Each one remembers its home in the HOST's frame — which
+      // nothing animates — so it can be re-expressed in the frame the ring
+      // is in NOW. Without this, moving the plate drags every rider with it.
+      _ringBase.compose(r.base.position, r.base.quaternion, _one);
+      _ringBaseInv.copy(_ringBase).invert();
+      for (const id of r.members) {
+        const node = this.nodes.get(id);
+        if (!node?.ringHome) continue;
+        _ringLocal2.multiplyMatrices(_ringBaseInv, node.ringHome);
+        _ringLocal2.decompose(_ringPos, _ringQuat, _ringScale);
+        node.group.position.copy(_ringPos);
+        node.group.quaternion.copy(_ringQuat);
+      }
+    }
+    return this;
+  }
+
+  /**
+   * A rider has been moved by hand: remember where it is now.
+   *
+   * Its remembered home is what syncRings puts it back to every frame, so a
+   * rider dragged without this would snap out from under the cursor and
+   * back to where the ring picked it up. Anything that is not riding a ring
+   * is left alone.
+   */
+  rehomeRider(id, world) {
+    const node = this.nodes.get(id);
+    if (!node?.ringHome || !node.ringFrame) return false;
+    node.ringFrame.updateWorldMatrix(true, false);
+    node.ringHome.copy(_hostInv.copy(node.ringFrame.matrixWorld).invert().multiply(world));
+    return true;
+  }
+
+  /**
+   * Show or hide every circle line at once.
+   *
+   * Remembered on the rig, because the answer has to survive a rebuild —
+   * which happens on every edit, and a guide that blinked out each time you
+   * placed a block would be worse than not having one.
+   */
+  setRingGuides(on) {
+    this.showRingGuides = !!on;
+    for (const g of this.ringGuides) g.visible = this.showRingGuides;
+    return this;
+  }
+
+  /** Stop or start one gimmick, by the id of the plate that drives it. */
+  setGimmickPaused(partId, paused) {
+    for (const r of [...this.rollers, ...this.rings]) {
+      if (r.part.id === partId) r.paused = !!paused;
+    }
+    return this;
   }
 
   /** Does anything on this machine turn under its own power? */

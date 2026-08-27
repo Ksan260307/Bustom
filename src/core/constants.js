@@ -320,9 +320,27 @@ export const EQUIP_META = {
     label: 'サークル', category: 'system', plate: 0x223a34, accent: 0x7fffd4,
     colorable: false, spins: true, ring: true,
     rpm: 40, mass: 0.7,
-    blurb: '貼った場所を中心に、決めた半径の中にあるパーツをまとめて回す',
+    blurb: '貼った場所を中心に円線を引き、その線の上のパーツを線に沿って回す',
   },
 };
+
+/**
+ * Which way a CIRCLE plate's line lies.
+ *
+ * The plate alone cannot decide this. Stuck on a deck the obvious circle is
+ * flat; stuck on a chest the obvious circle is usually still flat, and the
+ * plate's own facing would stand it up on edge. Before this was settable,
+ * putting the plate on the wrong face drew the line somewhere nothing was
+ * standing, and the answer looked like "the gimmick is broken".
+ */
+export const RING_PLANES = [
+  { id: 'face', label: '面に沿う', note: '貼った面と同じ向き（既定）' },
+  { id: 'pitch', label: '縦（前後）', note: '面から90°起こす' },
+  { id: 'roll', label: '縦（左右）', note: '面から90°倒す' },
+];
+export const RING_PLANE_IDS = RING_PLANES.map((r) => r.id);
+export const RING_PLANE_DEFAULT = 'face';
+export const isRingPlane = (v) => RING_PLANE_IDS.includes(v);
 
 /** Rotation limits for a ROLLING plate, in revolutions per minute. */
 export const SPIN_RPM_MIN = 5;

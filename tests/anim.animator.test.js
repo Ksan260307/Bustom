@@ -17,13 +17,20 @@ function makeAnimator(assembly) {
  * Run a gait for a while and report, per joint, how far it swung.
  * Sampling the extremes is the only honest way to ask "is this visible".
  */
-function swingRange({ rig, animator }, signals = {}, frames = 240) {
+/**
+ * @param settle frames to run before recording, for anything measuring the
+ *   size of a swing rather than the way it starts. The gait clock ramps up
+ *   from standing, and so does anything derived from it, so a span taken
+ *   across the ramp measures the ramp as much as the swing.
+ */
+function swingRange({ rig, animator }, signals = {}, frames = 240, settle = 0) {
   const spans = new Map(rig.joints.map((j) => [j.part.id, { min: Infinity, max: -Infinity }]));
   const s = {
     dt: 1 / 60, speed: 8, planarSpeed: 8, grounded: 1, airborne: 0,
     velocity: new THREE.Vector3(0, 0, 8), bodyQ: new THREE.Quaternion(),
     aimDir: null, locked: 0, thrust: 0.3, jerk: 0, ...signals,
   };
+  for (let i = 0; i < settle; i++) animator.update(s);
   for (let i = 0; i < frames; i++) {
     animator.update(s);
     for (const j of rig.joints) {
@@ -37,6 +44,34 @@ function swingRange({ rig, animator }, signals = {}, frames = 240) {
 }
 
 const deg = (rad) => (rad * 180) / Math.PI;
+
+/**
+ * How far each joint swings about its own stride axis, in radians, as a
+ * peak-to-peak figure with the sign kept.
+ */
+function strideSwing({ rig, animator }, frames = 240, settle = 240) {
+  const s = {
+    dt: 1 / 60, speed: 8, planarSpeed: 8, grounded: 1, airborne: 0,
+    velocity: new THREE.Vector3(0, 0, 8), bodyQ: new THREE.Quaternion(),
+    aimDir: null, locked: 0, thrust: 0, jerk: 0,
+  };
+  for (let i = 0; i < settle; i++) animator.update(s);
+
+  const seen = new Map(rig.joints.map((j) => [j.part.id, { min: Infinity, max: -Infinity }]));
+  const axis = new THREE.Vector3();
+  for (let i = 0; i < frames; i++) {
+    animator.update(s);
+    for (const j of rig.joints) {
+      animator._strideAxis(j, axis);
+      const q = j.joint.quaternion;
+      const about = 2 * Math.atan2(q.x * axis.x + q.y * axis.y + q.z * axis.z, q.w);
+      const e = seen.get(j.part.id);
+      e.min = Math.min(e.min, about);
+      e.max = Math.max(e.max, about);
+    }
+  }
+  return new Map([...seen].map(([id, e]) => [id, e.max - e.min]));
+}
 
 describe('axis binding', () => {
   it('solves a stride axis perpendicular to the shaft', () => {
@@ -317,8 +352,11 @@ describe('joint limits', () => {
   it('body lean stays inside a sane range', () => {
     const rigged = makeAnimator(PRESETS.biped.build());
     swingRange(rigged, { velocity: new THREE.Vector3(40, 0, 40) }, 300);
-    expect(Math.abs(rigged.animator.bodyLean.x)).toBeLessThanOrEqual(0.21);
-    expect(Math.abs(rigged.animator.bodyLean.y)).toBeLessThanOrEqual(0.17);
+    // It leans into a run — about 16 degrees flat out — and no further. The
+    // number is a cap, not a target: past this it stops reading as effort
+    // and starts reading as falling over.
+    expect(Math.abs(rigged.animator.bodyLean.x)).toBeLessThanOrEqual(0.29);
+    expect(Math.abs(rigged.animator.bodyLean.y)).toBeLessThanOrEqual(0.21);
   });
 
   it('produces no NaN under absurd signals', () => {
@@ -541,12 +579,18 @@ describe('joint gain and lag', () => {
     const upper = a.addBoneOnFace(a.rootId, 0, BONE.ARM, { length: 1.3 });
     const fore = a.addBoneOnTip(upper.id, BONE.ARM, { length: 1.2 });
     const rigged = makeAnimator(a);
-    const spans = swingRange(rigged);
 
     expect(rigged.rig.nodes.get(upper.id).chainDepth).toBe(0);
     expect(rigged.rig.nodes.get(fore.id).chainDepth).toBe(1);
-    expect(spanOf(spans, fore.id), 'so the arm does not double-bend')
-      .toBeLessThan(spanOf(spans, upper.id));
+
+    // Measured as a SIGNED swing about each joint's own stride axis, once
+    // the stride is up to speed. The unsigned angle from rest cannot answer
+    // this: a chained arm also folds at the elbow, and an angle that swings
+    // either side of a fold reads as twice the travel of one that swings
+    // either side of zero, whatever the swing is actually doing.
+    const swings = strideSwing(rigged, 240, 240);
+    expect(swings.get(fore.id), 'so the arm does not double-bend')
+      .toBeLessThan(swings.get(upper.id));
   });
 });
 

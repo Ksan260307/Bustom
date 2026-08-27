@@ -49,6 +49,15 @@ function boot() {
 
 const step = (n = 1) => { for (let i = 0; i < n; i++) app.frame(); };
 
+/**
+ * A block from a build, by the name the builder gave it.
+ *
+ * Names, not measurements. These used to find the chest by looking for the
+ * part that happened to be 1.5 metres wide, and the day the machine was
+ * drawn again they all found nothing and failed on `undefined.id`.
+ */
+const namedPart = (asm, label) => [...asm.parts.values()].find((p) => p.label === label);
+
 /** Aim the editor camera at a world point from a given direction. */
 function aimCamera(target, offset) {
   const rect = app.canvas.getBoundingClientRect();
@@ -259,7 +268,9 @@ describe('what the presets come wearing', () => {
     step(2);
     const bones = [...app.assembly.parts.values()].filter((p) => p.kind === 'bone');
     expect(bones.some((b) => b.boneType === 'custom' && b.custom.source === 'stride')).toBe(true);
-    expect(bones.filter((b) => b.boneType === 'arm' && b.gain < 0.6).length).toBe(2);
+    // Less than the full swing, but not much less: an arm damped down to
+    // half was most of why the old build ran like a mannequin.
+    expect(bones.filter((b) => b.boneType === 'arm' && b.gain < 1).length).toBe(2);
     expect(app.editor.rig.armBones.filter((n) => n.chainDepth === 1).length,
       'and a forearm on each side').toBe(2);
   });
@@ -389,7 +400,7 @@ describe('nudging with the arrow keys', () => {
     app.setMode('edit');
     app.loadPreset('biped');
     app.setTool(TOOL.SELECT);
-    const b = [...app.assembly.parts.values()].find((p) => p.size?.[0] === 1.5);
+    const b = namedPart(app.assembly, 'CHEST');
     app.editor.select(b.id);
     return b;
   };
@@ -2016,7 +2027,7 @@ describe('the float plate', () => {
   const fit = (type) => {
     app.setMode('edit');
     app.loadPreset('biped');
-    const chest = [...app.assembly.parts.values()].find((p) => p.size?.[0] === 1.5);
+    const chest = namedPart(app.assembly, 'CHEST');
     return app.assembly.addEquipOnFace(chest.id, 5, type, { size: 0.7 });
   };
 
@@ -2097,9 +2108,9 @@ describe('the circle plate', () => {
     return { towers, plate };
   };
 
-  it('turns what stands inside the circle and nothing else', () => {
-    const { towers, plate } = deck(1.5, [0.8, 2.6]);
-    expect(app.editor.rig.nodes.get(plate.id).ring.members).toEqual([towers[0].id]);
+  it('carries what stands on the line, and not the middle', () => {
+    const { towers, plate } = deck(1.5, [0.25, 1.5]);
+    expect(app.editor.rig.nodes.get(plate.id).ring.members).toEqual([towers[1].id]);
 
     app.editor.rig.root.updateMatrixWorld(true);
     const before = towers.map((t) => worldOf(t.id).clone());
@@ -2107,20 +2118,76 @@ describe('the circle plate', () => {
     app.editor.rig.root.updateMatrixWorld(true);
     const after = towers.map((t) => worldOf(t.id));
 
-    expect(after[0].distanceTo(before[0]), 'the one inside went round').toBeGreaterThan(0.1);
-    expect(after[1].distanceTo(before[1]), 'the one outside stayed put').toBeLessThan(0.001);
+    expect(after[1].distanceTo(before[1]), 'the one on the line went round')
+      .toBeGreaterThan(0.1);
+    expect(after[0].distanceTo(before[0]), 'the one in the middle stayed put')
+      .toBeLessThan(0.001);
   });
 
-  it('the radius slider re-decides who rides it', () => {
-    const { towers, plate } = deck(1.0, [0.8, 2.6]);
+  it('the radius slider moves the line, and the riders change with it', () => {
+    const { towers, plate } = deck(1.0, [1, 3]);
     app.editor.select(plate.id);
-    expect(app.editor.rig.nodes.get(plate.id).ring.members).toHaveLength(1);
+    expect(app.editor.rig.nodes.get(plate.id).ring.members).toEqual([towers[0].id]);
 
     app.editor.setEquipRingSelected(3);
     expect(app.assembly.get(plate.id).ringRadius).toBeCloseTo(3, 6);
-    expect(app.editor.rig.nodes.get(plate.id).ring.members, 'both of them now')
-      .toHaveLength(2);
-    expect(app.editor.rig.nodes.get(plate.id).ring.members).toContain(towers[1].id);
+    expect(app.editor.rig.nodes.get(plate.id).ring.members, 'the other one now')
+      .toEqual([towers[1].id]);
+  });
+
+  it('draws the line while building, and hides it on request', () => {
+    const { plate } = deck(1.5, [1.5]);
+    const guide = () => app.editor.rig.nodes.get(plate.id).ring.guide;
+    expect(guide().visible, 'on by default: it is a building aid').toBe(true);
+
+    app.editor.setRingGuides(false);
+    expect(guide().visible).toBe(false);
+
+    // It has to survive a rebuild, which happens on every single edit.
+    app.editor.rebuild();
+    expect(guide().visible, 'still off after an edit').toBe(false);
+    app.editor.setRingGuides(true);
+    expect(guide().visible).toBe(true);
+  });
+
+  it('the line never comes out into the field', () => {
+    const { plate } = deck(1.5, [1.5]);
+    app.editor.setRingGuides(true);
+    app.setMode('field');
+    step(2);
+    // The field builds its own rig from the same document and never asks for
+    // the guides, so a machine cannot be deployed wearing its scaffolding.
+    const fieldRing = [...app.field.player.rig.nodes.values()]
+      .map((n) => n.ring).find(Boolean);
+    expect(fieldRing, 'the plate is on the deployed machine too').toBeTruthy();
+    expect(fieldRing.guide.visible, 'but its line is not').toBe(false);
+    app.setMode('edit');
+  });
+
+  it('one gimmick can be stopped while building, and only while building', () => {
+    const { plate } = deck(1.5, [1.5]);
+    app.editor.select(plate.id);
+    app.ui.renderInspector(app.editor.selectedParts());
+
+    const stop = [...app.ui.inspectorEl.querySelectorAll('button')]
+      .find((b) => b.textContent === '止める');
+    expect(stop, 'the panel offers it').toBeTruthy();
+    stop.click();
+    expect(app.editor.gimmickRunning(plate.id)).toBe(false);
+
+    const angle = () => app.editor.rig.nodes.get(plate.id).ring.angle;
+    step(30);
+    expect(angle(), 'and it really stops').toBe(0);
+
+    app.editor.rebuild();
+    step(30);
+    expect(angle(), 'still stopped after an edit').toBe(0);
+
+    const go = [...app.ui.inspectorEl.querySelectorAll('button')]
+      .find((b) => b.textContent === '動かす');
+    go.click();
+    step(30);
+    expect(angle(), 'and starts again when asked').not.toBe(0);
   });
 
   it('the panel shows the radius and how many parts it caught', () => {
@@ -2131,6 +2198,108 @@ describe('the circle plate', () => {
     expect(text).toContain('サークル');
     expect(text).toContain('半径');
     expect(text).toContain('回るパーツ');
+  });
+
+  it('the line follows the plate while you move it', () => {
+    // The bug: the circle was placed once, when the rig was built, so a
+    // plate dragged across the deck left its line hanging where it started.
+    const { plate } = deck(1.5, [1.5]);
+    app.editor.select(plate.id);
+    app.editor.camera.position.set(0, 8, 12);
+    app.editor.camera.lookAt(0, 0, 0);
+    app.editor.camera.updateMatrixWorld(true);
+
+    const apart = () => {
+      app.editor.rig.root.updateMatrixWorld(true);
+      const node = app.editor.rig.nodes.get(plate.id);
+      return node.ring.guide.getWorldPosition(new THREE.Vector3())
+        .distanceTo(node.group.getWorldPosition(new THREE.Vector3()));
+    };
+    expect(apart(), 'they start together').toBeCloseTo(0, 5);
+
+    for (let i = 0; i < 4; i++) app.editor.nudgeSelectedByView(1, 0, 0, 0.25);
+    step(1);
+    expect(worldOf(plate.id).x, 'the plate really moved').toBeGreaterThan(0.9);
+    expect(apart(), 'and the line came with it').toBeCloseTo(0, 5);
+  });
+
+  it('moving things re-decides who is on the line, once the move is over', () => {
+    const { towers, plate } = deck(1.5, [1.5]);
+    expect(app.editor.rig.nodes.get(plate.id).ring.members).toEqual([towers[0].id]);
+
+    // Walk the rider off the line with the arrow keys. Each press is one
+    // finished move, so the circle works out who is on it again straight
+    // away — a nudge never goes through the gizmo's drag at all.
+    app.editor.select(towers[0].id);
+    app.editor.camera.position.set(0, 8, 12);
+    app.editor.camera.lookAt(0, 0, 0);
+    app.editor.camera.updateMatrixWorld(true);
+    for (let i = 0; i < 8; i++) app.editor.nudgeSelectedByView(1, 0, 0, 0.25);
+
+    expect(app.editor.rig.nodes.get(plate.id).ring.members, 'it walked off the line')
+      .toHaveLength(0);
+
+    // And back again.
+    for (let i = 0; i < 8; i++) app.editor.nudgeSelectedByView(-1, 0, 0, 0.25);
+    expect(app.editor.rig.nodes.get(plate.id).ring.members, 'and back onto it')
+      .toHaveLength(1);
+  });
+
+  it('nudging a rider moves it by exactly what was asked for', () => {
+    // The bug: a rider is parented INTO the ring, so reading its new place
+    // out of that frame and writing it back as a mount stamped the plate's
+    // own offset onto the part. Every single nudge dropped it by the height
+    // of the plate, and nothing caught it because the part stayed on the
+    // line it was already on while it sank.
+    const { towers } = deck(1.5, [1.5]);
+    app.editor.select(towers[0].id);
+    app.editor.camera.position.set(0, 8, 12);
+    app.editor.camera.lookAt(0, 0, 0);
+    app.editor.camera.updateMatrixWorld(true);
+
+    const before = worldOf(towers[0].id).clone();
+    app.editor.nudgeSelectedByView(1, 0, 0, 0.25);
+    const after = worldOf(towers[0].id);
+    expect(after.x - before.x, 'a quarter of a metre across').toBeCloseTo(0.25, 5);
+    expect(after.y, 'and not a millimetre down').toBeCloseTo(before.y, 5);
+    expect(after.z).toBeCloseTo(before.z, 5);
+  });
+
+  it('the panel can turn the line, and it is one undo step', () => {
+    const { plate } = deck(1.5, [1.5]);
+    app.editor.select(plate.id);
+    app.ui.renderInspector(app.editor.selectedParts());
+
+    const button = (label) => [...app.ui.inspectorEl.querySelectorAll('button')]
+      .find((b) => b.textContent === label);
+    expect(button('面に沿う'), 'the three planes are offered').toBeTruthy();
+    expect(button('縦（前後）')).toBeTruthy();
+    expect(button('縦（左右）')).toBeTruthy();
+
+    button('縦（前後）').click();
+    expect(app.assembly.get(plate.id).ringPlane).toBe('pitch');
+
+    app.undo();
+    expect(app.assembly.get(plate.id).ringPlane, 'back the way it was').toBe('face');
+  });
+
+  it('an empty circle says why, instead of just showing a zero', () => {
+    // This is the state that reads as "the gimmick is broken", and it is the
+    // one a plate on the wrong face lands in.
+    const { plate } = deck(1.5, [1.5]);
+    app.editor.select(plate.id);
+    app.editor.setEquipRingSelected(6);          // a line miles from anything
+    app.ui.renderInspector(app.editor.selectedParts());
+
+    expect(app.editor.rig.nodes.get(plate.id).ring.members).toHaveLength(0);
+    const text = app.ui.inspectorEl.textContent;
+    expect(text, 'it names the problem').toContain('線の上にパーツがありません');
+    expect(text, 'and the three things that cause it').toContain('円線の向き');
+
+    app.editor.setEquipRingSelected(1.5);
+    app.ui.renderInspector(app.editor.selectedParts());
+    expect(app.ui.inspectorEl.textContent, 'and stops once it is fixed')
+      .not.toContain('線の上にパーツがありません');
   });
 
   it('changing the radius is one undo step', () => {
@@ -2150,7 +2319,7 @@ describe('the rest of the rack, in the field', () => {
     app.loadPreset('biped');
     const a = app.assembly;
     for (const e of a.equips()) if (e.equipType !== EQUIP.BOOST) a.remove(e.id);
-    const chest = [...a.parts.values()].find((p) => p.size?.[0] === 1.5);
+    const chest = namedPart(a, 'CHEST');
     for (const t of types) a.addEquipOnFace(chest.id, 4, t, { size: 0.8 });
     app.editor.rebuild();
     app.setMode('field');
@@ -2661,20 +2830,21 @@ describe('the title screen', () => {
 
   it('stands the machine on the floor and frames it by its size', () => {
     app.setMode('edit');
-    app.loadPreset('biped');
+    app.loadPreset('core');
     app.goTitle();
     const small = app.titleScene.camDistance;
     expect(app.titleScene.rig.root.position.y)
       .toBeCloseTo(-app.titleScene.rig.restLowestY, 5);
 
+    // A bare core against a whole walker, rather than one part of a walker
+    // resized: a machine's size is what its silhouette measures, and a core
+    // buried inside a chest can be scaled all day without changing that.
     app.setMode('edit');
-    app.editor.select(app.assembly.rootId);
-    app.editor.resizeSelected([3, 3, 3]);
+    app.loadPreset('biped');
     app.goTitle();
     expect(app.titleScene.camDistance, 'a bigger machine is watched from further back')
       .toBeGreaterThan(small);
     app.setMode('edit');
-    app.loadPreset('biped');
   });
 
   it('renders, and turns', () => {
@@ -2972,6 +3142,157 @@ describe('solo play', () => {
     step(2);
     expect(app.field.director?.readout ?? null).toBe(null);
     app.setMode('edit');
+  });
+});
+
+describe('reaching a part you cannot see', () => {
+  it('lists every part, as the tree it is', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const rows = document.querySelectorAll('#rightpanel .treerow');
+    expect(rows.length, 'one row per part').toBe(app.assembly.size);
+    expect(rows[0].textContent, 'the core is the root').toContain('コア');
+  });
+
+  it('a wrapped core cannot be clicked, which is why the list exists', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const core = app.assembly.core;
+
+    // Fire a ray at the core from every side. A machine worth building hides
+    // its core inside a hull, so none of these should reach it — that is the
+    // problem the list and the click-through are both here to solve.
+    const rig = app.editor.rig;
+    rig.root.updateMatrixWorld(true);
+    const at = rig.nodes.get(core.id).group.getWorldPosition(new THREE.Vector3());
+    const ray = new THREE.Raycaster();
+    let reached = 0;
+    for (const dir of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0.7, 0.4, 0.7]]) {
+      const from = new THREE.Vector3(...dir).multiplyScalar(40).add(at);
+      ray.set(from, new THREE.Vector3().subVectors(at, from).normalize());
+      const hits = ray.intersectObjects(rig.pickables, false);
+      if (hits.length && hits[0].object.userData.partId === core.id) reached++;
+    }
+    expect(reached, 'nothing outside can see the core').toBe(0);
+  });
+
+  it('the list selects it anyway, and takes the camera there', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.editor.select(null);
+    const before = app.editor.camera.position.clone();
+
+    document.querySelectorAll('#rightpanel .treerow')[0].click();
+    expect(app.editor.selected, 'the core is selected').toBe(app.assembly.core.id);
+    expect(app.editor.camera.position.distanceTo(before), 'and the view went to find it')
+      .toBeGreaterThan(0.5);
+    expect(app.editor.controls.target.distanceTo(
+      app.editor.rig.nodes.get(app.assembly.core.id).group.getWorldPosition(new THREE.Vector3()),
+    ), 'centred on it').toBeLessThan(0.5);
+  });
+
+  it('the row for the selected part is the one lit up', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const ids = [...app.assembly.parts.keys()];
+    app.editor.select(ids[3]);
+    const rows = [...document.querySelectorAll('#rightpanel .treerow')];
+    const active = rows.filter((r) => r.classList.contains('active'));
+    expect(active.length, 'exactly one').toBe(1);
+    expect(active[0].title).toContain(ids[3]);
+  });
+
+  it('clicking the same spot again reaches what is behind', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const asm = app.assembly;
+    const core = asm.core.id;
+    const shell = asm.get(core).children.find((id) => asm.get(id).kind === 'block');
+    const hits = [
+      { object: { userData: { partId: shell } } },
+      { object: { userData: { partId: core } } },
+    ];
+
+    app.editor.select(null);
+    const first = app.editor._pickFrom(hits, false);
+    expect(first, 'the front one first').toBe(shell);
+
+    app.editor.select(first);
+    expect(app.editor._pickFrom(hits, false), 'then the one behind it').toBe(core);
+
+    app.editor.select(core);
+    expect(app.editor._pickFrom(hits, false), 'and round to the front again').toBe(shell);
+
+    app.editor.select(shell);
+    expect(app.editor._pickFrom(hits, true), 'adding to a selection never cycles')
+      .toBe(shell);
+  });
+
+  it('framing falls back to the whole machine when nothing is selected', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.editor.select(null);
+    shouldNotThrow(() => app.editor.frameSelection(), 'framing nothing');
+    const r = app.editor.rig.boundingRadius;
+    expect(app.editor.camera.position.length(), 'pulled back to hold the lot')
+      .toBeGreaterThan(r);
+  });
+});
+
+describe('the machines it ships with', () => {
+  it('every preset builds, rigs and stands on the floor', () => {
+    for (const key of Object.keys(PRESETS)) {
+      app.loadPreset(key);
+      step(2);
+      const rig = app.editor.rig;
+      expect(rig.nodes.size, key).toBe(app.assembly.size);
+      expect(Number.isFinite(rig.restLowestY), `${key} has a footprint`).toBe(true);
+    }
+  });
+
+  it('the humanoid keeps its arms outside its hips', () => {
+    app.loadPreset('biped');
+    step(2);
+    const rig = app.editor.rig;
+    rig.root.updateMatrixWorld(true);
+
+    // Everything hanging off an ARM bone, against the middle of the body.
+    // The old build had the hands buried in the waist, which is the first
+    // thing anyone notices and the last thing a test would catch.
+    //
+    // Named parts, not "everything that is not a limb": the shoulder pad is
+    // structurally a chest block and the arm hangs off it, so those two are
+    // MEANT to touch. What must never touch is an arm and the hips.
+    const boxOf = (node) => new THREE.Box3().setFromObject(node.mesh ?? node.group);
+    const underArm = (part) => {
+      let cur = part.parent ? app.assembly.get(part.parent) : null;
+      while (cur) {
+        if (cur.kind === 'bone' && cur.boneType === 'arm') return true;
+        cur = cur.parent ? app.assembly.get(cur.parent) : null;
+      }
+      return false;
+    };
+
+    const arms = [];
+    const middle = [];
+    for (const [, node] of rig.nodes) {
+      const p = node.part;
+      if (p.kind !== 'block' && p.kind !== 'core') continue;
+      if (underArm(p)) arms.push({ p, box: boxOf(node) });
+      else if (['PELVIS', 'BELLY', 'HIP', 'CHEST'].includes(p.label)) {
+        middle.push({ p, box: boxOf(node) });
+      }
+    }
+    expect(arms.length, 'there are arms').toBeGreaterThan(0);
+    expect(middle.length, 'and there is a body to keep them out of')
+      .toBeGreaterThan(3);
+
+    for (const arm of arms) {
+      for (const part of middle) {
+        expect(arm.box.intersectsBox(part.box),
+          `${arm.p.label} is inside ${part.p.label}`).toBe(false);
+      }
+    }
   });
 });
 
@@ -3346,8 +3667,37 @@ describe('field mode', () => {
     expect(runKey('KeyD'), 'D goes -X').toBeLessThan(-0.5);
   });
 
-  it('a backward double tap dashes backwards', () => {
+  /**
+   * The player back at spawn, and everyone else out of the way.
+   *
+   * Every fight is seeded from the clock, so the opponents wander somewhere
+   * different on every run. A test that measures what the PLAYER did has to
+   * say where everybody else is, or it is being shoved by a machine that
+   * happened to be standing there — and it passes or fails by luck.
+   */
+  const emptyArena = () => {
     app.field.respawn();
+    for (const e of app.field.enemies) {
+      e.body.reset(new THREE.Vector3(0, 60, 220));
+      e.syncTransform();
+    }
+    step(2);
+  };
+
+  /** The same, but with one opponent parked where the player is looking. */
+  const oneInFront = () => {
+    emptyArena();
+    const p = app.field.player;
+    const mark = app.field.enemies.find((e) => e.alive);
+    mark.body.reset(p.position.clone().addScaledVector(p.body.forward, 30).setY(3));
+    mark.syncTransform();
+    app.field.cameraRig.snap(p.position, p.body.forward);
+    step(4);
+    return mark;
+  };
+
+  it('a backward double tap dashes backwards', () => {
+    emptyArena();
     app.field.player.body.angular.reset(new THREE.Vector3(0, 0, 1));
     step(20);
     const before = app.field.player.position.z;
@@ -3357,7 +3707,9 @@ describe('field mode', () => {
   });
 
   it('lock-on acquires a target and drives the HUD', () => {
-    app.field.respawn();
+    // Something to lock ONTO, put where the machine is looking. Waiting for
+    // an opponent to wander into view is a coin toss.
+    oneInFront();
     app.input.setEnabled(true);
     app.input.buffer.push({ action: 'lock', t: app.input.time });
     step(60);
@@ -3482,7 +3834,7 @@ describe('equipment plates', () => {
     app.setEquipType(type);
     const core = worldOf(app.assembly.rootId);
     aimCamera(core, new THREE.Vector3(0, 1, 7));
-    const chest = [...app.assembly.parts.values()].find((p) => p.size?.[0] === 1.5);
+    const chest = namedPart(app.assembly, 'CHEST');
     const at = worldOf(chest.id).add(new THREE.Vector3(0, 0, face));
     pointAt(at, { click: true });
     return app.assembly.get(app.editor.selected);
@@ -3653,7 +4005,7 @@ describe('weapons in the field', () => {
     app.setMode('edit');
     bare();
     const a = app.assembly;
-    const chest = [...a.parts.values()].find((p) => p.size?.[0] === 1.5);
+    const chest = namedPart(a, 'CHEST');
     for (const t of types) a.addEquipOnFace(chest.id, 4, t);
     app.editor.rebuild();
     app.setMode('field');
@@ -3875,7 +4227,7 @@ describe('weapons in the field', () => {
     app.setMode('edit');
     bare();
     const a = app.assembly;
-    const chest = [...a.parts.values()].find((x) => x.size?.[0] === 1.5);
+    const chest = namedPart(a, 'CHEST');
     a.addEquipOnFace(chest.id, 5, EQUIP.BOOST);
     a.addEquipOnFace(chest.id, 3, EQUIP.BOOST);
     app.editor.rebuild();
@@ -4025,7 +4377,7 @@ describe('switching weapons', () => {
     app.setMode('edit');
     bare();
     const a = app.assembly;
-    const chest = [...a.parts.values()].find((p) => p.size?.[0] === 1.5);
+    const chest = namedPart(a, 'CHEST');
     for (const t of types) a.addEquipOnFace(chest.id, 4, t);
     app.editor.rebuild();
     app.setMode('field');
@@ -4182,7 +4534,7 @@ describe('destruction and respawn', () => {
     app.setMode('edit');
     bare();
     const a = app.assembly;
-    const chest = [...a.parts.values()].find((x) => x.size?.[0] === 1.5);
+    const chest = namedPart(a, 'CHEST');
     a.addEquipOnFace(chest.id, 4, EQUIP.GATLING);
     app.editor.rebuild();
     app.setMode('field');
@@ -4406,7 +4758,7 @@ describe('building past the edge of a block', () => {
   it('the shape that was already there does not move', () => {
     app.setMode('edit');
     app.loadPreset('biped');
-    const chest = [...app.assembly.parts.values()].find((p) => p.size?.[0] === 1.5);
+    const chest = namedPart(app.assembly, 'CHEST');
     app.editor.select(chest.id);
     app.setTool(TOOL.ADD);
 
@@ -4800,8 +5152,13 @@ describe('clipboard', () => {
 
   it('pastes several parts at once', () => {
     app.loadPreset('bits');
+    // Siblings, deliberately. Copying a parent and its child is ONE copy —
+    // the subtree comes with it — so three parts down a chain would test the
+    // opposite of what this is about.
     const bits = [...app.assembly.parts.values()]
-      .filter((p) => p.kind === 'block' && p.mount).slice(0, 3);
+      .filter((p) => p.kind === 'block' && p.parent === app.assembly.rootId)
+      .slice(0, 3);
+    expect(bits.length, 'three independent parts to copy').toBe(3);
     const before = app.assembly.size;
     app.editor.select(bits.map((p) => p.id));
     expect(app.copySelected()).toBe(3);

@@ -8,9 +8,11 @@ import {
   BONE, SIZE_MIN, SIZE_MAX, BONE_LENGTH_MAX, BONE_RADIUS_MAX,
   EQUIP, EQUIP_META, EQUIP_SIZE_MIN, EQUIP_SIZE_MAX, equipShape,
   SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, BONE_GAIN_MAX, BONE_LAG_MAX,
+  CIRCLE_RADIUS_DEFAULT,
 } from '../src/core/constants.js';
 import { STANDARD_COLORS } from '../src/core/Palette.js';
-import { SHAPE, SHAPE_DEFAULT } from '../src/core/Shapes.js';
+import { SHAPE, SHAPE_DEFAULT, shapeMask } from '../src/core/Shapes.js';
+import { Rig } from '../src/core/Rig.js';
 
 let a;
 beforeEach(() => {
@@ -1056,8 +1058,9 @@ describe('presets', () => {
     const a = PRESETS.biped.build();
     const bones = [...a.parts.values()].filter((p) => p.kind === 'bone');
 
-    const shoulders = bones.filter((b) => b.boneType === BONE.ARM && b.gain < 0.6);
-    expect(shoulders.length, 'a damped arm bone per side').toBe(2);
+    const shoulders = bones.filter((b) => b.boneType === BONE.ARM && b.gain < 1);
+    expect(shoulders.length, 'an arm bone per side that takes less than the full swing')
+      .toBe(2);
 
     const waist = bones.find((b) => b.boneType === BONE.CUSTOM);
     expect(waist, 'a waist').toBeTruthy();
@@ -1093,3 +1096,97 @@ describe('presets', () => {
     }
   });
 });
+
+describe('which way a circle lies', () => {
+  it('is remembered, and defaults to the plate it is stuck to', () => {
+    const plate = a.addEquipOnFace(a.rootId, 2, EQUIP.CIRCLE, {});
+    expect(plate.ringPlane, 'left alone, it follows the face').toBe('face');
+
+    expect(a.setEquipRingPlane(plate.id, 'pitch')).toBe(true);
+    expect(plate.ringPlane).toBe('pitch');
+
+    const back = Assembly.fromJSON(JSON.parse(JSON.stringify(a.toJSON())));
+    expect(back.get(plate.id).ringPlane, 'and it survives a save').toBe('pitch');
+  });
+
+  it('refuses a plane it does not have, rather than taking it', () => {
+    const plate = a.addEquipOnFace(a.rootId, 2, EQUIP.CIRCLE, {});
+    expect(a.setEquipRingPlane(plate.id, 'sideways')).toBe(false);
+    expect(plate.ringPlane).toBe('face');
+
+    // A hand-edited save, or one from a version that had no planes at all.
+    const json = JSON.parse(JSON.stringify(a.toJSON()));
+    for (const o of json.parts) if (o.equipType === EQUIP.CIRCLE) o.ringPlane = 'nonsense';
+    expect(Assembly.fromJSON(json).get(plate.id).ringPlane).toBe('face');
+  });
+
+  it('only the plates that draw a circle have one', () => {
+    const roller = a.addEquipOnFace(a.rootId, 2, EQUIP.ROLLING, {});
+    expect(roller.ringPlane).toBe(null);
+    expect(a.setEquipRingPlane(roller.id, 'pitch')).toBe(false);
+  });
+});
+
+describe('a preset never shows its bare core', () => {
+  /**
+   * Is this world point inside the solid part of some block other than the
+   * core?
+   *
+   * Each candidate is taken back into its own local space and measured
+   * against the very mask the mesher cut it with, so "inside" here means the
+   * same thing it means on screen — a shape that tapers can be larger than
+   * the core in every dimension and still leave its corners in the open.
+   */
+  const coveredBySomething = (rig, core, world) => {
+    for (const [, node] of rig.nodes) {
+      const p = node.part;
+      if (p === core || p.kind !== 'block') continue;
+      const local = node.group.worldToLocal(world.clone());
+      const [sx, sy, sz] = p.size;
+      const u = new THREE.Vector3(local.x / (sx / 2), local.y / (sy / 2), local.z / (sz / 2));
+      if (Math.abs(u.x) > 1 || Math.abs(u.y) > 1 || Math.abs(u.z) > 1) continue;
+      if (shapeMask(p.shape ?? 'box')(u.x, u.y, u.z)) return true;
+    }
+    return false;
+  };
+
+  /** Points on the core's own surface, corners included. */
+  const surfaceOfCore = (core) => {
+    const [sx, sy, sz] = core.size;
+    const out = [];
+    for (const x of [-1, 0, 1]) {
+      for (const y of [-1, 0, 1]) {
+        for (const z of [-1, 0, 1]) {
+          if (!x && !y && !z) continue;
+          // Just inside the surface: a point exactly on a shared face is a
+          // coin toss between two blocks, and that is not what is being asked.
+          out.push(new THREE.Vector3(x * sx * 0.49, y * sy * 0.49, z * sz * 0.49));
+        }
+      }
+    }
+    return out;
+  };
+
+  it('every preset covers it, from every angle', () => {
+    for (const key of Object.keys(PRESETS)) {
+      const a = PRESETS[key].build();
+      const core = a.core;
+      // The bare core IS the machine in this one; there is nothing to hide it
+      // behind, and that is the point of it.
+      if (a.size === 1) continue;
+
+      const rig = new Rig(a);
+      rig.root.updateMatrixWorld(true);
+      const coreNode = rig.nodes.get(core.id);
+
+      const exposed = surfaceOfCore(core)
+        .map((p) => coreNode.group.localToWorld(p.clone()))
+        .filter((w) => !coveredBySomething(rig, core, w));
+
+      expect(exposed.length, `${key} leaves ${exposed.length} of 26 core points bare`)
+        .toBe(0);
+      rig.dispose();
+    }
+  });
+});
+

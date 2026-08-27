@@ -101,6 +101,12 @@ export class EditorScene {
     this.snap = true;
     this.hoverVoxel = null;
     this.previewMotion = false;
+    /** Circle lines are a building aid, so they are on while building. */
+    this.showRingGuides = true;
+    /** Plates whose gimmick the builder has stopped, by part id. */
+    this.gimmickOff = new Set();
+    /** A mount moved, so which parts a circle carries needs deciding again. */
+    this._ringsStale = false;
     this.symmetry = false;
 
     this.onChange = () => {};
@@ -426,10 +432,39 @@ export class EditorScene {
     this.groundOffset = -this.rig.restLowestY;
     this.rig.root.position.y = this.groundOffset;
     this.rig.root.updateMatrixWorld(true);
+    // The rig is thrown away and rebuilt on every structural edit, so
+    // anything the BUILDER has switched has to be put back on the new one.
+    this.rig.setRingGuides(this.showRingGuides);
+    for (const id of this.gimmickOff) this.rig.setGimmickPaused(id, true);
   }
+
+  /** Show or hide the circle a CIRCLE plate draws around itself. */
+  setRingGuides(on) {
+    this.showRingGuides = !!on;
+    this.rig.setRingGuides(this.showRingGuides);
+    return this;
+  }
+
+  /**
+   * Stop or start one plate's gimmick.
+   *
+   * A building aid, not a property of the machine: a ring turning under the
+   * cursor is a ring you cannot place anything on. Whatever is switched off
+   * here is still switched on in the field.
+   */
+  setGimmickRunning(partId, running) {
+    if (running) this.gimmickOff.delete(partId);
+    else this.gimmickOff.add(partId);
+    this.rig.setGimmickPaused(partId, !running);
+    return this;
+  }
+
+  /** Is this plate's gimmick running in the editor? */
+  gimmickRunning(partId) { return !this.gimmickOff.has(partId); }
 
   /** Rebuild the rig after a structural edit, keeping the selection if we can. */
   rebuild() {
+    this._ringsStale = false;
     const keep = [...this.selection].filter((id) => this.assembly.get(id));
     this.rig.dispose();
     this._makeRig();
@@ -836,7 +871,7 @@ export class EditorScene {
 
   _endDrag() {
     this._dragStart = null;
-    if (this._pendingRebuild) {
+    if (this._pendingRebuild || this._ringsStale) {
       this._pendingRebuild = false;
       this.rebuild();
     } else {
@@ -854,10 +889,21 @@ export class EditorScene {
   _applyWorldTransform(id, world) {
     const node = this.rig.nodes.get(id);
     if (!node || !node.part.mount) return true;
-    const host = node.group.parent;
-    host.updateWorldMatrix(true, false);
+    // Moving anything can change which parts a circle is carrying — the
+    // plate as much as the riders. Deciding that means rebuilding the rig,
+    // which is too heavy to do on every mouse move, so it is noted here and
+    // acted on when the move is finished.
+    if (this.rig.rings.length) this._ringsStale = true;
 
-    _m.copy(host.matrixWorld).invert().multiply(world);
+    // A mount is written in the frame the part was BUILT in. That is not
+    // always the frame it is sitting in: a circle lends itself its riders,
+    // and reading one's new place out of the ring would write the plate's
+    // own offset into the machine. It moved the part every time it was
+    // nudged, which nothing noticed because it slid along the line it was
+    // already on.
+    const frame = node.host ?? node.group.parent;
+    frame.updateWorldMatrix(true, false);
+    _m.copy(frame.matrixWorld).invert().multiply(world);
     _m.decompose(_v, _q, _s);
 
     const parentPart = this.assembly.get(node.part.parent);
@@ -865,8 +911,21 @@ export class EditorScene {
     const y = inFar ? _v.y + parentPart.length / 2 : _v.y;
 
     this.assembly.setMount(id, { pos: [_v.x, y, _v.z], rot: _q.toArray() });
-    node.group.position.copy(_v);
-    node.group.quaternion.copy(_q);
+
+    // And put the group itself wherever it actually hangs. For a rider that
+    // means inside the ring, and its remembered home has to move with it or
+    // the next frame's sync drags it back under the cursor.
+    this.rig.rehomeRider(id, world);
+    const parent = node.group.parent;
+    if (parent === frame) {
+      node.group.position.copy(_v);
+      node.group.quaternion.copy(_q);
+    } else {
+      parent.updateWorldMatrix(true, false);
+      _m.copy(parent.matrixWorld).invert().multiply(world).decompose(_v2, _q, _s);
+      node.group.position.copy(_v2);
+      node.group.quaternion.copy(_q);
+    }
     node.group.updateMatrixWorld(true);
 
     // did it change halves?
@@ -940,8 +999,10 @@ export class EditorScene {
       _next.multiplyMatrices(_delta, node.group.matrixWorld);
       if (!this._applyWorldTransform(id, _next)) needsRebuild = true;
     }
-    if (needsRebuild) {
-      // Something crossed a bone's midpoint and changed which half it rides.
+    if (needsRebuild || this._ringsStale) {
+      // Something crossed a bone's midpoint and changed which half it rides,
+      // or a circle has to work out who is on its line again. A nudge is one
+      // discrete move, so this is the end of the gesture already.
       this.rebuild();
       return true;
     }
@@ -1074,6 +1135,40 @@ export class EditorScene {
     return true;
   }
 
+  /**
+   * Size a freshly placed circle to the machine it landed on.
+   *
+   * Only ever for a plate that has just been put down, and only when the
+   * fitted circle would pick something up. A plate placed on a machine and
+   * left at a fixed default draws its line outside everything and turns
+   * nothing at all, which reads as a broken part rather than as a number
+   * that wants adjusting.
+   */
+  _fitNewRings(ids) {
+    let changed = false;
+    for (const id of ids) {
+      const part = this.assembly.get(id);
+      if (!part || part.kind !== 'equip' || !EQUIP_META[part.equipType]?.ring) continue;
+      const fitted = this.rig.fitRingRadius(id);
+      if (fitted === null || fitted === part.ringRadius) continue;
+      if (this.assembly.setEquipRing(id, fitted)) changed = true;
+    }
+    // One rebuild for the lot: the ring decides who is on it as it is built.
+    if (changed) this.rebuild();
+    return changed;
+  }
+
+  /** Which way the selected plate's circle lies. */
+  setEquipRingPlaneSelected(plane) {
+    const id = this.selected;
+    if (!id) return false;
+    this.onBeforeChange('サークルの向き');
+    if (!this.assembly.setEquipRingPlane(id, plane)) return false;
+    // Same reason as the radius: turning the ring re-decides who is on it.
+    this.rebuild();
+    return true;
+  }
+
   /** How much of its attribute's motion the selected bone takes, and when. */
   setBoneMotionSelected(motion) {
     const id = this.selected;
@@ -1091,7 +1186,9 @@ export class EditorScene {
     if (!id) return false;
     this.onBeforeChange('位置変更');
     if (!this.assembly.setMount(id, { pos, rot })) return false;
-    if (!this.rig.refreshMount(id)) this.rebuild();
+    // A typed position is a finished move, so a circle can settle who is on
+    // it straight away.
+    if (this.rig.rings.length || !this.rig.refreshMount(id)) this.rebuild();
     else { this.refreshStats(); this._syncSelectionVisuals(); }
     return true;
   }
@@ -1557,14 +1654,73 @@ export class EditorScene {
         if (twin) made.push(twin.id);
       }
       this.rebuild();
+      this._fitNewRings(made);
       this.select(made);
       return;
     }
 
     // SELECT: pick a part, shift to add or remove
     const hits = _ray.intersectObjects(this.rig.pickables, false);
-    if (hits.length) this.select(hits[0].object.userData.partId, additive);
+    if (hits.length) this.select(this._pickFrom(hits, additive), additive);
     else if (!additive) this.select(null);
+  }
+
+  /**
+   * Which part a click on this ray means.
+   *
+   * The nearest hit, EXCEPT when it is already the selected one — then it is
+   * whatever is behind it, and clicking again keeps going deeper before
+   * coming back round to the front.
+   *
+   * Without this, a part that something else encloses can never be selected
+   * at all: a raycast only ever returns what is in front, and a well-built
+   * machine hides its core inside a hull on purpose. Cycling costs nothing
+   * when there is only one thing under the cursor, which is most clicks.
+   */
+  _pickFrom(hits, additive) {
+    const order = [];
+    for (const hit of hits) {
+      const id = hit.object.userData.partId;
+      if (id && !order.includes(id)) order.push(id);
+    }
+    if (order.length < 2 || additive) return order[0];
+    const at = order.indexOf(this.selected);
+    return at < 0 ? order[0] : order[(at + 1) % order.length];
+  }
+
+  /**
+   * Put the camera on the selection, or on the whole machine when nothing is
+   * selected. Needed the moment a part can be selected without being
+   * visible — otherwise the panel says you have it and the screen does not
+   * show you where.
+   */
+  /** Put the camera back on the whole machine. */
+  frameAll() { this._frameCamera(); return this; }
+
+  frameSelection() {
+    const parts = this.selectedParts();
+    if (!parts.length) { this._frameCamera(); return this; }
+
+    this.rig.root.updateMatrixWorld(true);
+    const box = new THREE.Box3();
+    for (const part of parts) {
+      const node = this.rig.nodes.get(part.id);
+      if (!node) continue;
+      // The part itself, not its children: framing a shoulder should not
+      // pull the camera back far enough to hold the whole arm.
+      box.expandByObject(node.mesh ?? node.joint ?? node.group);
+    }
+    if (box.isEmpty()) { this._frameCamera(); return this; }
+
+    const c = box.getCenter(new THREE.Vector3());
+    const r = Math.max(0.5, box.getSize(new THREE.Vector3()).length() * 0.5);
+    const dir = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
+    if (dir.lengthSq() < 1e-6) dir.set(0.68, 0.46, 0.86);
+    dir.normalize();
+    this.controls.target.copy(c);
+    this.camera.position.copy(c).addScaledVector(dir, r * 3.2 + 1.2);
+    this.controls.update();
+    return this;
   }
 
   /**
@@ -1634,6 +1790,11 @@ export class EditorScene {
 
     if (this.painting) this._applySculpt();
 
+    // Mounts change under the builder's hands — a drag, an arrow key, a
+    // typed position, an undo — and a ring is positioned from its plate's
+    // mount. Re-deriving it here means the line never has to be told: it is
+    // simply always where the plate is.
+    this.rig.syncRings();
     this.rig.updateRollers(dt);
 
     if (this.previewMotion && this.animator) {
