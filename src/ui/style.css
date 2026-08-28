@@ -1169,3 +1169,60 @@ button:disabled:hover { background: rgba(255, 255, 255, 0.045); border-color: va
 .treerow .tk { color: var(--dim); width: 10px; flex: none; }
 .treerow.active .tk { color: var(--accent); }
 .treerow .tn { overflow: hidden; text-overflow: ellipsis; }
+
+/* The always-on spec strip: four numbers, one line, above everything else
+   on the right. Small enough to ignore, present enough to notice moving. */
+.specstrip {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.specstrip .speccell {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-family: var(--mono);
+  line-height: 1.25;
+}
+
+.specstrip .k {
+  display: block;
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+}
+
+.specstrip .v { display: block; font-size: 12px; font-weight: 700; }
+.specstrip .v.good { color: var(--ok); }
+.specstrip .v.warn { color: var(--warn); }
+
+/* ------------------------------------------------------------------
+   The read-out beside the cursor while a part is in hand.
+
+   The shape is chosen on the left, the colour on the right and the spot in
+   the middle, so placing one block used to mean reading three corners of
+   the screen. This puts the answer where the question is.
+   ------------------------------------------------------------------ */
+.placehint {
+  position: fixed;
+  z-index: 40;
+  pointer-events: none;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  padding: 3px 7px;
+  border-radius: 5px;
+  color: #cfeaff;
+  background: rgba(10, 18, 26, 0.82);
+  border: 1px solid rgba(79, 210, 255, 0.35);
+  white-space: nowrap;
+}
+
+.placehint.blocked {
+  color: #ffb0a8;
+  border-color: rgba(255, 106, 92, 0.55);
+}
+
+.placehint.hidden { display: none; }

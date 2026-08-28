@@ -215,6 +215,27 @@ export class VoxelBlock {
   }
 
   /**
+   * The colour most of this block is made of, or -1 when it is empty.
+   *
+   * A whole-grid count rather than a sample of one cell: the cell at the
+   * centre of a carved-out block is as likely to be a hole as to be the
+   * colour anybody would say the block is.
+   */
+  dominantColor() {
+    const seen = new Map();
+    let best = 0;
+    let bestN = 0;
+    for (let i = 0; i < this.data.length; i++) {
+      const v = this.data[i];
+      if (!v) continue;
+      const n = (seen.get(v) ?? 0) + 1;
+      seen.set(v, n);
+      if (n > bestN) { bestN = n; best = v; }
+    }
+    return best - 1;
+  }
+
+  /**
    * Cut the grid to a named shape. Coordinates handed to the mask run -1..1
    * on every axis, so the shape always fills the block's box however the box
    * has been stretched.

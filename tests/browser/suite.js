@@ -44,10 +44,51 @@ function boot() {
   // Drive frames by hand at a fixed step: rAF is throttled in hidden tabs.
   a.renderer.setAnimationLoop(null);
   a.clock.getDelta = () => 1 / 60;
+  // Mirrored placement ships ON, because nearly every machine is
+  // symmetrical. A test that counts what a click produced has to say which
+  // it wants, so the harness starts from the plain one and the tests about
+  // symmetry turn it on themselves.
+  a.editor.symmetry = false;
+  a.mainEditor.symmetry = false;
+  a.partEditor.symmetry = false;
   return a;
 }
 
 const step = (n = 1) => { for (let i = 0; i < n; i++) app.frame(); };
+
+/** Take the rack off a machine, so it stands there and does not shoot. */
+const disarm = (r) => { r.weapons.slots.length = 0; r.weapons.activeIndex = 0; return r; };
+
+/** Put every rack back, undoing any disarm an earlier test did. */
+const rearmAll = () => { for (const e of app.field.enemies) e.weapons.build(); };
+
+/**
+ * Send every opponent but `keep` to the far side of the arena, and take
+ * their racks off on the way.
+ *
+ * Opponents shoot back now, which is the point of the game and a nuisance
+ * in a test about something else: rounds from three directions land in the
+ * shared pool, knock the machine about and take its health down while it is
+ * trying to demonstrate a gizmo.
+ *
+ * Distance alone is not enough to buy quiet — the arena is 120 metres
+ * across and a railgun round lives long enough to cross it five times — so
+ * the rack comes off too. `rearmAll()` puts them back.
+ */
+function parkOthers(keep = null) {
+  app.field.enemies.forEach((e, i) => {
+    if (e === keep) return;
+    disarm(e);
+    if (!e.alive) return;
+    e.body.reset(new THREE.Vector3(60 + i * 6, e.body.rideHeight, 78));
+    e.syncTransform();
+  });
+  return keep;
+}
+
+/** The rounds WE fired. The pool is shared with everyone shooting at us. */
+const myRounds = () => app.field.projectiles.pool
+  .filter((r) => r.life > 0 && r.owner === app.field.player);
 
 /**
  * A block from a build, by the name the builder gave it.
@@ -297,6 +338,10 @@ describe('tools', () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true }));
       expect(app.editor.tool, code).toBe(tool);
     }
+    // R only reaches the gizmo when there is nothing in hand: with a part
+    // armed it turns the part instead, which is the more useful answer to
+    // the same key at that moment.
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyV', bubbles: true }));
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyR', bubbles: true }));
     expect(app.editor.gizmoMode).toBe('rotate');
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyT', bubbles: true }));
@@ -1719,7 +1764,9 @@ describe('block shapes', () => {
     app.setMode('edit');
     app.loadPreset('core');
     app.setTool(TOOL.BLOCK);
-    const rows = [...document.querySelectorAll('.shapegrid')];
+    // Scoped to the LEFT panel: the inspector carries a rack of its own for
+    // whatever is selected, and counting both says nothing about either.
+    const rows = [...document.querySelectorAll('#leftpanel .shapegrid')];
     expect(rows.length, 'four rows in the tool panel').toBe(4);
     const labels = rows.flatMap((r) => [...r.querySelectorAll('button')].map((b) => b.textContent));
     expect(labels).toHaveLength(20);
@@ -1830,9 +1877,15 @@ describe('block shapes', () => {
     expect(ghost.visible).toBe(true);
     expect(ghost.geometry === app.editor.ghostBox, 'not the stand-in box').toBe(false);
     expect(ghost.geometry.getAttribute('position').count).toBeGreaterThan(100);
-    // The wire stays a box on purpose: it is the footprint the block will
-    // take up, which is what decides where the next one can go.
-    expect(app.editor.ghostWire.geometry.getAttribute('position').count).toBe(24);
+    // The outline follows the shape too. A crate drawn round a sphere was
+    // the cursor telling you the wrong thing in the one part of it that
+    // shows through the machine.
+    expect(app.editor.ghostWire.geometry.getAttribute('position').count,
+      'the outline is the shape').toBeGreaterThan(24);
+    // The box is still there, faintly, underneath: it is the footprint the
+    // block will take up, which is what decides where the next one can go.
+    expect(app.editor.ghostFootprint.visible, 'and the footprint with it').toBe(true);
+    expect(app.editor.ghostFootprint.geometry.getAttribute('position').count).toBe(24);
 
     app.setNewBlockShape(SHAPE.BOX);
     pointAt(core.clone().add(new THREE.Vector3(0.49, 0, 0)));
@@ -2359,9 +2412,9 @@ describe('the rest of the rack, in the field', () => {
 
   it('a beam shot is drawn as a long thin line', () => {
     deploy(EQUIP.BEAM);
-    forceLock();
+    parkOthers(forceLock()?.robot);
     hold(1);
-    const shot = app.field.projectiles.pool.find((s) => s.life > 0);
+    const shot = myRounds()[0];
     expect(shot, 'something left the barrel').toBeTruthy();
     expect(shot.kind).toBe('beam');
     expect(shot.mesh.scale.z, 'long').toBeGreaterThan(6);
@@ -2371,9 +2424,9 @@ describe('the rest of the rack, in the field', () => {
 
   it('a missile plate really puts five in the air, trailing smoke', () => {
     deploy(EQUIP.MISSILE);
-    forceLock();
+    parkOthers(forceLock()?.robot);
     hold(1);
-    const live = app.field.projectiles.pool.filter((s) => s.life > 0);
+    const live = myRounds();
     expect(live).toHaveLength(EQUIP_META.missile.shots);
     expect(live.every((s) => s.trail && s.trail.line.visible), 'each with its own trail').toBe(true);
     step(20);
@@ -2387,7 +2440,7 @@ describe('the rest of the rack, in the field', () => {
 
   it('the laser draws a beam while it is held, and stops when it is not', () => {
     deploy(EQUIP.LASER);
-    forceLock();
+    parkOthers(forceLock()?.robot);
     const lit = () => app.field.projectiles.beams.filter((b) => b.life > 0 && b.mesh.visible).length;
     hold(6);
     expect(lit(), 'a beam is on screen').toBeGreaterThan(0);
@@ -2442,9 +2495,9 @@ describe('the rest of the rack, in the field', () => {
 
   it('a grenade arcs and sets off a blast where it lands', () => {
     deploy(EQUIP.GRENADE);
-    forceLock();
+    parkOthers(forceLock()?.robot);
     hold(1);
-    const shot = app.field.projectiles.pool.find((s) => s.life > 0);
+    const shot = myRounds()[0];
     expect(shot.kind).toBe('grenade');
     const rise = shot.velocity.y;
     step(14);
@@ -2508,22 +2561,30 @@ describe('fighting something', () => {
     // it is shooting at and hides it, along with every round crossing the
     // gap. The whole reason for a lock is to be able to see the fight.
     const f = deployed();
-    // Both of them somewhere known: this is about the framing, not about
-    // where three wandering opponents happened to have got to.
-    f.player.body.reset(new THREE.Vector3(0, f.player.body.rideHeight, 0));
+    // Both of them somewhere known, and NOTHING moving: this is about the
+    // framing, not about where three wandering opponents got to, and not
+    // about a key an earlier test left held down.
+    app.input.keys.clear();
+    const ais = f.ais.splice(0, f.ais.length);
     const mark = f.enemies.find((e) => e.alive);
-    mark.body.reset(new THREE.Vector3(0, mark.body.rideHeight, 26));
+    const park = () => {
+      f.player.body.reset(new THREE.Vector3(0, f.player.body.rideHeight, 0));
+      mark.body.reset(new THREE.Vector3(0, mark.body.rideHeight, 26));
+      mark.syncTransform();
+    };
+    park();
     f.cameraRig.snap(f.player.position, f.player.body.forward);
     f.lock = null;
     f.player.setLocked(false);
-    step(60);
+    for (let i = 0; i < 60; i++) { park(); step(1); }
     expect(f.cameraRig.engage, 'a chase cam while nothing is happening')
       .toBeLessThan(0.05);
     const behind = Math.abs(f.cameraRig.position.x - f.player.position.x);
 
     f.lock = { robot: mark, aimPoint: mark.position.clone() };
     f._applyLock();
-    step(90);
+    for (let i = 0; i < 90; i++) { park(); step(1); }
+    f.ais.push(...ais);
     expect(f.cameraRig.engage, 'and a fight camera once there is a fight')
       .toBeGreaterThan(0.8);
 
@@ -2557,6 +2618,7 @@ describe('fighting something', () => {
     expect(p.position.distanceTo(before), 'knocked off its spot')
       .toBeGreaterThan(0.3);
 
+    parkOthers();
     step(90);
     expect(p.body.stagger, 'it wears off').toBe(0);
     app.setMode('edit');
@@ -2567,11 +2629,11 @@ describe('fighting something', () => {
     // the air several frames later. At three hundred metres a second it was
     // there before the frame it was fired in had finished.
     const f = deployed();
-    forceLock();
+    parkOthers(forceLock()?.robot);
     app.input.keys.add('Mouse0');
     step(2);
     app.input.keys.clear();
-    const live = f.projectiles.pool.filter((s) => s.life > 0);
+    const live = myRounds();
     expect(live.length, 'something left the barrel').toBeGreaterThan(0);
     const shot = live[0];
     const from = shot.mesh.position.clone();
@@ -2592,8 +2654,11 @@ describe('what a fight looks like', () => {
     app.input.setEnabled(true);
     app.field.paused = false;
     app.field.respawn();
-    app.field.effects.clear();
     step(20);
+    // Cleared AFTER settling, not before: twenty steps of a live field is
+    // long enough for somebody else's muzzle flash to be burning when the
+    // test starts counting.
+    app.field.effects.clear();
     return app.field;
   };
 
@@ -2602,6 +2667,8 @@ describe('what a fight looks like', () => {
   it('firing puts a flash on the barrel it came out of', () => {
     const f = deployed();
     forceLock();
+    parkOthers();
+    f.effects.clear();
     expect(live(f.effects.muzzles), 'nothing burning to start with').toBe(0);
 
     app.input.keys.add('Mouse0');
@@ -2622,7 +2689,9 @@ describe('what a fight looks like', () => {
 
   it('a round arriving leaves a mark, in its own colour', () => {
     const f = deployed();
-    forceLock();
+    // One opponent left standing, and it does not shoot back: the mark
+    // being counted has to be one of OURS arriving.
+    disarm(parkOthers(forceLock()?.robot));
     f.effects.clear();
     app.input.keys.add('Mouse0');
     let sparks = 0;
@@ -2639,6 +2708,7 @@ describe('what a fight looks like', () => {
 
   it('running kicks up dust, and standing still does not', () => {
     const f = deployed();
+    parkOthers();
     // The opponents are running about too, so the trail has to be counted
     // where the PLAYER is rather than anywhere on the field.
     const mine = () => f.effects.puffs.filter(
@@ -2697,6 +2767,9 @@ describe('what a fight looks like', () => {
 
   it('a heavy machine plants itself when it comes down, and says so', () => {
     const f = deployed();
+    // Nobody else landing, or the first ring along the floor is theirs and
+    // the machine under test is still in the air when it is counted.
+    parkOthers();
     f.effects.clear();
     // Straight up and drop it: high enough that the fall counts.
     f.player.body.reset(new THREE.Vector3(0, 26, 0));
@@ -2714,11 +2787,12 @@ describe('what a fight looks like', () => {
 
   it('none of it comes back with the machine after a respawn', () => {
     const f = deployed();
-    forceLock();
+    parkOthers(forceLock()?.robot);
     app.input.keys.add('Mouse0');
     step(10);
     app.input.keys.clear();
     f.respawn();
+    parkOthers();
     step(1);
     expect(live(f.effects.muzzles) + live(f.effects.impacts) + live(f.effects.rings)).toBe(0);
     app.setMode('edit');
@@ -2733,10 +2807,14 @@ describe('being hit, and hitting back', () => {
     app.input.setEnabled(true);
     app.field.paused = false;
     app.field.respawn();
+    // These tests deal out every blow by hand and then read what the
+    // read-out made of it. An opponent landing one of its own in the middle
+    // of that is a second answer to a question that has room for one.
+    parkOthers();
+    step(20);
     app.field.effects.clear();
     app.field.hud.marks.length = 0;
     app.field.hud.hurts.length = 0;
-    step(20);
     return app.field;
   };
 
@@ -2817,6 +2895,438 @@ describe('being hit, and hitting back', () => {
     step(30);
     expect(t.rig.bodyMaterial.emissiveIntensity, 'and goes out again').toBe(0);
     app.setMode('edit');
+  });
+});
+
+describe('the panel gets out of the way', () => {
+  const blocks = (n = 3) => [...app.assembly.parts.values()]
+    .filter((p) => p.kind === 'block').slice(0, n).map((p) => p.id);
+
+  it('a held slider is ONE undo step, not one per notch', () => {
+    // Every entry is a full snapshot of the machine and the history holds
+    // sixty. Dragging a slider used to push one per notch, so seven
+    // adjustments were enough to shove an hour of real work off the end of
+    // it — and undoing "that resize" took nine presses.
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const ed = app.editor;
+    ed.select(blocks(1)[0]);
+    const hist = app.history;
+    const depth = hist.past.length;
+
+    const wide = app.ui.inspectorEl.querySelector('input[type=range]');
+    expect(wide, 'the inspector has a slider to drag').toBeTruthy();
+    wide.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    for (let v = 1; v <= 3.0001; v += 0.25) {
+      wide.value = String(v);
+      wide.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+
+    expect(hist.past.length - depth, 'one entry for the whole drag').toBe(1);
+    app.undo();
+    expect(hist.past.length, 'and one press to take it back').toBe(depth);
+  });
+
+  it('two separate drags are two changes', () => {
+    // No clock decides this. Two deliberate adjustments half a second apart
+    // are two changes, and nothing but the widget knows which it was.
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.editor.select(blocks(1)[0]);
+    const hist = app.history;
+    const depth = hist.past.length;
+    const wide = app.ui.inspectorEl.querySelector('input[type=range]');
+    for (const v of [2, 3]) {
+      wide.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      wide.value = String(v);
+      wide.dispatchEvent(new Event('input', { bubbles: true }));
+      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    }
+    expect(hist.past.length - depth).toBe(2);
+  });
+
+  it('the joint limit can be undone at all', () => {
+    // It was written straight onto the part from the panel — no history
+    // entry, no rebuild — so the one bone property you tune by feel was the
+    // one you could not take back.
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const bone = [...app.assembly.parts.values()].find((p) => p.kind === 'bone');
+    app.editor.select(bone.id);
+    const was = bone.limit;
+    const depth = app.history.past.length;
+    app.applyBoneOptionToSelection('limit', was === 44 ? 60 : 44);
+    expect(app.history.past.length - depth, 'it was recorded').toBe(1);
+    app.undo();
+    expect(app.assembly.get(bone.id).limit, 'and taken back').toBe(was);
+  });
+
+  it('picking a colour paints what is selected', () => {
+    // It used to only arm the colour for the NEXT part. Recolouring
+    // something already placed meant four actions and a section nobody
+    // opens.
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const ids = blocks(2);
+    app.editor.select(ids);
+    const depth = app.history.past.length;
+
+    const swatch = app.ui.paletteEl.querySelector('.swatch:nth-child(6)')
+      ?? app.ui.paletteEl.querySelectorAll('.swatch')[5];
+    expect(swatch, 'the palette is on screen').toBeTruthy();
+    swatch.click();
+
+    expect(app.history.past.length - depth, 'one entry for the lot').toBe(1);
+    // Every solid cell of every one of them now carries the armed colour.
+    const wanted = app.editor.colorIndex + 1;
+    for (const id of ids) {
+      const { data } = app.assembly.get(id).vox;
+      let wrong = 0;
+      for (let i = 0; i < data.length; i++) if (data[i] && data[i] !== wanted) wrong++;
+      expect(wrong, `${id} repainted`).toBe(0);
+    }
+    // And it still arms: placing next puts down that colour.
+    expect(app.editor.colorIndex).toBe(5);
+  });
+
+  it('picking a colour with nothing selected just arms it', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.editor.clearSelection();
+    const depth = app.history.past.length;
+    app.ui.paletteEl.querySelectorAll('.swatch')[3].click();
+    expect(app.history.past.length, 'no empty undo step').toBe(depth);
+    expect(app.editor.colorIndex).toBe(3);
+  });
+
+  it('a multi-selection can be resized and reshaped as one', () => {
+    // Selecting four legs and making them all thicker is the whole reason
+    // to select four things. The panel used to offer connect, duplicate and
+    // delete — the three operations that do not care what you picked.
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const ids = blocks(3);
+    app.editor.select(ids);
+    app.ui.renderInspector(app.editor.selectedParts());
+
+    const slider = app.ui.inspectorEl.querySelector('input[type=range]');
+    expect(slider, 'the bulk panel offers a size').toBeTruthy();
+    slider.value = '2';
+    slider.dispatchEvent(new Event('input', { bubbles: true }));
+    for (const id of ids) {
+      expect(app.assembly.get(id).size[0], id).toBeCloseTo(2, 5);
+    }
+
+    const ball = [...app.ui.inspectorEl.querySelectorAll('.shapegrid button')]
+      .find((b) => b.textContent === '球');
+    expect(ball, 'and a shape').toBeTruthy();
+    ball.click();
+    for (const id of ids) expect(app.assembly.get(id).shape, id).toBe(SHAPE.SPHERE);
+  });
+
+  it('the settings for the tool in hand are on screen, not below the fold', () => {
+    // The tool list above them never folds, so on an ordinary window the
+    // settings for whatever you just picked started past the bottom of the
+    // panel — the plate-size slider a hundred pixels under it.
+    app.setMode('edit');
+    // From a DIFFERENT tool: arming the one already in hand is not a tool
+    // change, so nothing re-runs and nothing scrolls.
+    app.setTool(TOOL.SELECT);
+    const scroll = document.querySelector('#leftpanel .panelscroll');
+    scroll.scrollTop = 0;
+    app.setTool(TOOL.EQUIP);
+    const section = [...document.querySelectorAll('#leftpanel .toolopts')]
+      .find((el) => !el.classList.contains('hidden'));
+    const box = section.getBoundingClientRect();
+    const view = scroll.getBoundingClientRect();
+
+    expect(box.top, 'it never scrolls past the top of what it is revealing')
+      .toBeGreaterThan(view.top - 2);
+    if (box.height <= view.height) {
+      expect(box.bottom, 'and the whole of it is on screen').toBeLessThan(view.bottom + 2);
+    } else {
+      // Taller than the panel itself: show as much as there is room for and
+      // leave the rest to the scrollbar. Yanking the top off screen to chase
+      // the bottom would be worse than the problem.
+      expect(scroll.scrollTop, 'shown from its top').toBeGreaterThan(-1);
+    }
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('the numbers that decide how it plays are always on screen', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    const strip = document.querySelector('.specstrip');
+    expect(strip, 'there is a strip').toBeTruthy();
+    const light = strip.textContent;
+
+    // Bolt on a lot of machine; the readout has to move with it.
+    const chest = namedPart(app.assembly, 'CHEST');
+    for (let i = 0; i < 6; i++) {
+      app.assembly.addBlock(chest.id, { pos: [0, 1 + i, 0] }, 3, { size: [2, 2, 2] });
+    }
+    app.editor.rebuild();
+    app.editor.refreshStats();
+    expect(document.querySelector('.specstrip').textContent, 'it noticed')
+      .not.toBe(light);
+  });
+
+  it('the gizmo stays with the selection while a placing tool is in hand', () => {
+    // Place, then nudge, is the loop everybody runs. It used to cost a mode
+    // switch every time, on a part that was already selected.
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.editor.select(blocks(1)[0]);
+    app.setTool(TOOL.BLOCK);
+    expect(app.editor.gizmo.object, 'still there while placing').toBe(app.editor.pivot);
+    app.setTool(TOOL.CARVE);
+    expect(app.editor.gizmo.object, 'but not while carving').toBeFalsy();
+    app.setTool(TOOL.SELECT);
+    expect(app.editor.gizmo.object).toBe(app.editor.pivot);
+  });
+
+  it('reaching for a gizmo handle does not drop a block', () => {
+    // The guard used to key off `dragging`, which is only true once the
+    // gizmo's own handler has run — and which listener goes first is not
+    // ours to decide.
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.editor.select(app.assembly.rootId);
+    app.setTool(TOOL.BLOCK);
+    const before = app.assembly.size;
+    app.editor.gizmo.axis = 'X';                 // as if hovering an arrow
+    pointAt(worldOf(app.assembly.rootId).clone().add(new THREE.Vector3(0, 0.6, 0)), { click: true });
+    app.editor.gizmo.axis = null;
+    expect(app.assembly.size, 'nothing was placed').toBe(before);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('mirrored placement shows the twin before you commit to it', () => {
+    // Symmetry ships on, because nearly every machine is symmetrical. "One
+    // click puts down two parts" is a poor thing to learn afterwards, so the
+    // preview says so first.
+    app.setMode('edit');
+    app.loadPreset('core');
+    const ed = app.editor;
+    ed.symmetry = true;
+    app.setTool(TOOL.BLOCK);
+    const core = worldOf(app.assembly.rootId);
+    // Straight at the +X face, the way the placement tests do it: a corner
+    // is whichever face the ray happens to find first, and a twin only
+    // exists for a part that is off the centre line at all.
+    aimCamera(core, new THREE.Vector3(6, 0, 0));
+    pointAt(core.clone().add(new THREE.Vector3(0.49, 0, 0)));
+    expect(Math.abs(ed.pendingPlacement.mount.pos[0]), 'off the centre line')
+      .toBeGreaterThan(0.1);
+
+    expect(ed.ghost.visible, 'the one under the cursor').toBe(true);
+    expect(ed.ghostTwin.visible, 'and the one it would mirror').toBe(true);
+    expect(Math.sign(ed.ghostTwin.position.x), 'on the other side')
+      .toBe(-Math.sign(ed.ghost.position.x));
+
+    ed.symmetry = false;
+    pointAt(core.clone().add(new THREE.Vector3(0.49, 0, 0)));
+    expect(ed.ghostTwin.visible, 'and nothing when it is off').toBe(false);
+    app.setTool(TOOL.SELECT);
+  });
+});
+
+describe('a fight you can lose', () => {
+  const deployed = () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.paused = false;
+    app.field.respawn();
+    // Earlier describes take racks off to get a quiet field. This one is
+    // about being shot at, so everything goes back on first.
+    rearmAll();
+    step(20);
+    return app.field;
+  };
+
+  it('the opposition shoots, and it can take you down', () => {
+    // For the whole of this game's life the fight was one-way: opponents
+    // carried three, four, five weapon plates and nothing ever drove their
+    // triggers. The lives counter could not go down, and none of the
+    // dodging, the knockback or the damage read-out was ever asked a
+    // question.
+    const f = deployed();
+    f.player.body.reset(new THREE.Vector3(0, f.player.body.rideHeight, 0));
+    f.enemies.forEach((e, i) => e.revive(new THREE.Vector3(
+      Math.cos(i * 2.1) * 13, e.body.rideHeight, Math.sin(i * 2.1) * 13,
+    )));
+    // Counted as it arrives rather than off the health bar at each end:
+    // twelve seconds in the open is long enough to be put down and handed a
+    // fresh machine, and a full bar at the end would read as never hit.
+    let taken = 0;
+    let prev = f.player.hp;
+    for (let i = 0; i < 60 * 12; i++) {
+      step(1);
+      if (f.player.hp < prev) taken += prev - f.player.hp;
+      prev = f.player.hp;
+    }
+    expect(taken, 'standing in the open is a mistake').toBeGreaterThan(0);
+    app.setMode('edit');
+  });
+
+  it('and it never shoots its own side', () => {
+    const f = deployed();
+    f.player.body.reset(new THREE.Vector3(0, f.player.body.rideHeight, 0));
+    const alive = f.enemies.filter((e) => e.alive);
+    alive.forEach((e, i) => e.revive(new THREE.Vector3(
+      -6 + i * 6, e.body.rideHeight, 16,
+    )));
+    const hp = alive.map((e) => e.hp);
+    step(60 * 8);
+    // The player is not shooting, so anything an opponent lost was taken
+    // off it by another opponent.
+    alive.forEach((e, i) => expect(e.hp, e.name).toBe(hp[i]));
+    app.setMode('edit');
+  });
+
+  it('moving is worth more than standing there', () => {
+    // The dodging, the slow rounds and the honest hit volumes only mean
+    // something if this is true.
+    const take = (moving) => {
+      const f = deployed();
+      f.player.body.reset(new THREE.Vector3(0, f.player.body.rideHeight, 0));
+      f.enemies.forEach((e, i) => e.revive(new THREE.Vector3(
+        Math.cos(i * 2.1) * 15, e.body.rideHeight, Math.sin(i * 2.1) * 15,
+      )));
+      step(90);
+      // Counted blow by blow rather than off the health bar at each end:
+      // ten seconds in the open is long enough to be put down and handed a
+      // fresh machine, and that reads as healing.
+      let taken = 0;
+      let prev = f.player.hp;
+      for (let i = 0; i < 60 * 16; i++) {
+        // A committed weave, not a shuffle: cross forty-five frames one way
+        // and dash out of it, which is what a player does when rounds are
+        // slow enough to see coming.
+        if (moving && i % 45 === 0) {
+          const left = (i / 45) % 2 === 0;
+          app.input.keys.delete(left ? 'KeyD' : 'KeyA');
+          app.input.keys.add(left ? 'KeyA' : 'KeyD');
+          app.input.buffer.push({ action: 'dash', t: app.input.time });
+        }
+        step(1);
+        const now = f.player.hp;
+        if (now < prev) taken += prev - now;
+        prev = now;
+      }
+      app.input.keys.clear();
+      return taken;
+    };
+    const still = take(false);
+    const weaving = take(true);
+    expect(still, 'it hurts to stand still').toBeGreaterThan(0);
+    expect(weaving, 'and it hurts less to move').toBeLessThan(still * 0.85);
+    app.setMode('edit');
+  });
+
+  it('your own condition shows once it is worth showing', () => {
+    // A number would be correct and useless: it sits somewhere specific and
+    // the point is to read it WITHOUT looking away from the fight.
+    const f = deployed();
+    const painted = () => {
+      const before = app.hudCanvas.toDataURL();
+      f.hud.draw({
+        camera: f.camera, player: f.player, targets: [], lock: null,
+        telemetry: f.player.body.telemetry(), gait: f.player.stats.gait,
+        legs: f.player.stats.legs, weapons: [], mission: null,
+      }, 1 / 30);
+      return app.hudCanvas.toDataURL() !== before;
+    };
+    f.player.hp = f.player.maxHp;
+    const whole = f.hud.vitalPulse;
+    f.hud.draw({
+      camera: f.camera, player: f.player, targets: [], lock: null,
+      telemetry: f.player.body.telemetry(), gait: f.player.stats.gait,
+      legs: f.player.stats.legs, weapons: [], mission: null,
+    }, 1 / 30);
+    expect(typeof f.hud.vitalPulse, 'the clock runs either way').toBe('number');
+
+    // Hurt: the frame has to actually change what it paints.
+    f.player.hp = f.player.maxHp * 0.1;
+    expect(painted(), 'the edge answers').toBe(true);
+    f.player.hp = f.player.maxHp;
+    app.setMode('edit');
+  });
+
+  it('cover breaks a lock', () => {
+    // The arena has been full of pillars from the start with nothing to
+    // make anyone use one, and a lock with no way to shake it is a lock
+    // with no decision in it.
+    const f = deployed();
+    forceLock();
+    expect(f.lock, 'locked on').toBeTruthy();
+
+    // Stand on opposite sides of a pillar. Not INSIDE it — the arena
+    // pushes anything that ends up in a wall back out again, which is a
+    // different rule doing the work.
+    const box = f.world.colliders[0];
+    expect(box, 'the arena has something to hide behind').toBeTruthy();
+    const mid = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const off = new THREE.Vector3(size.x * 0.5 + 5, 0, 0);
+    const foe = f.lock.robot;
+    const here = mid.clone().sub(off);
+    const there = mid.clone().add(off);
+    here.y = f.player.body.rideHeight;
+    there.y = foe.body.rideHeight;
+    // Held there: what is being asked is what the pillar does to the lock,
+    // not whether either machine happens to walk out from behind it.
+    for (let i = 0; i < 90; i++) {
+      f.player.body.reset(here); f.player.syncTransform();
+      foe.body.reset(there); foe.syncTransform();
+      step(1);
+    }
+    expect(f.lock, 'and it lost you').toBeFalsy();
+    app.setMode('edit');
+  });
+
+  it('a lock survives something flicking past', () => {
+    const f = deployed();
+    forceLock();
+    const held = f.lock.robot;
+    step(120);
+    expect(f.lock?.robot, 'still there in the open').toBe(held);
+    app.setMode('edit');
+  });
+
+  it('putting one down is louder than hitting it', () => {
+    const f = deployed();
+    f.effects.clear();
+    f.hud.marks.length = 0;
+    const mark = f.enemies.find((e) => e.alive);
+    mark.damage(mark.maxHp);
+    step(1);
+    expect(f.hud.marks.some((m) => m.killed), 'a kill mark').toBe(true);
+    expect(f.effects.rings.filter((r) => r.life > 0).length, 'and a ring under it')
+      .toBeGreaterThan(0);
+    app.setMode('edit');
+  });
+
+  it('the sound bus answers events whether or not anything is open', () => {
+    // Synthesised rather than sampled: three shapes cover a game's worth of
+    // events and there is no audio file anywhere to go missing. Whether a
+    // device is open by the time this runs depends on what the rest of the
+    // suite clicked, so what is asked is that raising an event is safe
+    // either way — a game that hisses at a muted tab is as broken as one
+    // that throws.
+    const fb = app.feedback;
+    const raise = () => {
+      fb.fire(1, true); fb.hit(0.5, false); fb.boom(1); fb.lock(true); fb.lock(false);
+    };
+    shouldNotThrow(raise, 'raising an event');
+    const was = fb.muted;
+    fb.setMuted(true);
+    expect(fb.audible, 'and muted really is silent').toBe(false);
+    shouldNotThrow(raise, 'raising an event with the sound off');
+    fb.setMuted(was);
   });
 });
 
@@ -3360,6 +3870,10 @@ describe('solo play', () => {
     play(0.1);
   };
   const downPlayer = () => {
+    // The wave goes to the far end first. What is under test here is the
+    // lives counter and what you get handed back, and a machine that is
+    // shot again on the frame it returns cannot answer that.
+    parkOthers();
     app.field.player.damage(999999);
     play(0.1);
   };
@@ -4040,11 +4554,11 @@ describe('field mode', () => {
   };
 
   /** The same, but with one opponent parked where the player is looking. */
-  const oneInFront = () => {
+  const oneInFront = (range = 30) => {
     emptyArena();
     const p = app.field.player;
     const mark = app.field.enemies.find((e) => e.alive);
-    mark.body.reset(p.position.clone().addScaledVector(p.body.forward, 30).setY(3));
+    mark.body.reset(p.position.clone().addScaledVector(p.body.forward, range).setY(3));
     mark.syncTransform();
     app.field.cameraRig.snap(p.position, p.body.forward);
     step(4);
@@ -4074,11 +4588,20 @@ describe('field mode', () => {
   });
 
   it('firing damages the locked target', () => {
-    const hp = app.field.lock.robot.hp;
+    // In close, and locked here rather than inherited from the test above.
+    // At thirty metres a jinking machine is missed more often than not —
+    // that is the dodging doing its job — and this test is about whether a
+    // round that lands takes anything off, not about the gun's accuracy.
+    const mark = oneInFront(12);
+    app.field.lock = { robot: mark, aimPoint: mark.position.clone() };
+    app.field._applyLock();
+    step(4);
+
+    const hp = mark.hp;
     app.input.keys.add('Mouse0');
-    step(60);
+    step(90);
     app.input.keys.clear();
-    expect(app.field.lock.robot.hp).toBeLessThan(hp);
+    expect(mark.hp).toBeLessThan(hp);
   });
 
   it('keeps the chassis level on the ground, however steeply it is aiming', () => {
@@ -4133,7 +4656,11 @@ describe('field mode', () => {
     // wherever the camera happens to face has its own test; this one is
     // about what CLOSING on a locked target does to the chassis, and it
     // should not fail because the opponents wandered off screen.
-    const mark = app.field.enemies.find((e) => e.alive);
+    // One opponent, and it does not shoot: walking four seconds into open
+    // fire with no weapons of our own ends with a wreck and a respawn, and
+    // a machine that was put back on its spawn point never closed on
+    // anything.
+    const mark = disarm(parkOthers(app.field.enemies.find((e) => e.alive)));
     app.field.player.body.angular.reset(
       mark.position.clone().sub(app.field.player.position).setY(0).normalize(),
     );
@@ -4896,7 +5423,7 @@ describe('destruction and respawn', () => {
     app.input.setEnabled(true);
     app.field.respawn();
 
-    const enemy = forceLock().robot;
+    const enemy = disarm(parkOthers(forceLock().robot));
     enemy.hp = 12;                       // one burst is enough
     // Stood in front of us, because this is about what happens WHEN a
     // machine is shot down, not about whether a gatling can land five
@@ -4912,12 +5439,17 @@ describe('destruction and respawn', () => {
 
     app.input.keys.add('Mouse0');
     let sawWreck = false;
-    for (let i = 0; i < 240 && !sawWreck; i++) {
+    let downed = false;
+    for (let i = 0; i < 240 && !(downed && sawWreck); i++) {
       step(1);
+      // Read as it happens rather than at the end: a wreck is put back on
+      // the field on a timer, and a machine that has already been handed a
+      // new one is still a machine that was shot down.
+      if (!enemy.alive) downed = true;
       if (app.field.debris.pieceCount > 5) sawWreck = true;
     }
     app.input.keys.clear();
-    expect(enemy.alive, 'shot down').toBe(false);
+    expect(downed, 'shot down').toBe(true);
     expect(sawWreck, 'and it came apart').toBe(true);
   });
 
@@ -4948,7 +5480,7 @@ describe('sharing a build', () => {
 
     expect(dlg.open).toBe(true);
     expect(dlg.titleEl.textContent).toBe('機体: QR BIPED');
-    expect(dlg.code.startsWith('BRO1:')).toBe(true);
+    expect(dlg.code.startsWith('BLO1:')).toBe(true);
     expect(dlg.canvas.width, 'a real QR was drawn').toBeGreaterThan(100);
     expect(dlg.canvas.classList.contains('hidden')).toBe(false);
     expect(dlg.sizeEl.textContent).toContain('バイト');
@@ -5443,7 +5975,10 @@ describe('undo and redo', () => {
     app.loadPreset('core');
     app.setTool(TOOL.BLOCK);
     place(2.5);
-    expect(app.history.undoLabel).toBe('配置');
+    // The label names the shape. Twenty entries all reading "配置" said
+    // nothing about how far back a run of Ctrl+Z had gone, which is the one
+    // thing the label is for.
+    expect(app.history.undoLabel).toBe('配置 立方体');
     expect(app.ui.undoBtn.disabled).toBe(false);
     expect(app.ui.undoBtn.title).toContain('配置');
     app.setTool(TOOL.SELECT);
@@ -5493,7 +6028,7 @@ describe('undo and redo', () => {
 
     app.setMode('edit');
     expect(app.history.canUndo, 'the machine kept its own stack').toBe(true);
-    expect(app.history.undoLabel).toBe('配置');
+    expect(app.history.undoLabel).toBe('配置 立方体');
   });
 });
 
@@ -5844,6 +6379,388 @@ describe('part library', () => {
   });
 });
 
+describe('putting a block down', () => {
+  /** A bare machine in the editor, with the block tool in hand. */
+  const armed = (tool = TOOL.BLOCK) => {
+    app.setMode('edit');
+    bare();
+    app.setTool(tool);
+    app.editor.symmetry = false;
+    return app.editor;
+  };
+
+  /** Fake a pointer press at a canvas point, and release it there. */
+  const clickAt = (x, y, opts = {}) => {
+    const c = app.editor.canvas;
+    const r = c.getBoundingClientRect();
+    const at = { clientX: r.left + x, clientY: r.top + y, button: 0, ...opts };
+    c.dispatchEvent(new PointerEvent('pointermove', { ...at, bubbles: true }));
+    c.dispatchEvent(new PointerEvent('pointerdown', { ...at, bubbles: true }));
+    window.dispatchEvent(new PointerEvent('pointerup', { ...at, bubbles: true }));
+  };
+
+  /** Press, drag across, and release. */
+  const dragAcross = (from, to, steps = 8) => {
+    const c = app.editor.canvas;
+    const r = c.getBoundingClientRect();
+    const pt = (t) => ({
+      clientX: r.left + from[0] + (to[0] - from[0]) * t,
+      clientY: r.top + from[1] + (to[1] - from[1]) * t,
+      button: 0,
+      bubbles: true,
+    });
+    c.dispatchEvent(new PointerEvent('pointermove', pt(0)));
+    c.dispatchEvent(new PointerEvent('pointerdown', pt(0)));
+    for (let i = 1; i <= steps; i++) {
+      c.dispatchEvent(new PointerEvent('pointermove', pt(i / steps)));
+    }
+    window.dispatchEvent(new PointerEvent('pointerup', pt(1)));
+  };
+
+  const count = () => app.assembly.parts.size;
+
+  it('the camera keeps the left button to itself no longer', () => {
+    // For the whole of this editor's life the left button both placed a part
+    // AND swung the camera, and placement happened on the PRESS — so every
+    // attempt to look round the machine dropped a block first.
+    const ed = armed();
+    expect(ed.controls.mouseButtons.LEFT, 'nothing is placed by the camera').toBe(null);
+    expect(ed.controls.mouseButtons.RIGHT, 'which is where the camera went')
+      .toBe(THREE.MOUSE.ROTATE);
+    app.setTool(TOOL.SELECT);
+    expect(app.editor.controls.mouseButtons.LEFT, 'and it comes back when empty-handed')
+      .toBe(THREE.MOUSE.ROTATE);
+  });
+
+  it('a press that turns into a drag of the camera places nothing', () => {
+    const ed = armed(TOOL.SELECT);
+    const before = count();
+    const c = ed.canvas;
+    const r = c.getBoundingClientRect();
+    const mid = { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, bubbles: true };
+    c.dispatchEvent(new PointerEvent('pointerdown', { ...mid, button: 0 }));
+    c.dispatchEvent(new PointerEvent('pointermove', {
+      ...mid, clientX: mid.clientX + 90, button: 0,
+    }));
+    window.dispatchEvent(new PointerEvent('pointerup', {
+      ...mid, clientX: mid.clientX + 90, button: 0,
+    }));
+    expect(count(), 'nothing was built by looking around').toBe(before);
+  });
+
+  it('a click on the machine puts one down', () => {
+    const ed = armed();
+    const c = ed.canvas;
+    const before = count();
+    clickAt(c.clientWidth / 2, c.clientHeight / 2);
+    expect(count(), 'one more part').toBe(before + 1);
+  });
+
+  it('and it lands where the cursor was, not on the middle of the face', () => {
+    const ed = armed();
+    ed.newBlockSize = [0.25, 0.25, 0.25];
+    const c = ed.canvas;
+    const before = count();
+    // Off to one side of the core, still on it.
+    clickAt(c.clientWidth / 2 + 26, c.clientHeight / 2);
+    expect(count()).toBe(before + 1);
+    const made = [...app.assembly.parts.values()].pop();
+    const off = Math.hypot(made.mount.pos[0], made.mount.pos[1], made.mount.pos[2]);
+    const along = Math.max(...made.mount.pos.map(Math.abs));
+    expect(off, 'it is off the centre line of the face').toBeGreaterThan(along + 1e-6);
+  });
+
+  it('dragging lays a row, and the whole row is one undo', () => {
+    const ed = armed();
+    ed.newBlockSize = [0.25, 0.25, 0.25];
+    const c = ed.canvas;
+    const before = count();
+    const undos = app.history.past.length;
+    dragAcross([c.clientWidth / 2 - 40, c.clientHeight / 2],
+      [c.clientWidth / 2 + 40, c.clientHeight / 2], 16);
+    const laid = count() - before;
+    expect(laid, 'more than one went down').toBeGreaterThan(1);
+    expect(app.history.past.length - undos, 'and it is one change').toBe(1);
+    app.undo();
+    expect(count(), 'which takes the lot back').toBe(before);
+  });
+
+  it('R turns the part before it is placed', () => {
+    const ed = armed();
+    expect(ed.placeTurn).toBe(0);
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyR', bubbles: true }));
+    expect(ed.placeTurn, 'a quarter turn').toBe(1);
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyR', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyR', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyR', bubbles: true }));
+    expect(ed.placeTurn, 'and four come back round').toBe(0);
+    app.setTool(TOOL.SELECT);
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyR', bubbles: true }));
+    expect(app.editor.gizmoMode, 'empty-handed it is still the gizmo').toBe('rotate');
+  });
+
+  it('the ghost shows up the moment the tool is armed', () => {
+    // It used to wait for the next mouse move, so arming a tool and being
+    // shown nothing read as "that did not work".
+    const ed = armed(TOOL.SELECT);
+    const c = ed.canvas;
+    const r = c.getBoundingClientRect();
+    c.dispatchEvent(new PointerEvent('pointermove', {
+      clientX: r.left + c.clientWidth / 2, clientY: r.top + c.clientHeight / 2, bubbles: true,
+    }));
+    app.setTool(TOOL.BLOCK);
+    expect(app.editor.ghost.visible, 'there it is').toBe(true);
+    expect(app.editor.pendingPlacement, 'and it knows where it would go').toBeTruthy();
+  });
+
+  it('an unarmed stamp shows nothing at all', () => {
+    // The old guard hid the ghost and the next line turned it straight on again.
+    const ed = armed(TOOL.STAMP);
+    ed.stampSource = null;
+    const c = ed.canvas;
+    const r = c.getBoundingClientRect();
+    c.dispatchEvent(new PointerEvent('pointermove', {
+      clientX: r.left + c.clientWidth / 2, clientY: r.top + c.clientHeight / 2, bubbles: true,
+    }));
+    expect(ed.ghost.visible).toBe(false);
+    app.setTool(TOOL.SELECT);
+  });
+
+  it('the read-out says what is in hand, beside the cursor', () => {
+    const ed = armed();
+    const c = ed.canvas;
+    const r = c.getBoundingClientRect();
+    c.dispatchEvent(new PointerEvent('pointermove', {
+      clientX: r.left + c.clientWidth / 2, clientY: r.top + c.clientHeight / 2, bubbles: true,
+    }));
+    const el = document.querySelector('.placehint');
+    expect(el, 'there is one').toBeTruthy();
+    expect(el.classList.contains('hidden'), 'and it is showing').toBe(false);
+    expect(el.textContent, 'naming the shape').toContain('立方体');
+    app.setTool(TOOL.SELECT);
+    expect(el.classList.contains('hidden'), 'and it goes away again').toBe(true);
+  });
+
+  it('the ghost says when it would land inside something', () => {
+    const ed = armed();
+    const root = app.assembly.rootId;
+    // Well clear of the machine, so the only thing in the answer is the
+    // block this test puts there.
+    const spot = [0, 0, 14];
+    expect(ed._overlaps({
+      parentId: root, mount: { pos: spot, rot: [0, 0, 0, 1] }, size: [1, 1, 1],
+    }), 'out here on its own').toBe(false);
+
+    const b = app.assembly.addBlock(root, { pos: spot }, 2, { size: [1, 1, 1] });
+    ed.rebuild();
+    expect(ed._overlaps({
+      parentId: root, mount: { pos: spot, rot: [0, 0, 0, 1] }, size: [1, 1, 1],
+    }), 'straight on top of the one we just made').toBe(true);
+    expect(ed._overlaps({
+      parentId: root, mount: { pos: [0, 0, 18], rot: [0, 0, 0, 1] }, size: [1, 1, 1],
+    }), 'and clear of it again a few metres on').toBe(false);
+    app.assembly.remove(b.id);
+    ed.rebuild();
+  });
+
+  it('free placement stands on the floor, and the wheel lifts it', () => {
+    // It used to land at the height of whatever happened to be selected —
+    // a rule with no way to see it and nowhere it was written down.
+    const ed = armed();
+    ed.newBlockSize = [1, 1, 1];
+    expect(ed.workPlaneY, 'the floor to begin with').toBe(0);
+    ed.liftWorkPlane(4);
+    expect(ed.workPlaneY, 'and it goes up').toBeCloseTo(1, 5);
+    ed.liftWorkPlane(-40);
+    expect(ed.workPlaneY, 'but never through the floor').toBe(0);
+  });
+
+  it('Alt+click takes the part under the cursor into the tool', () => {
+    const ed = armed();
+    // Off on its own: framed on a part standing ON the machine, the ray
+    // still has the machine to get through first.
+    const made = app.assembly.addBlock(app.assembly.rootId, { pos: [0, 0, 14] }, 4, {
+      size: [0.5, 1.5, 0.5], shape: 'wedge',
+    });
+    ed.rebuild();
+    ed.newBlockSize = [1, 1, 1];
+    ed.newBlockShape = 'box';
+    ed.select(made.id);
+    ed.frameSelection();
+    ed.update(0);
+    const c = ed.canvas;
+    clickAt(c.clientWidth / 2, c.clientHeight / 2, { altKey: true });
+    expect(ed.newBlockShape, 'the shape came across').toBe('wedge');
+    expect(ed.newBlockSize, 'and the size with it').toEqual([0.5, 1.5, 0.5]);
+    app.assembly.remove(made.id);
+    ed.rebuild();
+  });
+
+  it('right-clicking deletes without leaving the tool', () => {
+    const ed = armed();
+    const made = app.assembly.addBlock(app.assembly.rootId, { pos: [0, 0, 14] }, 2, {
+      size: [1, 1, 1],
+    });
+    ed.rebuild();
+    ed.select(made.id);
+    ed.frameSelection();
+    ed.update(0);
+    const c = ed.canvas;
+    const r = c.getBoundingClientRect();
+    const at = {
+      clientX: r.left + c.clientWidth / 2, clientY: r.top + c.clientHeight / 2,
+      button: 2, bubbles: true,
+    };
+    c.dispatchEvent(new PointerEvent('pointermove', { ...at, button: -1 }));
+    c.dispatchEvent(new PointerEvent('pointerdown', at));
+    window.dispatchEvent(new PointerEvent('pointerup', at));
+    expect(app.assembly.get(made.id), 'gone').toBeFalsy();
+    expect(ed.tool, 'and we still have the block tool').toBe(TOOL.BLOCK);
+  });
+});
+
+describe('the other half of a placement', () => {
+  const armed = () => {
+    app.setMode('edit');
+    bare();
+    app.setTool(TOOL.BLOCK);
+    app.editor.symmetry = true;
+    return app.editor;
+  };
+
+  it('a twin goes on the other side of the MACHINE, not of its parent', () => {
+    // The old rule negated X in the parent's own frame, which is the body's
+    // centre line only when the parent is centred — so a detail put on the
+    // left shoulder came back on the same left shoulder.
+    const ed = armed();
+    ed.symmetry = false;
+    const arm = app.assembly.addBlock(app.assembly.rootId, { pos: [1.6, 0.6, 0] }, 2, {
+      size: [1, 1, 1],
+    });
+    ed.rebuild();
+
+    ed.symmetry = true;
+    const plan = {
+      parentId: arm.id,
+      mount: { pos: [0, 0.75, 0], rot: [0, 0, 0, 1] },
+      size: [0.5, 0.5, 0.5],
+    };
+    const twin = ed._mirrorPlan(plan);
+    expect(twin, 'there is one').toBeTruthy();
+    const host = ed.rig.nodes.get(twin.parentId);
+    host.group.updateMatrixWorld(true);
+    const world = host.group.localToWorld(
+      new THREE.Vector3().fromArray(twin.mount.pos),
+    );
+    ed.rig.root.worldToLocal(world);
+    expect(world.x, 'over on the other side of the body').toBeLessThan(-1);
+    expect(world.y, 'at the same height').toBeCloseTo(1.35, 1);
+    app.assembly.remove(arm.id);
+    ed.rebuild();
+  });
+
+  it('nothing is mirrored on the centre line', () => {
+    const ed = armed();
+    expect(ed._mirrorPlan({
+      parentId: app.assembly.rootId,
+      mount: { pos: [0, 1, 0], rot: [0, 0, 0, 1] },
+      size: [1, 1, 1],
+    })).toBeFalsy();
+  });
+});
+
+describe('after it is down', () => {
+  const built = () => {
+    app.setMode('edit');
+    bare();
+    app.setTool(TOOL.BLOCK);
+    app.editor.symmetry = false;
+    return app.editor;
+  };
+
+  it('resizing a flush block keeps it flush', () => {
+    // A block grows about its own middle, so half of everything added used
+    // to disappear into whatever it was standing on — from the inside,
+    // where nobody can see it.
+    const ed = built();
+    const core = app.assembly.get(app.assembly.rootId);
+    const top = (core.size[1] ?? 1) / 2;
+    const made = app.assembly.addBlock(app.assembly.rootId, {
+      pos: [0, top + 0.25, 0], rot: [0, 0, 0, 1], face: 2,
+    }, 2, { size: [0.5, 0.5, 0.5] });
+    ed.rebuild();
+    ed.select(made.id);
+    ed.resizeSelected([0.5, 1.5, 0.5]);
+    expect(made.mount.pos[1], 'its underside is still on the face')
+      .toBeCloseTo(top + 0.75, 5);
+    app.assembly.remove(made.id);
+    ed.rebuild();
+  });
+
+  it('and one placed in mid-air is left where it is', () => {
+    const ed = built();
+    const made = app.assembly.addBlock(app.assembly.rootId, { pos: [0, 3, 0] }, 2, {
+      size: [0.5, 0.5, 0.5],
+    });
+    ed.rebuild();
+    ed.select(made.id);
+    ed.resizeSelected([1.5, 1.5, 1.5]);
+    expect(made.mount.pos[1]).toBe(3);
+    app.assembly.remove(made.id);
+    ed.rebuild();
+  });
+
+  it('deleting says how much goes with it', () => {
+    const ed = built();
+    const a = app.assembly.addBlock(app.assembly.rootId, { pos: [0, 1.2, 0] }, 2, { size: [1, 1, 1] });
+    const b = app.assembly.addBlock(a.id, { pos: [0, 1, 0] }, 2, { size: [1, 1, 1] });
+    app.assembly.addBlock(b.id, { pos: [0, 1, 0] }, 2, { size: [1, 1, 1] });
+    ed.rebuild();
+    ed.select(a.id);
+    expect(ed.doomedCount(), 'the block and everything standing on it').toBe(3);
+    const before = app.assembly.parts.size;
+    ed.deleteSelected();
+    expect(before - app.assembly.parts.size, 'and that is what went').toBe(3);
+  });
+
+  it('a copy lands somewhere you can see it', () => {
+    // A fixed quarter of a metre put a copy of a two-metre block all but
+    // exactly on top of the block it came from.
+    const ed = built();
+    const made = app.assembly.addBlock(app.assembly.rootId, { pos: [0, 2, 0] }, 2, {
+      size: [2, 2, 2],
+    });
+    ed.rebuild();
+    ed.select(made.id);
+    const entries = ed.copySelected();
+    const [id] = ed.paste(entries);
+    ed.rebuild();
+    const copy = app.assembly.get(id);
+    const gap = Math.hypot(
+      copy.mount.pos[0] - made.mount.pos[0], copy.mount.pos[2] - made.mount.pos[2],
+    );
+    expect(gap, 'clear of the original').toBeGreaterThan(1);
+  });
+
+  it('the brush is the size it looks, on any block', () => {
+    // The grid always spans the block it belongs to, so a fixed share of
+    // the grid used to be four times bigger on a four-metre block.
+    const ed = built();
+    ed.brushPercent = 10;
+    const small = { size: [1, 1, 1] };
+    const big = { size: [4, 4, 4] };
+    const vox = { n: 32 };
+    const rs = ed.brushRadiusCells(vox, small);
+    const rb = ed.brushRadiusCells(vox, big);
+    expect(rs, 'it cuts something').toBeGreaterThan(0);
+    expect(rb, 'and so does the big one').toBeGreaterThan(0);
+    // Four times the block, so roughly a quarter of the cells to cover the
+    // same distance in the world. Whole cells, so this is a share and not a
+    // ratio to five places.
+    expect(rb, 'far fewer cells on the bigger block').toBeLessThan(rs / 2);
+  });
+});
+
 describe('teardown', () => {
   it('disposes cleanly', () => {
     shouldNotThrow(() => app.dispose(), 'dispose');
@@ -5864,6 +6781,11 @@ function render(results) {
 
 const rows = new Map();
 
+// ?only=<pattern> runs just the tests whose "describe > it" line matches.
+// `boot` always comes along: every other test reads the app it stands up.
+const only = new URLSearchParams(location.search).get('only');
+const pattern = only ? new RegExp(`^boot > |${only}`, 'i') : null;
+
 run((results) => {
   render(results);
   for (const suite of results.suites) {
@@ -5877,7 +6799,7 @@ run((results) => {
       rows.set(key, li);
     }
   }
-}).then((results) => {
+}, pattern).then((results) => {
   render(results);
   window.__TEST_RESULTS = results;
   document.body.dataset.done = 'true';

@@ -16,6 +16,23 @@ import { LOCK_COLOR } from '../core/constants.js';
 const _ndc = new THREE.Vector3();
 const TAU = Math.PI * 2;
 
+/**
+ * When your own condition starts showing, and how loudly.
+ *
+ * Silent while healthy on purpose. A border that is always red is a border
+ * nobody sees any more, and then it cannot tell you anything when it
+ * matters.
+ */
+const VITALS = {
+  /** Health fraction at which the frame begins to darken. */
+  showBelow: 0.6,
+  /** ...and at which it starts beating. */
+  beatBelow: 0.3,
+  /** How far in it reaches, as a fraction of the shorter screen edge. */
+  depth: 0.16,
+  alpha: 0.5,
+};
+
 export class Hud {
   constructor(canvas) {
     this.canvas = canvas;
@@ -142,6 +159,50 @@ export class Hud {
     this._drawTelemetry(s, ctx);
     this._drawWeapons(s, ctx);
     if (s.mission) this._drawMission(s.mission, ctx);
+    // Last, over everything: how close you are to losing is not a detail to
+    // be read past other details.
+    this._drawVitals(s, ctx, dt);
+  }
+
+  /**
+   * Your own health, as the EDGE of the screen rather than a number.
+   *
+   * There used to be nothing at all — the reticle carried an arc for the
+   * target's health and the player's own was nowhere, which was survivable
+   * only for as long as nothing could shoot back.
+   *
+   * A number would be correct and useless: it sits somewhere specific, and
+   * the whole point is to know how badly you are doing WITHOUT looking away
+   * from the fight. The frame darkening and then beating is read out of the
+   * corner of the eye, which is the only attention a fight has spare.
+   */
+  _drawVitals(s, ctx, dt) {
+    const p = s.player;
+    if (!p || !p.maxHp) return;
+    const left = clamp01(p.hp / p.maxHp);
+    // Nothing at all while healthy: a permanent red border is a border you
+    // stop seeing, and then it cannot warn you of anything.
+    const hurt = 1 - Math.min(1, left / VITALS.showBelow);
+    this.vitalPulse = (this.vitalPulse ?? 0) + dt * lerp(2.2, 7.5, 1 - left);
+    if (hurt <= 0.001) return;
+
+    const beat = left < VITALS.beatBelow
+      ? 0.55 + 0.45 * Math.sin(this.vitalPulse * TAU)
+      : 1;
+    const depth = Math.min(this.w, this.h) * VITALS.depth;
+    const alpha = hurt ** 1.4 * VITALS.alpha * beat;
+
+    for (const [x0, y0, x1, y1] of [
+      [0, 0, 0, depth], [0, this.h, 0, this.h - depth],
+      [0, 0, depth, 0], [this.w, 0, this.w - depth, 0],
+    ]) {
+      const g = ctx.createLinearGradient(x0, y0, x1, y1);
+      g.addColorStop(0, `rgba(255, 58, 48, ${alpha})`);
+      g.addColorStop(1, 'rgba(255, 58, 48, 0)');
+      ctx.fillStyle = g;
+      if (x0 === x1) ctx.fillRect(0, Math.min(y0, y1), this.w, depth);
+      else ctx.fillRect(Math.min(x0, x1), 0, depth, this.h);
+    }
   }
 
   /**

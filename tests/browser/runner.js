@@ -75,6 +75,16 @@ class Assertion {
     if (this.actual?.length !== n) this._fail(`expected length ${n}, got ${this.actual?.length}`);
   }
 
+  /** `expect(fn).toThrow()` — and, inverted, that it does not. */
+  toThrow(contains = null) {
+    let msg = null;
+    try { this.actual(); } catch (e) { msg = e?.message ?? String(e); }
+    if (msg === null) this._fail('expected it to throw, and nothing did');
+    if (contains && !msg.includes(contains)) {
+      this._fail(`expected the message to contain ${fmt(contains)}, got ${fmt(msg)}`);
+    }
+  }
+
   toBeInstanceOf(cls) {
     if (!(this.actual instanceof cls)) this._fail(`expected an instance of ${cls.name}`);
   }
@@ -124,13 +134,26 @@ function yieldToLoop() {
   });
 }
 
-export async function run(onProgress = () => {}) {
+/**
+ * Run the suite, optionally only the tests whose "describe > it" line
+ * matches `only`.
+ *
+ * A full pass takes twenty minutes in a hidden tab, which is a long time to
+ * wait to find out whether one line of one test was right. The suite shares
+ * one live app between its tests on purpose, so a filtered run is a way to
+ * LOOK at something, not a way to prove it — the answer still comes from a
+ * whole pass.
+ */
+export async function run(onProgress = () => {}, only = null) {
   const results = { passed: 0, failed: 0, total: 0, failures: [], suites: [] };
+  const wanted = (suite, test) => !only || only.test(`${suite.name} > ${test.name}`);
 
   for (const suite of suites) {
+    if (!suite.tests.some((t) => wanted(suite, t))) continue;
     const entry = { name: suite.name, tests: [] };
     results.suites.push(entry);
     for (const test of suite.tests) {
+      if (!wanted(suite, test)) continue;
       results.total++;
       try {
         await test.fn();

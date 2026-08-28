@@ -75,6 +75,31 @@ export class EditorUI {
     this._build();
   }
 
+  /** Set the size the next block will be placed at, sliders and all. */
+  _setNewSize(size) {
+    this.app.editor.newBlockSize = [...size];
+    this.newSizeSliders.forEach((s, i) => s.set(size[i]));
+    return size;
+  }
+
+  /**
+   * What the cursor is about to put down, beside the cursor.
+   *
+   * The shape is picked on the left, the colour on the right and the spot in
+   * the middle, so placing one block meant reading three corners of the
+   * screen. This is the answer where the question is being asked.
+   */
+  showPlacementHint(hint) {
+    const el = this.placeHint;
+    if (!el) return;
+    if (!hint) { el.classList.add('hidden'); return; }
+    el.textContent = hint.text;
+    el.classList.toggle('blocked', !!hint.blocked);
+    el.classList.remove('hidden');
+    el.style.left = `${hint.x + 16}px`;
+    el.style.top = `${hint.y + 18}px`;
+  }
+
   // ---------------------------------------------------------- build
 
   _build() {
@@ -176,10 +201,22 @@ export class EditorUI {
       type: 'checkbox', checked: 'checked',
       onChange: (e) => app.editor.setSnap(e.target.checked),
     });
+    /**
+     * How coarse the grid is.
+     *
+     * One fixed quarter of a metre is too coarse for a small detail and too
+     * fine for a big frame, and the same person wants both within a minute.
+     */
+    this.snapStep = h('select', {
+      onChange: (e) => { app.editor.snapStep = Number(e.target.value); },
+    }, ...[0.05, 0.125, 0.25, 0.5].map((n) => h('option', {
+      value: n, ...(n === SIZE_STEP ? { selected: 'selected' } : {}),
+    }, `${n} m`)));
 
     this.gizmoBox = h('div', {},
       h('div', { class: 'row tight' }, ...this.gizmoButtons),
-      h('label', { class: 'checkline' }, this.snapToggle, `0.25 / 15° にスナップ`),
+      h('label', { class: 'checkline' }, this.snapToggle, 'グリッドと 15° にスナップ'),
+      h('label', { class: 'field' }, h('span', {}, 'グリッド'), this.snapStep),
       h('div', { class: 'row tight' },
         h('button', { onClick: () => app.editor.selectAll() }, '全選択'),
         h('button', { onClick: () => app.editor.duplicateSelected() }, '複製'),
@@ -201,9 +238,16 @@ export class EditorUI {
     );
 
     // --- new block size
+    /** Linked by default: most blocks anyone places are cubes. */
+    this.sizeLinked = h('input', { type: 'checkbox', checked: 'checked' });
     this.newSizeSliders = ['X', 'Y', 'Z'].map((axis, i) => slider(`幅 ${axis}`, {
       min: SIZE_MIN, max: SIZE_MAX, step: SIZE_STEP, value: 1, fixed: 2,
-    }, (v) => { app.editor.newBlockSize[i] = v; }));
+    }, (v) => {
+      app.editor.newBlockSize[i] = v;
+      // Three sliders to make a cube bigger was three chances to make it
+      // very slightly not a cube.
+      if (this.sizeLinked.checked) this._setNewSize([v, v, v]);
+    }));
 
     this.newShapeButtons = new Map();
     this.blockBox = h('div', {},
@@ -213,8 +257,20 @@ export class EditorUI {
         (id) => app.setNewBlockShape(id),
         this.newShapeButtons,
       ),
-      h('div', { class: 'note' }, 'この形で新しいブロックを置きます。あとから変えられます。'),
+      h('div', { class: 'note' },
+        '面をクリックすると、押した所にぴったり付きます。',
+        h('br'), '何もない所をクリックすると、床の上に置きます（',
+        h('b', {}, 'Shift+ホイール'), 'で高さ）。',
+        h('br'), h('b', {}, 'R'), 'で向きを90°回す。', h('b', {}, 'ドラッグ'), 'で連続配置。',
+        h('br'), h('b', {}, 'Alt+クリック'), 'でその部品の形・寸法・色を写す。',
+        h('b', {}, '右クリック'), 'で削除。'),
       h('h3', { class: 'inline' }, '寸法'),
+      h('label', { class: 'checkline' }, this.sizeLinked, '縦横高さを揃える'),
+      h('div', { class: 'row tight' },
+        ...[0.25, 0.5, 1, 2].map((n) => h('button', {
+          onClick: () => this._setNewSize([n, n, n]),
+        }, String(n))),
+      ),
       ...this.newSizeSliders,
     );
 
@@ -291,7 +347,8 @@ export class EditorUI {
     );
 
     this.symmetryToggle = h('input', {
-      type: 'checkbox', onChange: (e) => { app.editor.symmetry = e.target.checked; },
+      type: 'checkbox', checked: 'checked',
+      onChange: (e) => { app.editor.symmetry = e.target.checked; },
     });
     this.previewToggle = h('input', {
       type: 'checkbox', onChange: (e) => app.editor.setPreviewMotion(e.target.checked),
@@ -322,6 +379,11 @@ export class EditorUI {
     // three more buttons is three more rows between you and everything else.
     this.sculptTools = collapsible('加工 (上級)',
       h('div', { class: 'body' }, ...SCULPT_LIST.map(mkTool)), { open: false });
+
+    // Rides over the viewport, next to the cursor, out of the way of the
+    // pointer itself.
+    this.placeHint = h('div', { class: 'placehint hidden' });
+    this.root.append(this.placeHint);
 
     this.leftScroll = h('div', { class: 'panelscroll' });
     this.leftPanel = resizable(
@@ -359,6 +421,16 @@ export class EditorUI {
 
     this.inspectorEl = h('div', { class: 'body' });
     this.statsEl = h('div', { class: 'body' });
+    /**
+     * The three numbers that decide how the machine will PLAY, on screen at
+     * all times.
+     *
+     * They used to live in a panel that started folded, so a builder could
+     * add twenty blocks and get no hint that the thing now handles like a
+     * filing cabinet. This is the feedback loop the editor is missing
+     * without it — the full panel is still there for the rest.
+     */
+    this.specStrip = h('div', { class: 'specstrip' });
     this.libraryEl = h('div', { class: 'body' });
     this.librarySection = collapsible('パーツ庫', this.libraryEl, { open: false });
 
@@ -376,22 +448,27 @@ export class EditorUI {
         ),
         this.treeEl,
       ),
-      { open: false },
+      // Open: this is the only way to reach a part that something else is
+      // covering, which is most of them on a finished machine.
+      { open: true },
     );
 
     this.rightScroll = h('div', { class: 'panelscroll' });
     this.rightPanel = resizable(
       h('div', { class: 'panel', id: 'rightpanel' },
         append(this.rightScroll,
+          this.specStrip,
           this.treeSection,
           this.librarySection,
+          // Open. Colour is picked as often as anything on this panel, and
+          // folded away it is four actions from "I want that one red".
           collapsible('色', h('div', { class: 'body' },
             this.paletteEl,
             h('h3', { class: 'inline' }, 'カスタム色'),
             this.customEl,
             this.wheelToggle,
             this.wheelWrap,
-          ), { open: false }),
+          )),
           collapsible('インスペクタ', this.inspectorEl),
           collapsible('スペック', this.statsEl, { open: false }),
         ),
@@ -469,10 +546,40 @@ export class EditorUI {
       this.help.el, this.title.el, this.result.el, this.toast,
     );
 
+    this._bindGestures();
     this.renderPalette();
     this.syncTool(app.editor.tool);
     this.syncResolution(app.assembly.voxRes);
     this.syncFieldHint();
+  }
+
+  /**
+   * Treat a held slider as ONE change, everywhere, forever.
+   *
+   * Bound once by delegation rather than passed into fifteen slider call
+   * sites: every slider on the panel is covered, including the ones that do
+   * not exist yet, and no future one can forget to opt in. A range input is
+   * the only control here that a player holds on to — everything else
+   * commits on release already.
+   */
+  _bindGestures() {
+    const app = this.app;
+    const isSlider = (el) => el && el.tagName === 'INPUT' && el.type === 'range';
+
+    this.root.addEventListener('pointerdown', (e) => {
+      if (isSlider(e.target)) app.beginGesture();
+    }, true);
+    // On the window, because a drag that leaves the panel still ends.
+    for (const type of ['pointerup', 'pointercancel']) {
+      window.addEventListener(type, () => app.endGesture(), true);
+    }
+    // Arrow keys nudge a focused slider, and holding one repeats: same deal.
+    this.root.addEventListener('keydown', (e) => {
+      if (isSlider(e.target) && !e.repeat) app.beginGesture();
+    }, true);
+    this.root.addEventListener('keyup', (e) => {
+      if (isSlider(e.target)) app.endGesture();
+    }, true);
   }
 
   /** Redraw the field control strip from whatever the keys are bound to now. */
@@ -519,6 +626,37 @@ export class EditorUI {
     if (isSculpt) this.sculptTools.setOpen(true);
 
     this.syncEquipType(this.app.editor.equipType);
+    this._revealToolSettings();
+  }
+
+  /**
+   * Bring the armed tool's own settings into view.
+   *
+   * The tool list above them is a fixed 312 pixels and never folds, so on a
+   * 720-high window the settings for whatever you just picked start below
+   * the fold — the plate-size slider sat a hundred pixels past the bottom of
+   * the panel. Arming a tool and not being shown its settings is the panel
+   * hiding the one thing you just asked for.
+   */
+  _revealToolSettings() {
+    const section = this.toolSections.find((sec) => !sec.classList.contains('hidden'));
+    const scroll = this.leftScroll;
+    if (!section || !scroll?.isConnected) return;
+    const box = section.getBoundingClientRect();
+    const view = scroll.getBoundingClientRect();
+    if (!view.height) return;
+    // Rects come back in screen pixels and scrollTop is in layout pixels.
+    // They are the same number until something up the tree is scaled, and
+    // then scrolling by a measured rect moves a fraction of the distance it
+    // was asked for.
+    const scale = view.height / (scroll.offsetHeight || view.height) || 1;
+    const over = (box.bottom - view.bottom) / scale;
+    // Only ever scrolls DOWN to reveal, and never past the section's own top:
+    // yanking the panel about when nothing was hidden is its own annoyance.
+    if (over > 1) {
+      const room = Math.max(0, (box.top - view.top) / scale);
+      scroll.scrollTop += Math.min(over, room);
+    }
   }
 
   /** Enable / disable the undo buttons and say what they would reverse. */
@@ -749,15 +887,81 @@ export class EditorUI {
           h('button', { onClick: () => this.app.editor.duplicateSelected() }, '複製'),
           h('button', { onClick: () => this.app.editor.clearSelection() }, '選択解除'),
         ),
+        ...this._bulkEdits(list),
         h('button', {
           class: 'danger wide', style: 'margin-top:8px',
           onClick: () => this.app.editor.deleteSelected(),
-        }, `${list.filter((p) => p.kind !== 'core').length} パーツを削除 (Del)`),
+        }, `${this.app.editor.doomedCount()} パーツを削除 (Del)`),
       );
       return;
     }
 
     this.inspectorEl.append(...this._singleInspector(list[0]));
+  }
+
+  /**
+   * What can be changed about a whole selection at once.
+   *
+   * Selecting four legs and making them all thicker is the entire reason to
+   * select four things, and this panel used to offer connect, duplicate and
+   * delete — the operations that do not care WHAT you picked. Everything
+   * that describes a part was single-only, so the shortest route to "these
+   * four, but wider" was to do it four times.
+   *
+   * Each block only appears when the selection actually holds something it
+   * applies to, so a mixed bag of blocks and bones shows the blocks' row and
+   * says nothing about bones.
+   */
+  _bulkEdits(list) {
+    const app = this.app;
+    const rows = [];
+    const blocks = list.filter((p) => p.kind === 'block' || p.kind === 'core');
+    const bones = list.filter((p) => p.kind === 'bone');
+    const plates = list.filter((p) => p.kind === 'equip');
+
+    if (blocks.length) {
+      rows.push(h('h3', { class: 'inline' }, `寸法 — ${blocks.length} ブロック`));
+      // Started from the first one rather than from nothing: a slider with
+      // no value is a slider you have to find the right end of first.
+      const base = blocks[0].size;
+      const set = (i, v) => {
+        const size = [...(app.editor.assembly.get(blocks[0].id)?.size ?? base)];
+        size[i] = v;
+        app.editor.resizeSelected(size);
+      };
+      rows.push(...['X', 'Y', 'Z'].map((axis, i) => slider(`幅 ${axis}`, {
+        min: SIZE_MIN, max: SIZE_MAX, step: SIZE_STEP, value: base[i], fixed: 2,
+      }, (v) => set(i, v))));
+
+      rows.push(h('h3', { class: 'inline' }, '形'));
+      rows.push(...this._shapeGrid(() => blocks[0].shape, (id) => app.editor.setBlockShapeSelected(id)));
+      rows.push(h('div', { class: 'note' },
+        '色は右の「色」から。選んでいるブロック全部が塗り替わります。'));
+    }
+
+    if (bones.length) {
+      rows.push(h('h3', { class: 'inline' }, `ボーン — ${bones.length} 本`));
+      const b = bones[0];
+      rows.push(slider('長さ', {
+        min: BONE_LENGTH_MIN, max: BONE_LENGTH_MAX, step: 0.25, value: b.length, fixed: 2,
+      }, (v) => app.editor.setBoneShapeSelected({ length: v })));
+      rows.push(slider('太さ', {
+        min: BONE_RADIUS_MIN, max: BONE_RADIUS_MAX, step: 0.01, value: b.radius, fixed: 2,
+      }, (v) => app.editor.setBoneShapeSelected({ radius: v })));
+      rows.push(slider('可動域', {
+        min: 10, max: 170, step: 5, value: b.limit, unit: '°',
+      }, (v) => app.editor.setBoneShapeSelected({ limit: v })));
+    }
+
+    if (plates.length) {
+      rows.push(h('h3', { class: 'inline' }, `プレート — ${plates.length} 枚`));
+      rows.push(slider('プレート径', {
+        min: EQUIP_SIZE_MIN, max: EQUIP_SIZE_MAX, step: EQUIP_SIZE_STEP,
+        value: plates[0].size, fixed: 2,
+      }, (v) => app.editor.setEquipSizeSelected(v)));
+    }
+
+    return rows;
   }
 
   _singleInspector(part) {
@@ -1007,17 +1211,28 @@ export class EditorUI {
         h('button', { onClick: () => app.uniformSize(0.5) }, '0.5'),
       ));
 
-      rows.push(h('h3', { class: 'inline' }, '形'));
-      rows.push(...this._shapeGrid(
-        () => part.shape ?? SHAPE_DEFAULT,
-        (id) => {
-          app.editor.setBlockShapeSelected(id);
-          this.renderInspector(app.editor.selectedParts());
-        },
-      ));
-      rows.push(h('div', { class: 'note' },
-        '形を変えると、そのブロックの中身は作り直されます（彫った跡は消えます）。',
-        h('br'), '寸法を変えれば、球は楕円に、円柱は角柱のように潰れます。'));
+      // Twenty buttons is most of the panel's height, and a block's shape is
+      // settled long before its size is. Say what it IS, and open the rack
+      // on request.
+      const now = part.shape ?? SHAPE_DEFAULT;
+      const label = (open) => `形: ${SHAPES[now]?.label ?? now} ${open ? '▴' : '▾'}`;
+      const shapeGrid = h('div', { class: 'collapsed' },
+        ...this._shapeGrid(
+          () => now,
+          (id) => {
+            app.editor.setBlockShapeSelected(id);
+            this.renderInspector(app.editor.selectedParts());
+          },
+        ),
+        h('div', { class: 'note' },
+          '形を変えると、そのブロックの中身は作り直されます（彫った跡は消えます）。',
+          h('br'), '寸法を変えれば、球は楕円に、円柱は角柱のように潰れます。'),
+      );
+      const shapeBtn = h('button', { class: 'ghost wide' }, label(false));
+      shapeBtn.addEventListener('click', () => {
+        shapeBtn.textContent = label(!shapeGrid.classList.toggle('collapsed'));
+      });
+      rows.push(h('h3', { class: 'inline' }, '形'), shapeBtn, shapeGrid);
 
       rows.push(h('h3', { class: 'inline' }, '中身'));
       const vox = part.vox;
@@ -1035,7 +1250,15 @@ export class EditorUI {
     if (!isCore) {
       rows.push(h('div', { class: 'row tight', style: 'margin-top:8px' },
         h('button', { onClick: () => app.editor.duplicateSelected() }, '複製'),
-        h('button', { class: 'danger', onClick: () => app.editor.deleteSelected() }, '削除 (Del)'),
+        h('button', {
+          class: 'danger',
+          onClick: () => app.editor.deleteSelected(),
+        }, (() => {
+          // Say what goes WITH it. Deleting one block takes everything
+          // standing on it, and the outline only ever drew the one.
+          const n = app.editor.doomedCount();
+          return n > 1 ? `削除 ${n}個 (Del)` : '削除 (Del)';
+        })()),
       ));
     } else {
       rows.push(h('div', { class: 'inspector-empty', style: 'margin-top:6px' },
@@ -1170,6 +1393,16 @@ export class EditorUI {
 
   renderStats(stats) {
     const pct = (v) => `${Math.round(v * 100)}%`;
+
+    const cell = (k, v, cls = '') => h('div', { class: 'speccell' },
+      h('span', { class: 'k' }, k), h('span', { class: `v ${cls}` }, v));
+    this.specStrip.replaceChildren(
+      cell('質量', stats.mass.toFixed(1)),
+      cell('機動', stats.thrustToMass.toFixed(1),
+        stats.agility > 0.55 ? 'good' : stats.agility < 0.22 ? 'warn' : ''),
+      cell('耐久', String(Math.round(stats.durability * (1 + (stats.hpBonus ?? 0))))),
+      cell('脚', String(stats.legs)),
+    );
 
     this.statsEl.replaceChildren(
       // The machine's gait is not named here, and deliberately. Stamping a

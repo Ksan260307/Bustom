@@ -4,12 +4,13 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { Rig, ridesFarHalf } from '../core/Rig.js';
 import { Assembly, computeStats, faceAnchor, alignYToFace } from '../core/Assembly.js';
 import { Animator } from '../anim/Animator.js';
-import { SHAPE_DEFAULT } from '../core/Shapes.js';
+import { SHAPE_DEFAULT, SHAPES } from '../core/Shapes.js';
 import { makeSky, EDITOR_SKY } from '../game/Sky.js';
 import { PostFX } from '../game/PostFX.js';
 import { VoxelBlock } from '../core/VoxelBlock.js';
 import {
   SIZE_STEP, SIZE_MAX, EQUIP, EQUIP_META, EQUIP_THICKNESS, EQUIP_SIZE_DEFAULT,
+  FACE_NORMAL, FACE_AXIS,
 } from '../core/constants.js';
 
 // ============================================================
@@ -28,6 +29,7 @@ const _ndc = new THREE.Vector2();
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _q = new THREE.Quaternion();
+const _q2 = new THREE.Quaternion();
 const _s = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 /** Separate from _m: _applyWorldTransform reuses _m, and the drag delta must
@@ -35,7 +37,24 @@ const _m = new THREE.Matrix4();
 const _delta = new THREE.Matrix4();
 const _next = new THREE.Matrix4();
 const _plane = new THREE.Plane();
+const _box = new THREE.Box3();
+const _box2 = new THREE.Box3();
 const UP_VEC = new THREE.Vector3(0, 1, 0);
+
+/**
+ * How far the pointer may travel and still count as a click.
+ *
+ * The camera and the tools share the pointer, so "did you mean to press
+ * here, or to look over there?" has to be answered by something. A few
+ * pixels of slop covers the wobble in a real hand on a real mouse.
+ */
+const CLICK_SLOP = 4;
+
+/** How high the free-placement plane can be lifted off the floor. */
+const PLANE_MAX = 12;
+
+/** The block the brush slider is calibrated against, in metres. */
+const BRUSH_REFERENCE = 1;
 
 export const TOOL = {
   SELECT: 'select',
@@ -99,6 +118,8 @@ export class EditorScene {
     this.selection = new Set();
     this.gizmoMode = 'translate';
     this.snap = true;
+    /** How coarse the placement grid is, in metres. */
+    this.snapStep = SIZE_STEP;
     this.hoverVoxel = null;
     this.previewMotion = false;
     /** Circle lines are a building aid, so they are on while building. */
@@ -107,7 +128,15 @@ export class EditorScene {
     this.gimmickOff = new Set();
     /** A mount moved, so which parts a circle carries needs deciding again. */
     this._ringsStale = false;
-    this.symmetry = false;
+    /**
+     * Mirrored placement, ON by default.
+     *
+     * Nearly every machine anyone builds is symmetrical, so the default that
+     * costs nothing is the one that puts the other arm on for you. Turning
+     * it off is one click; noticing it exists after building half a machine
+     * by hand is not.
+     */
+    this.symmetry = true;
 
     this.onChange = () => {};
     this.onSelect = () => {};
@@ -127,6 +156,31 @@ export class EditorScene {
     this.equipType = EQUIP.BEAM;
     this.newEquipSize = EQUIP_SIZE_DEFAULT;
     this.stampSize = [1, 1, 1];
+    /** Where the stamp's own root sits inside those bounds. */
+    this.stampOffset = [0, 0, 0];
+
+    /**
+     * Quarter turns applied to the part about to be placed, about the face
+     * it is landing on.
+     *
+     * Fourteen of the twenty-one shapes have a front and a top — a wedge, a
+     * stair, an arch — and without this the only way to point one was to
+     * place it and then type into the rotation field.
+     */
+    this.placeTurn = 0;
+    /**
+     * Height of the plane a free-floating part lands on. The floor to begin
+     * with, so a machine can be built up from the ground; raised and lowered
+     * with the wheel.
+     */
+    this.workPlaneY = 0;
+    /** True while the ghost is overlapping something it is not resting on. */
+    this.placeBlocked = false;
+    /** What the read-out beside the cursor should say, or null for nothing. */
+    this.placementHint = null;
+    this.onHint = () => {};
+    /** Opened and closed around a drag that lays a row of parts. */
+    this.onGesture = () => {};
 
     this._buildEnvironment();
     this._buildOverlays();
@@ -134,6 +188,9 @@ export class EditorScene {
     this._buildGizmo();
     this._bindPointer();
     this._syncCameraButtons();
+    this._cursor = { x: 0, y: 0 };
+    /** The spot the last part in a drag went, so the next one is elsewhere. */
+    this._lastLaid = null;
     this.time = 0;
     this.active = false;
   }
@@ -248,6 +305,9 @@ export class EditorScene {
     this.ghostBox = new THREE.BoxGeometry(1, 1, 1);
     /** Ghost bodies for each block shape, cut once and kept. */
     this.ghostShapes = new Map();
+    /** And their outlines. */
+    this.ghostEdgeGeos = new Map();
+    this.boxEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
     this.ghost = new THREE.Mesh(
       this.ghostBox,
       new THREE.MeshBasicMaterial({
@@ -255,13 +315,74 @@ export class EditorScene {
       }),
     );
     this.ghostWire = new THREE.LineSegments(
-      new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+      this.boxEdges,
       new THREE.LineBasicMaterial({ color: 0x9fe8ff, transparent: true, opacity: 0.8, depthTest: false }),
     );
     this.ghost.add(this.ghostWire);
+    /**
+     * The room the block takes up, under the outline of its actual shape.
+     *
+     * The outline used to be a box and only a box, which drew a crate round
+     * a sphere — but the box is not nothing either: it is the footprint that
+     * decides where the next one can go. So both, and the footprint faint.
+     */
+    this.ghostFootprint = new THREE.LineSegments(this.boxEdges, new THREE.LineBasicMaterial({
+      color: 0x9fe8ff, transparent: true, opacity: 0.22, depthTest: false,
+    }));
+    this.ghostFootprint.visible = false;
+    this.ghost.add(this.ghostFootprint);
     this.ghost.visible = false;
     this.ghost.renderOrder = 9;
     this.scene.add(this.ghost);
+
+    /**
+     * The other one, when mirrored placement is on.
+     *
+     * Symmetry is on by default because almost every machine is symmetrical
+     * and it halves the work — but "one click puts down two parts" is a
+     * surprising thing to learn AFTER clicking. Showing the twin before the
+     * click makes the setting explain itself, and a checkbox nobody has to
+     * find is worth more than one they have to be told about.
+     */
+    this.ghostTwin = new THREE.Mesh(this.ghost.geometry, this.ghost.material);
+    this.ghostTwin.add(new THREE.LineSegments(
+      this.ghostWire.geometry, this.ghostWire.material,
+    ));
+    this.ghostTwin.visible = false;
+    this.ghostTwin.renderOrder = 9;
+    this.scene.add(this.ghostTwin);
+
+    /** Which part the next click would attach to. */
+    this.hostOutline = new THREE.LineSegments(this.outlineGeo, new THREE.LineBasicMaterial({
+      color: 0x8effc9, transparent: true, opacity: 0.55, depthTest: false,
+    }));
+    this.hostOutline.visible = false;
+    this.hostOutline.renderOrder = 10;
+    this.scene.add(this.hostOutline);
+
+    /**
+     * Where the floor is, for a part being dropped in mid-air.
+     *
+     * A part hanging in space with nothing under it gives the eye nothing to
+     * measure its height against, and height is the one thing the ghost
+     * cannot show on its own.
+     */
+    const markGeo = new THREE.BufferGeometry().setFromPoints(
+      Array.from({ length: 33 }, (_, i) => new THREE.Vector3(
+        Math.cos((i / 32) * Math.PI * 2) * 0.5, 0, Math.sin((i / 32) * Math.PI * 2) * 0.5,
+      )),
+    );
+    this.planeMark = new THREE.Line(markGeo, new THREE.LineBasicMaterial({
+      color: 0x4fd2ff, transparent: true, opacity: 0.55,
+    }));
+    this.planeDrop = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 1, 0)]),
+      new THREE.LineBasicMaterial({ color: 0x4fd2ff, transparent: true, opacity: 0.4 }),
+    );
+    this.planeMark.visible = false;
+    this.planeDrop.visible = false;
+    this.scene.add(this.planeMark);
+    this.scene.add(this.planeDrop);
 
     // voxel cursor
     this.voxCursor = new THREE.Mesh(
@@ -397,12 +518,16 @@ export class EditorScene {
   }
 
   /**
-   * Sculpting needs the left button for the brush, so the camera moves to the
-   * right button. Zoom stays on the wheel in every mode.
+   * Working needs the left button, so the camera moves to the right one.
+   *
+   * Placing used to SHARE the left button with the camera: the press landed
+   * a part and the drag then swung the view, so every attempt to look round
+   * the machine dropped a block first. Sculpting had already been given the
+   * button to itself for exactly this reason; placing gets the same deal.
    */
   _syncCameraButtons() {
-    const sculpting = SCULPT_TOOLS.has(this.tool);
-    this.controls.mouseButtons = sculpting
+    const working = SCULPT_TOOLS.has(this.tool) || PART_TOOLS.has(this.tool);
+    this.controls.mouseButtons = working
       ? { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }
       : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
     this.controls.enableZoom = true;
@@ -557,10 +682,25 @@ export class EditorScene {
 
   clearSelection() { this.select(null); }
 
+  /**
+   * Everything that would go if the selection were deleted, including the
+   * parts standing on it. Removing a block takes its whole subtree, and a
+   * count is the least the button can say before it happens.
+   */
+  doomedCount() {
+    const doomed = new Set();
+    for (const id of this.selection) {
+      if (id === this.assembly.rootId) continue;
+      for (const d of this.assembly.subtree(id)) doomed.add(d);
+    }
+    return doomed.size;
+  }
+
   deleteSelected() {
     const doomed = [...this.selection].filter((id) => id !== this.assembly.rootId);
     if (!doomed.length) return false;
-    this.onBeforeChange('削除');
+    const n = this.doomedCount();
+    this.onBeforeChange(n > doomed.length ? `削除 (${n})` : '削除');
     for (const id of doomed) this.assembly.remove(id);
     this.selection.clear();
     this.rebuild();
@@ -627,8 +767,22 @@ export class EditorScene {
     this.pivot.quaternion.identity();
     this.pivot.updateMatrixWorld(true);
 
-    if (this.tool === TOOL.SELECT) this.gizmo.attach(this.pivot);
-    else this.gizmo.detach();
+    // The gizmo follows the SELECTION, not the tool.
+    //
+    // It used to appear only under the select tool, so the loop everybody
+    // actually runs — place a part, then nudge it into place — cost a mode
+    // switch every single time, on a part that was already selected and
+    // already showing its numbers in the inspector.
+    //
+    // It shrinks while a placement tool is armed: the handles sit right over
+    // the faces you would click to place the NEXT part, and a smaller arm
+    // keeps them out of the way while still being there to grab.
+    if (SCULPT_TOOLS.has(this.tool)) {
+      this.gizmo.detach();
+    } else {
+      this.gizmo.attach(this.pivot);
+      this.gizmo.setSize(this.tool === TOOL.SELECT ? 0.85 : 0.55);
+    }
 
     // Last: _syncLinkLines reuses the shared temporaries the centroid was
     // accumulated in, so it must not run before the pivot has been read out.
@@ -677,7 +831,10 @@ export class EditorScene {
       out.push({
         json: doc.toJSON(),
         parent: part.parent,
-        mount: part.mount ? { pos: [...part.mount.pos], rot: [...part.mount.rot] } : null,
+        // A block's size is three numbers; a plate's is one. Spreading the
+        // one throws, and copying a plate is a perfectly ordinary thing to do.
+        size: Array.isArray(part.size) ? [...part.size] : (part.size ?? null),
+        mount: part.mount ? { ...part.mount, pos: [...part.mount.pos], rot: [...part.mount.rot] } : null,
       });
     }
     return out;
@@ -688,7 +845,7 @@ export class EditorScene {
    * visible rather than hiding inside its source.
    * @returns {string[]} the ids of the pasted roots
    */
-  paste(entries, { offset = SIZE_STEP } = {}) {
+  paste(entries, { offset = null } = {}) {
     if (!entries?.length) return [];
     const fallback = this.selected ?? this.assembly.rootId;
     const made = [];
@@ -696,8 +853,16 @@ export class EditorScene {
     for (const entry of entries) {
       const parent = this.assembly.get(entry.parent) ? entry.parent : fallback;
       const base = entry.mount ?? { pos: [0, 0, 0], rot: [0, 0, 0, 1] };
+      // Clear of the original rather than a fixed quarter of a metre. A
+      // copy of a two-metre block landed all but exactly on top of the block
+      // it came from, and a paste you cannot see is a paste you press again.
+      const span = Array.isArray(entry.size)
+        ? ((entry.size[0] ?? 1) + (entry.size[2] ?? 1)) / 2
+        : (entry.size ?? 1);
+      const step = offset ?? Math.max(SIZE_STEP, span * 0.7);
       const mount = {
-        pos: [base.pos[0] + offset, base.pos[1], base.pos[2] + offset],
+        ...base,
+        pos: [base.pos[0] + step, base.pos[1], base.pos[2] + step],
         rot: [...base.rot],
       };
       const doc = Assembly.fromJSON(JSON.parse(JSON.stringify(entry.json)));
@@ -713,10 +878,22 @@ export class EditorScene {
     if (assembly) {
       // Measure once, so hovering does not rebuild a rig every frame.
       const probe = new Rig(assembly);
-      const size = probe.bounds.getSize(_v);
+      const size = probe.bounds.getSize(_v).clone();
+      const mid = probe.bounds.getCenter(_v2).clone();
       this.stampSize = [
         Math.max(0.25, size.x), Math.max(0.25, size.y), Math.max(0.25, size.z),
       ];
+      // A grafted part is hung by its ROOT, and a part's root is hardly ever
+      // the middle of the box it fits in. Without this the ghost was drawn
+      // round the root while the part itself arrived somewhere else, and the
+      // flush mount pushed out by half a box the part did not fill.
+      const root = probe.nodes.get(assembly.rootId);
+      if (root) {
+        root.group.getWorldPosition(_v);
+        this.stampOffset = [_v.x - mid.x, _v.y - mid.y, _v.z - mid.z];
+      } else {
+        this.stampOffset = [0, 0, 0];
+      }
       probe.dispose();
     }
     return this;
@@ -937,14 +1114,41 @@ export class EditorScene {
 
   // ---------------------------------------------------------- editing ops
 
+  /**
+   * Resize every block in the selection.
+   *
+   * All of them, not just the one that happens to be primary. Selecting four
+   * legs and dragging the width slider is the whole reason multi-select
+   * exists, and it used to change exactly one of them with nothing on screen
+   * to say so.
+   */
   resizeSelected(size) {
-    const id = this.selected;
-    if (!id) return false;
-    const part = this.assembly.get(id);
-    if (!part || part.kind === 'bone') return false;
+    const ids = [...this.selection].filter((id) => {
+      const p = this.assembly.get(id);
+      return p && p.kind !== 'bone';
+    });
+    if (!ids.length) return false;
     this.onBeforeChange('寸法変更');
-    this.assembly.setSize(id, size);
-    this.rig.refreshSize(id);
+    let moved = false;
+    for (const id of ids) {
+      const part = this.assembly.get(id);
+      const before = part.size ? [...part.size] : null;
+      this.assembly.setSize(id, size);
+      this.rig.refreshSize(id);
+      // A part put down flush against a face STAYS flush. A block grows about
+      // its own middle, so half of every millimetre added used to disappear
+      // into whatever it was standing on — quietly, from the inside.
+      const face = part.mount?.face;
+      if (before && face !== undefined && FACE_AXIS[face] !== undefined) {
+        const axis = FACE_AXIS[face];
+        const grew = ((part.size[axis] ?? 0) - (before[axis] ?? 0)) / 2;
+        if (grew) {
+          part.mount.pos[axis] += FACE_NORMAL[face][axis] * grew;
+          if (!this.rig.refreshMount(id)) moved = true;
+        }
+      }
+    }
+    if (moved) { this.rebuild(); return true; }
     this.refreshStats();
     this._syncSelectionVisuals();
     return true;
@@ -966,13 +1170,17 @@ export class EditorScene {
     return true;
   }
 
+  /** Resize every PLATE in the selection; blocks and bones are skipped. */
   setEquipSizeSelected(size) {
-    const id = this.selected;
-    const part = this.assembly.get(id);
-    if (!part || part.kind !== 'equip') return false;
+    const ids = [...this.selection].filter((id) => this.assembly.get(id)?.kind === 'equip');
+    if (!ids.length) return false;
     this.onBeforeChange('装備の大きさ');
-    this.assembly.setEquipSize(id, size);
-    if (!this.rig.refreshEquip(id)) this.rebuild();
+    let rebuilt = false;
+    for (const id of ids) {
+      this.assembly.setEquipSize(id, size);
+      if (!this.rig.refreshEquip(id)) rebuilt = true;
+    }
+    if (rebuilt) this.rebuild();
     this.refreshStats();
     this._syncSelectionVisuals();
     return true;
@@ -1036,13 +1244,13 @@ export class EditorScene {
     return this.nudgeSelected(_s);
   }
 
-  /** Which way and how fast a ROLLING plate turns. */
+  /** Which way and how fast the selected SPINNING plates turn. */
   setEquipSpinSelected(spin) {
-    const id = this.selected;
-    const part = this.assembly.get(id);
-    if (!part || part.kind !== 'equip' || !part.spin) return false;
+    const ids = [...this.selection]
+      .filter((id) => { const p = this.assembly.get(id); return p?.kind === 'equip' && p.spin; });
+    if (!ids.length) return false;
     this.onBeforeChange('回転設定');
-    this.assembly.setEquipSpin(id, spin);
+    for (const id of ids) this.assembly.setEquipSpin(id, spin);
     this.refreshStats();
     return true;
   }
@@ -1096,13 +1304,12 @@ export class EditorScene {
     return this.setMountSelected({ pos });
   }
 
+  /** Reshape every BONE in the selection; anything else is skipped. */
   setBoneShapeSelected(shape) {
-    const id = this.selected;
-    if (!id) return false;
-    const part = this.assembly.get(id);
-    if (!part || part.kind !== 'bone') return false;
+    const ids = [...this.selection].filter((id) => this.assembly.get(id)?.kind === 'bone');
+    if (!ids.length) return false;
     this.onBeforeChange('ボーン寸法');
-    this.assembly.setBoneShape(id, shape);
+    for (const id of ids) this.assembly.setBoneShape(id, shape);
     this.rebuild();
     return true;
   }
@@ -1169,14 +1376,12 @@ export class EditorScene {
     return true;
   }
 
-  /** How much of its attribute's motion the selected bone takes, and when. */
+  /** How much of their attribute's motion the selected bones take, and when. */
   setBoneMotionSelected(motion) {
-    const id = this.selected;
-    if (!id) return false;
-    const part = this.assembly.get(id);
-    if (!part || part.kind !== 'bone') return false;
+    const ids = [...this.selection].filter((id) => this.assembly.get(id)?.kind === 'bone');
+    if (!ids.length) return false;
     this.onBeforeChange('関節の効き');
-    this.assembly.setBoneMotion(id, motion);
+    for (const id of ids) this.assembly.setBoneMotion(id, motion);
     this.rebuild();
     return true;
   }
@@ -1243,31 +1448,79 @@ export class EditorScene {
   _bindPointer() {
     const el = this.canvas;
     this.painting = false;
+    /**
+     * Where a press began, so a drag can be told from a click.
+     *
+     * Everything used to happen on the press itself, which is why looking
+     * round the machine dropped a part first. Waiting for the release also
+     * buys the one thing a touch screen never had: the ghost is up, and the
+     * finger can be moved to aim it, before anything is committed.
+     */
+    this._press = null;
 
     this._move = (e) => {
       if (!this.active) return;
       this._updateNdc(e);
+      const press = this._press;
+      if (press && !press.moved
+        && Math.hypot(e.clientX - press.x, e.clientY - press.y) > CLICK_SLOP) {
+        press.moved = true;
+      }
       this._hover();
+      // Holding the button and dragging lays a row rather than making one
+      // careful click per part.
+      if (press?.button === 0 && press.moved && PART_TOOLS.has(this.tool)) this._layAlong();
     };
     this._down = (e) => {
-      if (!this.active || e.button !== 0) return;
-      if (this.gizmo.dragging) return;
+      if (!this.active || (e.button !== 0 && e.button !== 2)) return;
+      // `dragging` is only true once the gizmo's own handler has run, and
+      // which listener goes first is not ours to decide. `axis` is set the
+      // moment the pointer is over a handle, so it answers the question that
+      // actually matters: is this press meant for the gizmo? Getting it
+      // wrong now drops a block every time you reach for an arrow.
+      if (this.gizmo.dragging || (this.gizmo.object && this.gizmo.axis)) return;
       this._updateNdc(e);
+      this._press = {
+        x: e.clientX, y: e.clientY, button: e.button, moved: false, laid: 0,
+        // Read from the PRESS, not the release: holding Ctrl and letting go
+        // of it a moment early still means "add to the selection", and it is
+        // the press that the person was thinking about.
+        additive: e.ctrlKey || e.metaKey,
+        pick: e.altKey,
+      };
       this._hover();
-      if (SCULPT_TOOLS.has(this.tool)) {
-        this.beginStroke();
-      } else {
-        // Ctrl (or Cmd) adds to the selection.
-        this._applyClick(e.ctrlKey || e.metaKey);
-      }
+      if (e.button === 0 && SCULPT_TOOLS.has(this.tool)) this.beginStroke();
     };
-    this._up = () => {
+    this._up = (e) => {
       if (this.painting) {
         this.painting = false;
         this.refreshStats();
       }
+      const press = this._press;
+      this._press = null;
+      this._lastLaid = null;
+      if (!press || !this.active) return;
+      if (press.laid) { this.onGesture(false); return; }
+      if (press.moved) return;                  // that was the camera, or a row
+      if (press.button === 2) { this.deleteUnderCursor(); return; }
+      if (SCULPT_TOOLS.has(this.tool)) return;
+      // Alt picks the part up instead of putting one down; Ctrl (or Cmd)
+      // adds to the selection.
+      if (press.pick || e.altKey) this.pickUnderCursor();
+      else this._applyClick(press.additive || e.ctrlKey || e.metaKey);
     };
     this._context = (e) => { if (this.active) e.preventDefault(); };
+    /**
+     * Shift and the wheel lift the plane a free-floating part lands on.
+     *
+     * Taken before the camera sees it, or the view zooms at the same time.
+     */
+    this._wheel = (e) => {
+      if (!this.active || !e.shiftKey || !PART_TOOLS.has(this.tool)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.liftWorkPlane(e.deltaY < 0 ? 1 : -1);
+    };
     this._key = (e) => {
       if (!this.active) return;
       if (e.target && /input|textarea|select/i.test(e.target.tagName)) return;
@@ -1276,6 +1529,7 @@ export class EditorScene {
       if (e.code === 'BracketRight') this.brushPercent = Math.min(25, this.brushPercent + 1);
     };
 
+    el.addEventListener('wheel', this._wheel, { capture: true, passive: false });
     el.addEventListener('pointermove', this._move);
     el.addEventListener('pointerdown', this._down);
     el.addEventListener('contextmenu', this._context);
@@ -1285,6 +1539,7 @@ export class EditorScene {
 
   _updateNdc(e) {
     const r = this.canvas.getBoundingClientRect();
+    this._cursor = { x: e.clientX - r.left, y: e.clientY - r.top };
     _ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
     _ndc.y = -((e.clientY - r.top) / r.height) * 2 + 1;
     _ray.setFromCamera(_ndc, this.camera);
@@ -1293,14 +1548,43 @@ export class EditorScene {
   _hover() {
     this.voxCursor.visible = false;
     this.ghost.visible = false;
-    if (SCULPT_TOOLS.has(this.tool)) { this._hoverVoxel(); return; }
+    this.ghostTwin.visible = false;
+    this.hostOutline.visible = false;
+    this.planeMark.visible = false;
+    this.planeDrop.visible = false;
+    if (!this.rig) return;
+    if (SCULPT_TOOLS.has(this.tool)) { this._hoverVoxel(); this._sayHint(null); return; }
     if (PART_TOOLS.has(this.tool)) this._hoverGhost();
+    else this._sayHint(null);
+  }
+
+  /** Tell whoever is drawing the read-out what the cursor is about to do. */
+  _sayHint(hint) {
+    this.placementHint = hint;
+    this.onHint(hint);
   }
 
   // ---------------------------------------------------------- placement
 
   /** Where would a new part land, given the current ray? */
   proposePlacement() {
+    const plan = this._proposeRaw();
+    if (!plan || this.tool !== TOOL.STAMP) return plan;
+    // A graft hangs the part by its ROOT; the ghost and the flush mount are
+    // both about the box the part fills. Those are the same point only for a
+    // part whose root happens to sit at its own centre, which is not the
+    // usual shape of a saved part at all.
+    _v.fromArray(this.stampOffset).applyQuaternion(_q.fromArray(plan.mount.rot));
+    plan.ghostOffset = [_v.x, _v.y, _v.z];
+    plan.mount.pos = [
+      plan.mount.pos[0] + _v.x,
+      plan.mount.pos[1] + _v.y,
+      plan.mount.pos[2] + _v.z,
+    ];
+    return plan;
+  }
+
+  _proposeRaw() {
     const forBone = BONE_TOOLS.has(this.tool);
     const forEquip = this.tool === TOOL.EQUIP;
     // A plate is placed like a bone — by its facing, not by its bulk — so it
@@ -1352,55 +1636,150 @@ export class EditorScene {
       node.group.getWorldQuaternion(_q).invert();
       _v.applyQuaternion(_q).normalize();
       const face = dominantFace(_v);
+
+      // WHERE on the face, not just which one. Every placement used to land
+      // on the middle of the face it was made against, so a row of three
+      // across a chest plate meant placing one and dragging the other two.
+      // The parent's own frame is the right one to measure in even when the
+      // machine is mid-stride: a posed part still knows its own inside.
+      _v2.copy(hit.point);
+      node.group.worldToLocal(_v2);
+      const at = [this._snapValue(_v2.x), this._snapValue(_v2.y), this._snapValue(_v2.z)];
+
       return {
         parentId,
         mount: {
-          pos: faceAnchor(parent, face, alignY ? [0, 0, 0] : size),
-          rot: alignY ? alignYToFace(face) : [0, 0, 0, 1],
+          pos: faceAnchor(parent, face, alignY ? [0, 0, 0] : size, at),
+          rot: this._turned(alignY ? alignYToFace(face) : [0, 0, 0, 1], face),
+          // Kept with the part: resizing it later has to know which way is
+          // "out" to stay flush, and that is not recoverable afterwards.
+          face,
         },
         size,
       };
     }
 
-    // Empty space: drop it on a horizontal work plane through the selection
-    // (or the core), which is what makes detached, floating parts possible.
-    const anchorId = this.selected ?? this.assembly.rootId;
-    const anchor = this.rig.nodes.get(anchorId);
-    if (!anchor) return null;
-    anchor.group.updateMatrixWorld(true);
-    anchor.group.getWorldPosition(_v2);
-
-    _plane.setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), _v2);
+    // Empty space: drop it on a horizontal work plane, which is what makes
+    // detached, floating parts possible. The plane starts ON THE FLOOR, so
+    // "click the ground and build upwards" works; the wheel lifts it.
+    //
+    // It used to sit at the height of whatever happened to be selected,
+    // which meant the height could only be chosen by selecting something
+    // else first — a rule written down nowhere.
+    _plane.setFromNormalAndCoplanarPoint(
+      _v2.set(0, 1, 0), _v.set(0, this.groundOffset + this.workPlaneY, 0),
+    );
     const point = _ray.ray.intersectPlane(_plane, new THREE.Vector3());
     if (!point) return null;
 
-    const parentId = anchorId === this.assembly.rootId ? this.assembly.rootId : anchorId;
-    const host = this.rig.nodes.get(parentId).group;
-    host.worldToLocal(point);
+    // Measured against the root's REST frame, which we know exactly, rather
+    // than through whatever matrix the walk preview has the machine in this
+    // frame. Placing during the preview used to leave the part somewhere
+    // else the moment the machine stood still again.
+    const parentId = this.assembly.rootId;
+    const rest = [point.x, point.y - this.groundOffset, point.z];
+    // A part dropped on the plane STANDS on it rather than being buried to
+    // the waist in it.
+    const lift = forBone || forEquip ? 0 : (size[1] ?? 0) / 2;
     return {
       parentId,
       mount: {
-        pos: [this._snapValue(point.x), this._snapValue(point.y), this._snapValue(point.z)],
-        rot: forBone ? alignYToFace(3) : [0, 0, 0, 1],
+        pos: [
+          this._snapValue(rest[0]),
+          this._snapValue(rest[1]) + lift,
+          this._snapValue(rest[2]),
+        ],
+        rot: this._turned(forBone ? alignYToFace(3) : [0, 0, 0, 1], 2),
       },
       size,
       floating: true,
     };
   }
 
+  /**
+   * The placement rotation with the builder's quarter turns folded in,
+   * about the face the part is landing on.
+   */
+  _turned(rot, face) {
+    if (!this.placeTurn) return rot;
+    _q.fromArray(rot);
+    _v.fromArray(FACE_NORMAL[face]);
+    _q2.setFromAxisAngle(_v, (this.placeTurn * Math.PI) / 2);
+    return _q2.multiply(_q).toArray();
+  }
+
+  /**
+   * Would this land inside something that is not what it is resting on?
+   *
+   * Nothing is refused — burying a block on purpose is a real way to build —
+   * but the ghost says so, because the alternative is finding out later by
+   * noticing a part is missing from the inside of a machine.
+   */
+  _overlaps(plan) {
+    const host = this.rig.nodes.get(plan.parentId);
+    if (!host || BONE_TOOLS.has(this.tool) || this.tool === TOOL.EQUIP) return false;
+    host.group.updateMatrixWorld(true);
+    const centre = host.group.localToWorld(_v.fromArray(plan.mount.pos)).clone();
+    // A hair inside its own footprint, so merely TOUCHING a neighbour — which
+    // is exactly what a flush mount is — does not read as a collision.
+    const half = new THREE.Vector3().fromArray(plan.size).multiplyScalar(0.5).subScalar(0.06);
+    if (half.x <= 0 || half.y <= 0 || half.z <= 0) return false;
+    _box.setFromCenterAndSize(centre, half.multiplyScalar(2));
+
+    for (const [id, node] of this.rig.nodes) {
+      if (id === plan.parentId) continue;
+      if (!this._worldAabb(node, _box2)) continue;
+      if (_box.intersectsBox(_box2)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Axis-aligned world bounds of one solid part, for coarse overlap tests.
+   * Bones and plates are skipped: they are meant to pass through things.
+   */
+  _worldAabb(node, out) {
+    const part = node.part;
+    if (!part || part.kind === 'bone' || part.kind === 'equip') return null;
+    node.group.updateMatrixWorld(true);
+    _s.fromArray(part.size).multiplyScalar(0.5);
+    _m.compose(
+      node.group.getWorldPosition(_v),
+      node.group.getWorldQuaternion(_q),
+      _v2.set(1, 1, 1),
+    );
+    out.makeEmpty();
+    for (let i = 0; i < 8; i++) {
+      _v.set(
+        (i & 1 ? _s.x : -_s.x), (i & 2 ? _s.y : -_s.y), (i & 4 ? _s.z : -_s.z),
+      ).applyMatrix4(_m);
+      out.expandByPoint(_v);
+    }
+    return out;
+  }
+
   _snapValue(v) {
-    return this.snap ? Math.round(v / SIZE_STEP) * SIZE_STEP : v;
+    const step = this.snapStep || SIZE_STEP;
+    return this.snap ? Math.round(v / step) * step : v;
   }
 
   _hoverGhost() {
+    // An unarmed stamp has nothing to show. The old guard set the ghost
+    // invisible and then the next line turned it straight back on.
+    if (this.tool === TOOL.STAMP && !this.stampSource) {
+      this.pendingPlacement = null;
+      this._sayHint(null);
+      return;
+    }
     const plan = this.proposePlacement();
     this.pendingPlacement = plan;
-    if (!plan) return;
+    if (!plan) { this._sayHint(null); return; }
     const host = this.rig.nodes.get(plan.parentId);
-    if (!host) return;
+    if (!host) { this._sayHint(null); return; }
 
     host.group.updateMatrixWorld(true);
     _v.fromArray(plan.mount.pos);
+    if (plan.ghostOffset) _v.sub(_v2.fromArray(plan.ghostOffset));
     host.group.localToWorld(_v);
     this.ghost.position.copy(_v);
     this.ghost.quaternion.copy(host.group.getWorldQuaternion(_q))
@@ -1421,8 +1800,176 @@ export class EditorScene {
     this.ghost.geometry = this.tool === TOOL.BLOCK
       ? this._ghostGeometry(this.newBlockShape)
       : this.ghostBox;
-    if (this.tool === TOOL.STAMP && !this.stampSource) this.ghost.visible = false;
+    // The outline follows the same shape. A box drawn round a sphere is the
+    // cursor telling you the wrong thing twice over — once in the fill, and
+    // again in the only part of it that shows through the machine.
+    this.ghostWire.geometry = this.tool === TOOL.BLOCK
+      ? this._ghostEdges(this.newBlockShape)
+      : this.boxEdges;
+    this.ghostFootprint.visible = this.ghostWire.geometry !== this.boxEdges;
+
+    this.placeBlocked = this._overlaps(plan);
+    this.ghost.material.color.setHex(this.placeBlocked ? 0xff6a5c : 0x4fd2ff);
+    this.ghostWire.material.color.setHex(this.placeBlocked ? 0xffb0a8 : 0x9fe8ff);
+
     this.ghost.visible = true;
+
+    // Who it will belong to. Half of what a placement decides is invisible
+    // otherwise: the parent is what the part moves with once the machine is
+    // on its feet.
+    if (!plan.floating) {
+      this._partBox(host, this.hostOutline);
+      this.hostOutline.visible = true;
+    }
+
+    // And, in mid-air, how high off the floor it is.
+    if (plan.floating) {
+      const y = this.groundOffset + this.workPlaneY;
+      this.planeMark.position.set(this.ghost.position.x, y + 0.004, this.ghost.position.z);
+      this.planeMark.scale.setScalar(Math.max(1, plan.size[0] * 1.6));
+      this.planeMark.visible = true;
+      this.planeDrop.position.copy(this.planeMark.position);
+      this.planeDrop.scale.set(1, Math.max(0.001, this.ghost.position.y - y), 1);
+      this.planeDrop.visible = true;
+    }
+
+    this._sayHint({
+      text: this._planLabel(plan),
+      blocked: this.placeBlocked,
+      x: this._cursor.x,
+      y: this._cursor.y,
+    });
+    this._hoverGhostTwin(plan);
+  }
+
+  /** One line describing what a click would put down, and where. */
+  _planLabel(plan) {
+    const d = plan.size.map((n) => n.toFixed(2)).join('x');
+    if (BONE_TOOLS.has(this.tool)) return `ボーン ${this.boneOpts.length.toFixed(2)}`;
+    if (this.tool === TOOL.EQUIP) {
+      return `${EQUIP_META[this.equipType]?.label ?? ''} ${this.newEquipSize.toFixed(2)}`;
+    }
+    if (this.tool === TOOL.STAMP) return `パーツ ${d}`;
+    const shape = SHAPES[this.newBlockShape]?.label ?? '';
+    const turn = this.placeTurn ? ` ${this.placeTurn * 90}°` : '';
+    const high = plan.floating ? ` 高さ ${this.workPlaneY.toFixed(2)}` : '';
+    return `${shape} ${d}${turn}${high}`;
+  }
+
+  /** Edges of one shape's ghost body, cut once and kept. */
+  _ghostEdges(shape) {
+    if (!shape || shape === SHAPE_DEFAULT) return this.boxEdges;
+    let geo = this.ghostEdgeGeos.get(shape);
+    if (!geo) {
+      geo = new THREE.EdgesGeometry(this._ghostGeometry(shape), 24);
+      this.ghostEdgeGeos.set(shape, geo);
+    }
+    return geo;
+  }
+
+  /**
+   * Show where the mirrored copy would land, if one would.
+   *
+   * Drawn from the same calculation the placement itself uses, so the twin
+   * is a promise the editor keeps. Nothing is shown for a part on the centre
+   * line, because nothing is made there either.
+   */
+  _hoverGhostTwin(plan) {
+    const twin = this.ghostTwin;
+    twin.visible = false;
+    if (!this.symmetry || this.tool === TOOL.STAMP) return;
+    const mirrored = this._mirrorPlan(plan);
+    if (!mirrored) return;
+    const target = this.rig.nodes.get(mirrored.parentId);
+    if (!target) return;
+
+    target.group.updateMatrixWorld(true);
+    _v.fromArray(mirrored.mount.pos);
+    twin.position.copy(target.group.localToWorld(_v));
+    twin.quaternion.copy(target.group.getWorldQuaternion(_q2))
+      .multiply(_q.fromArray(mirrored.mount.rot));
+    twin.geometry = this.ghost.geometry;
+    twin.scale.copy(this.ghost.scale);
+    if (BONE_TOOLS.has(this.tool)) twin.translateY(this.boneOpts.length / 2);
+    else if (this.tool === TOOL.EQUIP) twin.translateY(EQUIP_THICKNESS / 2);
+    twin.visible = true;
+  }
+
+  /**
+   * Where the mirrored copy of a placement goes.
+   *
+   * Reflected through the MACHINE's centre line, not through whatever the
+   * part happens to be attached to. The old rule negated X in the parent's
+   * own frame, which is only the body's centre line when the parent is
+   * itself centred — so a detail put on the left shoulder came back on the
+   * same left shoulder, and the checkbox saying "左右対称" was telling the
+   * truth about the wrong plane.
+   *
+   * It hangs the twin off the parent's own mirror image when the machine has
+   * one, so the two sides ride with their own halves; otherwise off the same
+   * parent, which still lands in the right place.
+   *
+   * Measured in whatever pose the machine is in. That is exact while it is
+   * standing still, which is when placement happens — `_applyClick` puts it
+   * back on its feet first.
+   */
+  _mirrorPlan(plan) {
+    const host = this.rig.nodes.get(plan.parentId);
+    if (!host) return null;
+    this.rig.root.updateMatrixWorld(true);
+    host.group.updateMatrixWorld(true);
+
+    // Which parent first: working it out walks the whole rig, and it reads
+    // the same scratch vectors the mirrored mount is about to live in.
+    const parentId = this._mirrorHost(plan.parentId);
+    const target = this.rig.nodes.get(parentId);
+    if (!target) return null;
+    target.group.updateMatrixWorld(true);
+
+    // The placement, expressed in the machine's own frame.
+    _m.compose(_v.fromArray(plan.mount.pos), _q.fromArray(plan.mount.rot), _s.set(1, 1, 1));
+    _next.multiplyMatrices(host.group.matrixWorld, _m);
+    _delta.copy(this.rig.root.matrixWorld).invert();
+    _next.premultiply(_delta);
+    _next.decompose(_v, _q, _s);
+    if (Math.abs(_v.x) < 1e-6) return null;
+
+    _v.x = -_v.x;
+    _q.set(_q.x, -_q.y, -_q.z, _q.w);
+
+    _next.compose(_v, _q, _s.set(1, 1, 1));
+    _next.premultiply(this.rig.root.matrixWorld);
+    _delta.copy(target.group.matrixWorld).invert();
+    _next.premultiply(_delta);
+    _next.decompose(_v, _q, _s);
+    return { parentId, mount: { pos: _v.toArray(), rot: _q.toArray() } };
+  }
+
+  /** The part on the other side of the machine that matches this one. */
+  _mirrorHost(id) {
+    const part = this.assembly.get(id);
+    const node = this.rig.nodes.get(id);
+    if (!part || !node || id === this.assembly.rootId) return this.assembly.rootId;
+    this.rig.root.updateMatrixWorld(true);
+    node.group.getWorldPosition(_v);
+    this.rig.root.worldToLocal(_v);
+    if (Math.abs(_v.x) < 1e-4) return id;          // already on the centre line
+    const want = -_v.x;
+    const y = _v.y;
+    const z = _v.z;
+
+    let best = id;
+    let bestD = 0.25;
+    for (const [otherId, other] of this.rig.nodes) {
+      if (otherId === id) continue;
+      const p = this.assembly.get(otherId);
+      if (!p || p.kind !== part.kind) continue;
+      other.group.getWorldPosition(_v2);
+      this.rig.root.worldToLocal(_v2);
+      const d = Math.hypot(_v2.x - want, _v2.y - y, _v2.z - z);
+      if (d < bestD) { bestD = d; best = otherId; }
+    }
+    return best;
   }
 
   /**
@@ -1469,7 +2016,7 @@ export class EditorScene {
     node.mesh.localToWorld(_v.set((cell.x + 0.5) / n, (cell.y + 0.5) / n, (cell.z + 0.5) / n));
     this.voxCursor.position.copy(_v);
     this.voxCursor.quaternion.copy(node.group.getWorldQuaternion(_q));
-    const d = (this.brushRadiusCells(vox) * 2 + 1) / n;
+    const d = (this.brushRadiusCells(vox, node.part) * 2 + 1) / n;
     this.voxCursor.scale.set(d * sx, d * sy, d * sz);
     this.voxCursor.material.color.set(
       cell.grow ? 0xffd166                      // about to enlarge the block
@@ -1511,9 +2058,26 @@ export class EditorScene {
     return !!this.hoverVoxel;
   }
 
-  /** Brush radius in cells at the current resolution. */
-  brushRadiusCells(vox) {
-    return Math.max(0, Math.round((this.brushPercent / 100) * vox.n));
+  /**
+   * Brush radius in cells, at whatever resolution this block happens to be.
+   *
+   * Measured against a fixed metre rather than against the block. The grid
+   * always spans the block it belongs to, so a fixed share of the grid is
+   * not a fixed size in the world: the same slider used to cut a hole four
+   * times wider on a four-metre block than on a one-metre one, on the same
+   * machine, with nothing on screen to say why.
+   */
+  brushRadiusCells(vox, part = null) {
+    const edge = Math.max(0.05, ...(part?.size ?? [BRUSH_REFERENCE]));
+    const metres = (this.brushPercent / 100) * BRUSH_REFERENCE;
+    return Math.max(0, Math.round((metres / edge) * vox.n));
+  }
+
+  /** How big one sculpting cell is, in metres, on the selected block. */
+  cellSize() {
+    const part = this.assembly.get(this.selected);
+    const edge = Math.max(...(part?.size ?? [1, 1, 1]));
+    return edge / (part?.vox?.n ?? this.assembly.voxRes);
   }
 
   /**
@@ -1583,7 +2147,7 @@ export class EditorScene {
 
     const { x, y, z } = this.hoverVoxel;
     const vox = node.part.vox;
-    const r = this.brushRadiusCells(vox);
+    const r = this.brushRadiusCells(vox, node.part);
     let changed = false;
 
     if (this.tool === TOOL.CARVE) changed = vox.brush(x, y, z, r, 0);
@@ -1608,9 +2172,83 @@ export class EditorScene {
     this.tool = tool;
     this.voxCursor.visible = false;
     this.ghost.visible = false;
+    this.placeTurn = 0;
     if (SCULPT_TOOLS.has(tool) && !this.selected) this.select(this.assembly.rootId);
     this._syncCameraButtons();
     this._syncSelectionVisuals();
+    // Arming a tool and being shown nothing until the mouse happens to move
+    // reads as "that did not work". The ray from the last known cursor
+    // position is still good, so answer with it now.
+    this._hover();
+  }
+
+  /**
+   * Turn the part about to be placed a quarter turn about the face it lands
+   * on. Four presses come back where it started.
+   */
+  turnPlacement(dir = 1) {
+    this.placeTurn = (((this.placeTurn + dir) % 4) + 4) % 4;
+    this._hover();
+    return this.placeTurn;
+  }
+
+  /** Raise or lower the plane that free-floating parts land on. */
+  liftWorkPlane(delta) {
+    const step = this.snap ? SIZE_STEP : 0.05;
+    this.workPlaneY = Math.min(PLANE_MAX, Math.max(0, this.workPlaneY + delta * step));
+    this._hover();
+    return this.workPlaneY;
+  }
+
+  /**
+   * Take the shape, size and colour of the part under the cursor into the
+   * armed tool, so the next one matches without hunting three sliders.
+   */
+  pickUnderCursor() {
+    const hits = _ray.intersectObjects(this.rig.pickables, false);
+    const part = hits.length ? this.assembly.get(hits[0].object.userData.partId) : null;
+    if (!part) return null;
+    if (part.kind === 'block' || part.kind === 'core') {
+      this.newBlockSize = [...(part.size ?? [1, 1, 1])];
+      this.newBlockShape = part.shape ?? SHAPE_DEFAULT;
+      const c = part.vox?.dominantColor?.();
+      if (typeof c === 'number' && c >= 0) this.colorIndex = c;
+    } else if (part.kind === 'equip') {
+      this.equipType = part.equipType;
+      this.newEquipSize = part.size?.[0] ?? this.newEquipSize;
+    } else if (part.kind === 'bone') {
+      this.boneOpts = { ...this.boneOpts, length: part.length, radius: part.radius };
+    }
+    this._hover();
+    return part;
+  }
+
+  /** Delete whatever the cursor is over, without leaving the tool. */
+  deleteUnderCursor() {
+    const hits = _ray.intersectObjects(this.rig.pickables, false);
+    const id = hits.length ? hits[0].object.userData.partId : null;
+    if (!id || id === this.assembly.rootId) return false;
+    this.select(id);
+    return this.deleteSelected();
+  }
+
+  /**
+   * Put another part down, once the cursor has moved off the last one.
+   *
+   * The whole drag is one undo step. Twenty blocks laid along an arm used to
+   * be twenty presses of Ctrl+Z, and since every entry is a whole snapshot
+   * of the machine, three such arms were enough to push the start of the
+   * session off the end of the history.
+   */
+  _layAlong() {
+    const plan = this.pendingPlacement;
+    if (!plan) return;
+    const key = `${plan.parentId}:${plan.mount.pos.map((n) => n.toFixed(3)).join(',')}`;
+    if (key === this._lastLaid) return;
+    this._lastLaid = key;
+    if (!this._press.laid) this.onGesture(true);
+    this._press.laid++;
+    this._applyClick(false);
   }
 
   _applyClick(additive = false) {
@@ -1628,10 +2266,15 @@ export class EditorScene {
           return;
         }
       }
-      this.onBeforeChange(
-        this.tool === TOOL.STAMP ? 'パーツ配置'
-          : this.tool === TOOL.EQUIP ? '装備配置' : '配置',
-      );
+      // On its feet before anything is measured against the machine as a
+      // whole. The walk preview poses the rig, and a rebuild drops the pose
+      // anyway, so nothing is lost by putting it back first — and the
+      // mirrored twin is worked out in the machine's frame.
+      if (this.previewMotion) this._restPose();
+      const twinPlan = (this.symmetry && this.tool !== TOOL.STAMP)
+        ? this._mirrorPlan(plan) : null;
+
+      this.onBeforeChange(this._changeLabel());
 
       let added;
       if (this.tool === TOOL.STAMP) {
@@ -1650,7 +2293,7 @@ export class EditorScene {
       if (!added) return;
       const made = [added.id];
       if (this.symmetry && this.tool !== TOOL.STAMP) {
-        const twin = this._mirror(added);
+        const twin = this._mirror(added, twinPlan);
         if (twin) made.push(twin.id);
       }
       this.rebuild();
@@ -1663,6 +2306,19 @@ export class EditorScene {
     const hits = _ray.intersectObjects(this.rig.pickables, false);
     if (hits.length) this.select(this._pickFrom(hits, additive), additive);
     else if (!additive) this.select(null);
+  }
+
+  /**
+   * What the undo entry for this placement should say.
+   *
+   * Twenty entries all reading "配置" tell you nothing about how far back
+   * you have gone, which is the one thing the label is for.
+   */
+  _changeLabel() {
+    if (this.tool === TOOL.STAMP) return 'パーツ配置';
+    if (this.tool === TOOL.EQUIP) return `配置 ${EQUIP_META[this.equipType]?.label ?? ''}`;
+    if (BONE_TOOLS.has(this.tool)) return 'ボーン配置';
+    return `配置 ${SHAPES[this.newBlockShape]?.label ?? ''}`;
   }
 
   /**
@@ -1724,19 +2380,22 @@ export class EditorScene {
   }
 
   /**
-   * Mirror a newly added part across the body's X axis. With free placement
-   * that is simply a negated X on both position and rotation.
+   * Mirror a newly added part across the MACHINE's centre line.
+   *
+   * `plan` is the mirrored mount worked out by `_mirrorPlan` before the
+   * original went down, so the twin lands exactly where the preview said it
+   * would rather than on a second, slightly different calculation.
    */
-  _mirror(part) {
-    if (Math.abs(part.mount.pos[0]) < 1e-6) return null;
-    const [x, y, z] = part.mount.pos;
-    const q = new THREE.Quaternion().fromArray(part.mount.rot);
-    // reflect the rotation through the YZ plane
-    const mirroredRot = [q.x, -q.y, -q.z, q.w];
-    const mount = { pos: [-x, y, z], rot: mirroredRot };
+  _mirror(part, plan = null) {
+    const mirrored = plan ?? this._mirrorPlan({
+      parentId: part.parent, mount: part.mount, size: part.size ?? [1, 1, 1],
+    });
+    if (!mirrored) return null;
+    const { mount } = mirrored;
+    const parentId = this.assembly.get(mirrored.parentId) ? mirrored.parentId : part.parent;
 
     if (part.kind === 'bone') {
-      const twin = this.assembly.addBone(part.parent, mount, part.boneType, {
+      const twin = this.assembly.addBone(parentId, mount, part.boneType, {
         ...this.boneOpts, invert: !this.boneOpts.invert,
       });
       if (twin) twin.custom = { ...part.custom };
@@ -1745,13 +2404,13 @@ export class EditorScene {
     if (part.kind === 'equip') {
       // A unique plate simply has no twin, which is the rule doing its job.
       // A mirrored roller turns the other way, like a mirrored propeller.
-      return this.assembly.addEquip(part.parent, mount, part.equipType, {
+      return this.assembly.addEquip(parentId, mount, part.equipType, {
         size: part.size,
         bulletColor: part.bulletColor,
         spin: part.spin ? { dir: -part.spin.dir, rpm: part.spin.rpm } : null,
       });
     }
-    const twin = this.assembly.addBlock(part.parent, mount, this.colorIndex, {
+    const twin = this.assembly.addBlock(parentId, mount, this.colorIndex, {
       size: [...part.size], shape: part.shape,
     });
     if (twin) twin.vox = part.vox.clone();
@@ -1762,6 +2421,8 @@ export class EditorScene {
 
   enter() {
     this.active = true;
+    this.workPlaneY = 0;
+    this.placeTurn = 0;
     this.gizmo.enabled = true;
     this._syncCameraButtons();
     this._syncSelectionVisuals();
@@ -1851,6 +2512,7 @@ export class EditorScene {
       l.geometry.dispose();
       l.material.dispose();
     }
+    this.canvas.removeEventListener('wheel', this._wheel, { capture: true });
     this.canvas.removeEventListener('pointermove', this._move);
     this.canvas.removeEventListener('pointerdown', this._down);
     this.canvas.removeEventListener('contextmenu', this._context);
@@ -1870,6 +2532,14 @@ export class EditorScene {
     this.linkLines.geometry.dispose();
     this.linkLines.material.dispose();
     this.outlineGeo.dispose();
+    this.boxEdges.dispose();
+    for (const g of this.ghostEdgeGeos.values()) g.dispose();
+    this.ghostEdgeGeos.clear();
+    this.planeMark.geometry.dispose();
+    this.planeMark.material.dispose();
+    this.planeDrop.geometry.dispose();
+    this.planeDrop.material.dispose();
+    this.hostOutline.material.dispose();
     this.outlineMat.dispose();
     this.anchorMat.dispose();
     this.controls.dispose();

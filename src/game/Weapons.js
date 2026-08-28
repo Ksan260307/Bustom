@@ -184,6 +184,20 @@ function grenadeGeometry() {
   return new THREE.IcosahedronGeometry(1, 0);
 }
 
+/**
+ * Are these two on the same side?
+ *
+ * Only ever true when BOTH of them say which side they are on. Anything
+ * without an answer — a stand-in, a wreck, a test dummy — is fair game,
+ * which is the safe way round: a shot that fails to hit is a bug you can
+ * see, and a shot that hits its own team is a bug you cannot.
+ */
+function sameSide(owner, target) {
+  return owner != null
+    && owner.isPlayer !== undefined && target.isPlayer !== undefined
+    && owner.isPlayer === target.isPlayer;
+}
+
 /** How many points a missile's smoke trail remembers. */
 const TRAIL_POINTS = 16;
 
@@ -488,6 +502,7 @@ export class Projectiles {
       // endpoint would let fast rounds pass straight through small targets.
       for (const t of targets) {
         if (!t || t === s.owner || !t.alive) continue;
+        if (sameSide(s.owner, t)) continue;
         if (this._sweepHits(_prev, p, t, s.radius) === null) continue;
         t.damage(s.damage, _near);
         this.hits.push(this._hitRecord(s, _near, t, s.damage));
@@ -543,6 +558,7 @@ export class Projectiles {
     const { radius, damage } = s.blast;
     for (const t of targets) {
       if (!t || !t.alive || t === s.owner || t === direct) continue;
+      if (sameSide(s.owner, t)) continue;
       const d = at.distanceTo(t.position) - t.radius;
       if (d > radius) continue;
       const falloff = 1 - clamp01(Math.max(0, d) / radius);
@@ -718,7 +734,7 @@ export class WeaponSystem {
     } = ctx;
     const {
       aimPoint = null, projectiles = null, targets = [],
-      lockTarget = null, scoping = false, effects = null,
+      lockTarget = null, scoping = false, effects = null, feedback = null,
     } = ctx;
     let blade = 0;
 
@@ -774,7 +790,7 @@ export class WeaponSystem {
       if (s.ammo <= 0) { s.reloadT = s.meta.reload; continue; }
 
       if (s.meta.shield) this._raiseShield(s);
-      else this._shoot(s, { aimPoint, projectiles, lockTarget, effects });
+      else this._shoot(s, { aimPoint, projectiles, lockTarget, effects, feedback });
       s.ammo--;
       s.cooldown = s.meta.interval;
       s.armed = false;
@@ -838,7 +854,7 @@ export class WeaponSystem {
   }
 
   _shoot(slot, ctx) {
-    const { projectiles, lockTarget, effects = null } = ctx;
+    const { projectiles, lockTarget, effects = null, feedback = null } = ctx;
     if (!projectiles) return;
     const meta = slot.meta;
     const { position, direction } = this.muzzle(slot, ctx);
@@ -849,10 +865,10 @@ export class WeaponSystem {
     // The flash belongs to the PLATE, not to the round: a shotgun throwing
     // nine pellets fires once, and nine flashes stacked on one barrel is a
     // white blob rather than a gun going off.
-    effects?.muzzle(position, direction, {
-      scale: scale * (0.5 + Math.min(1.4, meta.damage * (meta.shots ?? 1) / 40)),
-      color,
-    });
+    const heft = Math.min(1.4, meta.damage * (meta.shots ?? 1) / 40);
+    effects?.muzzle(position, direction, { scale: scale * (0.5 + heft), color });
+    // How big it sounds is how hard it hits, not how big the plate is.
+    feedback?.fire?.(heft / 1.4, this.robot.isPlayer);
 
     // Local frame of the shot: right, then up. Used for both the deliberate
     // fan of a shotgun and the random scatter of a gatling.

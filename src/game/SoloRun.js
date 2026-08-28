@@ -17,9 +17,17 @@
 /** The opponents a wave is built from, in the order they get mixed in. */
 export const OPPONENTS = [
   { preset: 'biped', style: 'orbit', range: 24, label: 'STRIDER' },
-  { preset: 'multileg', style: 'rusher', range: 16, label: 'CRAWLER' },
+  // The ranges are spread on purpose, and further apart than they were.
+  //
+  // Ten weapons with ten different reaches mean nothing while every
+  // opponent stands at the same twenty-odd metres: one gun answers all of
+  // them and the rack is decoration. A CRAWLER that comes right in cannot
+  // be dealt with by something that only works at distance, and a FUNNEL
+  // that stays out past thirty is out of reach of anything short — so what
+  // is in your hand starts to be a question with an answer.
+  { preset: 'multileg', style: 'rusher', range: 11, label: 'CRAWLER' },
   { preset: 'hopper', style: 'flyer', range: 30, label: 'POGO' },
-  { preset: 'bits', style: 'flyer', range: 34, label: 'FUNNEL' },
+  { preset: 'bits', style: 'flyer', range: 40, label: 'FUNNEL' },
 ];
 
 /** Seconds of quiet before the first wave, and between waves. */
@@ -128,15 +136,20 @@ export class SoloRun {
   static waveSpecs(n) {
     const count = Math.min(MAX_AT_ONCE, 2 + Math.floor(n / 2));
     const toughness = 1 + (n - 1) * 0.16;
+    // How hard the wave presses. The first few leave gaps you can move in;
+    // by the fifth there is barely a pause. The run used to ramp only in
+    // hit points, which makes later waves longer rather than harder — the
+    // fight is the same fight, it just takes more rounds.
+    const aggression = Math.min(1, 0.25 + (n - 1) * 0.19);
     const specs = [];
     for (let i = 0; i < count; i++) {
       // Offset by the wave number so the mix rotates rather than always
       // leading with the same machine.
       const kind = OPPONENTS[(i + n - 1) % OPPONENTS.length];
-      specs.push({ ...kind, toughness, ace: false });
+      specs.push({ ...kind, toughness, aggression, ace: false });
     }
     if (n % ACE_EVERY === 0) {
-      specs[0] = { ...specs[0], toughness: toughness * 2.4, ace: true };
+      specs[0] = { ...specs[0], toughness: toughness * 2.4, aggression: 1, ace: true };
     }
     return specs;
   }

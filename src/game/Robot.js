@@ -3,7 +3,7 @@ import { Rig } from '../core/Rig.js';
 import { computeStats } from '../core/Assembly.js';
 import { ZMFBody } from '../zmf/ZMFBody.js';
 import { Animator } from '../anim/Animator.js';
-import { clamp01, damp } from '../zmf/math.js';
+import { clamp01, damp, lerp as lerpN } from '../zmf/math.js';
 import { STAGGER } from '../core/constants.js';
 import { WeaponSystem } from './Weapons.js';
 
@@ -25,6 +25,46 @@ const _knock = new THREE.Vector3();
  * back where the body is.
  */
 const HIT_COLUMN_SPREAD = 1.3;
+
+/**
+ * How an opponent behaves, in one place.
+ *
+ * Every one of these is meant to be VISIBLE from the outside. A player who
+ * watches a machine for ten seconds should be able to say what it does when
+ * it is reloading and what it does when it is hurt — and then use it.
+ */
+const AI = {
+  /** How squarely it has to be facing you before it fires. */
+  facing: 0.55,
+  /** Below this much health it stops trading and backs off. */
+  hurtAt: 0.35,
+  /** How much further away it wants to be while hurt, and while reloading. */
+  hurtBackoff: 1.7,
+  reloadBackoff: 1.5,
+  /** Reach for a weapon that has no range of its own to speak of. */
+  contactReach: 4,
+  /** How far ahead it looks for a round with its name on it, in seconds. */
+  seeAhead: 0.55,
+  /** How near that round has to pass before it is worth dodging, in metres. */
+  dodgeWithin: 3.5,
+
+  /**
+   * Fire discipline: seconds on the trigger, then seconds off it.
+   *
+   * Not a difficulty knob dressed up as one. Three machines holding their
+   * triggers down put out more than anyone can answer, and worse, they put
+   * it out CONSTANTLY — there is no moment in it to move, so the only thing
+   * left to do is trade. The gap is where the game is: it is when you close,
+   * when you break cover, when you line one up.
+   *
+   * And it has to be legible. A machine that stops firing and backs off is
+   * telling you something you can use.
+   */
+  burst: [0.7, 1.6],
+  rest: [1.0, 2.2],
+  /** How much longer the gaps are at the gentlest setting. */
+  restEase: 2.1,
+};
 
 /**
  * The hit flash: how hard the machine lights up when something lands on it.
@@ -468,6 +508,15 @@ export class SimpleAI {
     this.random = robot.random ?? null;
     this.preferredRange = opts.range ?? 26;
     this.style = opts.style ?? 'orbit';   // orbit | rusher | flyer
+    /**
+     * How hard it presses, 0..1. Only the GAPS between bursts move with it.
+     *
+     * Not its damage and not its aim — a wave that hits softer teaches the
+     * wrong lesson about what a round costs, and one that misses on purpose
+     * teaches nothing at all. What an early wave gives you is TIME: room to
+     * move between bursts, and a run that ramps by taking that room away.
+     */
+    this.aggression = clamp01(opts.aggression ?? 1);
     // Drawn once and kept, so restarting the match puts this machine back
     // into the same rhythm it started with rather than a new one.
     this.startT = this.random ? this.random.unit() * 10 : 0;
@@ -481,12 +530,22 @@ export class SimpleAI {
     this.phase = this.startPhase;
     this.jinkTimer = 0;
     this.jinkDir = 1;
+    this.burstTimer = 0;
+    this.firing = false;
     this.input.move.set(0, 0, 0);
     this.input.intensity = 0;
     return this;
   }
 
-  update(playerPos, dt) {
+  /**
+   * @param {THREE.Vector3} playerPos
+   * @param {number} dt
+   * @param {object} [ctx] the arena's shared things: what it shoots WITH,
+   *   what it can hit, and what draws the result. Without them the machine
+   *   still manoeuvres — it just cannot pull a trigger, which is exactly
+   *   what it did for the whole of this game's life so far.
+   */
+  update(playerPos, dt, ctx = null) {
     const r = this.robot;
     const inp = this.input;
     this.t += dt;
@@ -512,12 +571,31 @@ export class SimpleAI {
       this.jinkDir = rng ? rng.sign() : 1;
     }
 
-    const err = (range - this.preferredRange) / this.preferredRange;
+    // Two habits on top of the orbit, both meant to be LEARNABLE rather
+    // than clever. A player has to be able to see what a machine is doing
+    // and answer it; an opponent that surprises you at random is not
+    // difficulty, it is noise.
+    //
+    //   reloading  -> back off while it is defenceless
+    //   hurt       -> back off, and mean it
+    const reloading = r.weapons.active?.reloadT > 0 || this.firing === false;
+    const hurt = r.hp < r.maxHp * AI.hurtAt;
+    const wants = this.preferredRange * (reloading ? AI.reloadBackoff : 1)
+      * (hurt ? AI.hurtBackoff : 1);
+
+    const err = (range - wants) / Math.max(1, wants);
     const drive = THREE.MathUtils.clamp(err * 1.6, -1, 1);
     const strafe = this.jinkDir * (0.55 + Math.sin(this.t * 1.7 + this.phase) * 0.45);
 
     inp.move.set(strafe, 0, drive);
     inp.intensity = Math.min(1, inp.move.length());
+
+    // A round with its name on it. The player's own answer to being shot
+    // at is to dash sideways, and an opponent that never does it is an
+    // opponent that has not been taught the game it is in.
+    if (this._threatened(ctx)) {
+      inp.dash = { dir: new THREE.Vector3(this.jinkDir, 0, 0), t: this.t };
+    }
 
     inp.hold('up', false);
     if (this.style === 'flyer') {
@@ -530,6 +608,92 @@ export class SimpleAI {
     }
 
     r.update(inp, dt);
+    this._shoot(ctx, range, flat, dt);
     inp.endFrame();
+  }
+
+  /**
+   * Pull the trigger, if there is anything to pull it at.
+   *
+   * The rule is deliberately blunt: face the target, be inside the reach of
+   * whatever is in hand, and fire. It does not lead, it does not pick its
+   * moment — the WEAPON leads (see `WeaponSystem.muzzle`) and the weapon
+   * decides how fast it can go off again.
+   *
+   * What makes it fair is the same thing that makes the player's shots
+   * fair: the rounds are slow, the lock aims short of the intercept, and a
+   * machine that keeps moving is missed. Being shot at is what all of that
+   * was built for.
+   */
+  _shoot(ctx, range, toTarget, dt) {
+    const r = this.robot;
+    if (!ctx?.projectiles || !r.weapons.hasWeapons || !r.alive) return;
+    const target = ctx.target;
+    if (!target?.alive) return;
+
+    // Facing it, roughly. A machine that fires over its shoulder while
+    // running away reads as a bug however correct the maths is.
+    const facing = r.body.forward.dot(toTarget);
+    const reach = this._reach();
+    const able = facing > AI.facing && range < reach;
+
+    // On the trigger, then off it. See AI.burst.
+    this.burstTimer -= dt;
+    if (this.burstTimer <= 0) {
+      this.firing = !this.firing;
+      const [lo, hi] = this.firing ? AI.burst : AI.rest;
+      const ease = this.firing ? 1 : lerpN(AI.restEase, 1, this.aggression);
+      this.burstTimer = (this.random ? this.random.range(lo, hi) : (lo + hi) / 2) * ease;
+    }
+    const firing = able && this.firing;
+
+    r.weapons.update({
+      firing,
+      aimPoint: target.position,
+      lockTarget: target,
+      projectiles: ctx.projectiles,
+      targets: ctx.targets ?? [target],
+      effects: ctx.effects ?? null,
+      feedback: ctx.feedback ?? null,
+    }, dt);
+  }
+
+  /**
+   * Is a round about to arrive?
+   *
+   * Only the ones actually pointed here: the closest approach of where the
+   * round is going over the next half second, against where this machine
+   * is. A machine that dodged everything in flight would twitch constantly
+   * and read as broken; one that dodges what is aimed at it reads as
+   * paying attention.
+   *
+   * Deliberately without prediction of its own movement. It is answering
+   * "that one is going to hit me", which is the same thing the player sees.
+   */
+  _threatened(ctx) {
+    const pool = ctx?.projectiles?.pool;
+    if (!pool || this.robot.body.dashCooldown > 0) return false;
+    const me = this.robot.position;
+    for (const s of pool) {
+      if (s.life <= 0 || !s.owner || s.owner === this.robot) continue;
+      if (s.owner.isPlayer === this.robot.isPlayer) continue;
+      _v.copy(s.mesh.position).sub(me);
+      const closing = -_v.dot(s.velocity) / Math.max(1e-3, s.velocity.lengthSq());
+      if (closing <= 0 || closing > AI.seeAhead) continue;
+      // Where it will be at its nearest, and how near that is.
+      _flat.copy(s.mesh.position).addScaledVector(s.velocity, closing);
+      if (_flat.distanceTo(me) < AI.dodgeWithin + this.robot.hitRadius) return true;
+    }
+    return false;
+  }
+
+  /** How far the weapon in hand actually carries, in metres. */
+  _reach() {
+    const meta = this.robot.weapons.active?.meta;
+    if (!meta) return 0;
+    if (meta.beam) return meta.beam.range;
+    if (meta.dps) return (meta.reach ?? 1.4) + this.robot.radius + 2;
+    if (!meta.speed) return AI.contactReach;
+    return meta.speed * (meta.life ?? 1);
   }
 }

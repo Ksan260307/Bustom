@@ -35,6 +35,15 @@ const DUST_EVERY_METRES = 1.6;
 /** Seconds between read-out redraws. Output only; never affects the fight. */
 const HUD_INTERVAL = 1 / 30;
 
+/**
+ * How long the target has to stay out of sight before the lock drops.
+ *
+ * Not instant. Clipping a pillar for a frame while both of you are moving
+ * is not breaking line of sight, and a lock that flickered every time
+ * something passed between you would be worse than no lock at all.
+ */
+const LOCK_BREAK = 0.55;
+
 /** The practice field's three, and the corners they stand in. */
 const REGULARS = [
   { preset: 'biped', x: 24, z: 18, style: 'orbit', range: 24 },
@@ -205,7 +214,7 @@ export class FieldScene {
    * six machines at the head of every wave is a visible hitch at exactly
    * the moment the player is being asked to fight.
    */
-  spawnEnemy({ preset = 'biped', style = 'orbit', range = 24, toughness = 1, at = null } = {}) {
+  spawnEnemy({ preset = 'biped', style = 'orbit', range = 24, toughness = 1, aggression = 1, at = null } = {}) {
     const shelved = this.retired.findIndex((e) => e.presetKey === preset);
     let bot = shelved >= 0 ? this.retired.splice(shelved, 1)[0] : null;
     if (!bot) {
@@ -216,11 +225,16 @@ export class FieldScene {
       // rather than build a second machine of exactly the same kind.
       bot.presetKey = preset;
       this.scene.add(bot.object3D);
-      this.ais.push(new SimpleAI(bot, { style, range }));
+      this.ais.push(new SimpleAI(bot, { style, range, aggression }));
     }
     this.enemies.push(bot);
     const ai = this.ais.find((a) => a.robot === bot);
-    if (ai) { ai.style = style; ai.preferredRange = range; ai.reset(); }
+    if (ai) {
+      ai.style = style;
+      ai.preferredRange = range;
+      ai.aggression = clamp01(aggression);
+      ai.reset();
+    }
 
     bot.setToughness(toughness);
     bot.revive(at ?? this._enemySpawn(bot));
@@ -373,6 +387,7 @@ export class FieldScene {
     if (inp.consume('lock', 0.2)) {
       if (this.lock) {
         this.lock = null;
+        this.feedback.lock?.(false);
         this.player.setTarget(null);
         this.player.setLocked(false);
         this.hud.lockProgress = 0;
@@ -392,10 +407,49 @@ export class FieldScene {
       this.lock.aimPoint = this.player.body.assist.hasTarget
         ? this.player.body.assist.aimPoint
         : this.lock.robot.position;
+
+      // Cover breaks a lock. The arena has been full of pillars from the
+      // start with nothing to make anyone use one — and a lock that is a
+      // free, permanent aim aid is a lock with no decision in it. Put
+      // something solid between you and the machine tracking you and it
+      // loses you, which gives the pillars their second job and gives
+      // running for one a point.
+      const blocked = this._blocked(this.player.position, this.lock.robot.position);
+      this.lock.hidden = blocked ? (this.lock.hidden ?? 0) + dt : 0;
+      if (this.lock.hidden > LOCK_BREAK) {
+        this.lock = null;
+        this.feedback.lock?.(false);
+        this.player.setTarget(null);
+        this.player.setLocked(false);
+        this.hud.lockProgress = 0;
+      }
     }
   }
 
+  /**
+   * Is the line between these two points inside a solid thing?
+   *
+   * Sampled rather than solved. The arena's obstacles are axis-aligned
+   * boxes and there are a couple of dozen of them, so walking the line and
+   * asking "am I inside anything" is both shorter and easier to be sure
+   * about than a slab test per box — and it is asked once per frame for one
+   * pair of machines, not per bullet.
+   */
+  _blocked(from, to) {
+    const boxes = this.world.colliders;
+    if (!boxes?.length) return false;
+    const span = from.distanceTo(to);
+    if (span < 1e-3) return false;
+    const steps = Math.min(48, Math.max(4, Math.round(span / 1.5)));
+    for (let i = 1; i < steps; i++) {
+      _v.lerpVectors(from, to, i / steps);
+      for (const box of boxes) if (box.containsPoint(_v)) return true;
+    }
+    return false;
+  }
+
   _applyLock() {
+    this.feedback.lock?.(true);
     this.player.setTarget(this.lock.robot);
     this.player.setLocked(true);
     this.hud.lockProgress = 0;
@@ -443,6 +497,7 @@ export class FieldScene {
       targets: this.enemies,
       lockTarget: this.lock?.robot ?? null,
       effects: this.effects,
+      feedback: this.feedback,
     }, dt);
 
     if (!p.weapons.hasWeapons) this._fireDefault(dt);
@@ -527,8 +582,21 @@ export class FieldScene {
     for (const robot of [this.player, ...this.enemies]) {
       if (!robot || robot.alive || robot.wrecked) continue;
       robot.wrecked = true;
-      this.debris.burst(robot, { power: robot === this.player ? 1.15 : 1 });
-      this.hitPulse = Math.max(this.hitPulse, robot === this.player ? 0.9 : 0.55);
+      const mine = robot === this.player;
+      this.debris.burst(robot, { power: mine ? 1.15 : 1 });
+      this.hitPulse = Math.max(this.hitPulse, mine ? 0.9 : 0.55);
+      this.feedback.boom?.(mine ? 1 : 0.75);
+      // A kill is the one moment the whole loop pays out, and it used to
+      // look exactly like taking a hit. It gets a ring of its own, a bigger
+      // shake, and a mark where it happened.
+      if (!mine) {
+        _v.copy(robot.position);
+        _v.y -= robot.body.rideHeight ?? 0;
+        this.effects.landing(_v, {
+          scale: Math.max(1.6, (robot.hitRadius ?? 1) * 3), power: 1,
+        });
+        this.hud.markHit(robot.position, 1, true);
+      }
       // With rules in charge, whether anything comes back is their call.
       if (this.director) this.director.onDown(robot);
       else this.pendingRespawns.push({ robot, at: this.time + FieldScene.RESPAWN_DELAY });
@@ -775,9 +843,18 @@ export class FieldScene {
     this._shareOutWork();
     p.update(this.input, dt);
 
+    // Everything an opponent needs to shoot back, built once per step
+    // rather than per machine.
+    this._aiContext = {
+      target: p,
+      projectiles: this.projectiles,
+      targets: this._machines(),
+      effects: this.effects,
+      feedback: this.feedback,
+    };
     for (const ai of this.ais) {
       if (!ai.robot.alive) continue;
-      ai.update(p.position, dt);
+      ai.update(p.position, dt, this._aiContext);
     }
 
     this._checkDeaths();
@@ -787,7 +864,10 @@ export class FieldScene {
 
     this._fire(dt);
     this._updateTracers(dt);
-    this.projectiles.update(dt, this.enemies);
+    // EVERY machine, the player included. Rounds used to be tested against
+    // the opposition only, so an opponent's shot could not have hit you if
+    // it had been fired — which, until now, it never was.
+    this.projectiles.update(dt, this._machines());
     this.hitPulse = Math.max(0, this.hitPulse - dt * 5);
     for (const hit of this.projectiles.hits) {
       // Landing a hit should register, not white out the screen. A missile
@@ -799,16 +879,22 @@ export class FieldScene {
       if (hit.blast) {
         this.debris.blast?.(hit.position, hit.blast * 0.45);
         this.hitPulse = Math.max(this.hitPulse, 0.5);
+        this.feedback.boom?.(0.45);
       } else {
         // Everything else gets sparks, in the colour of the round that made
         // them — including the ones that hit the floor. A shot that lands
         // with no mark on it reads as a shot that missed, and then the
         // player cannot tell the two apart.
+        const weight = clamp01(hit.damage / 40);
         this.effects.impact(hit.position, hit.dir, {
           color: hit.color ?? 0xffffff,
-          scale: 0.55 + clamp01(hit.damage / 40) * 1.1,
+          scale: 0.55 + weight * 1.1,
           life: hit.robot ? 0.26 : 0.18,
         });
+        // Only what LANDED on somebody is worth a sound. A round hitting the
+        // floor is already saying so with sparks, and forty of them a second
+        // off a gatling is a hiss.
+        if (hit.robot) this.feedback.hit?.(weight, hit.robot !== this.player);
       }
     }
 

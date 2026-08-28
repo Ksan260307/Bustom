@@ -9,7 +9,7 @@ import {
   BONE_GAIN_MAX, BONE_LAG_MAX, BONE_MOTION_DEFAULT,
 } from './constants.js';
 import { VoxelBlock } from './VoxelBlock.js';
-import { SHAPE, SHAPE_DEFAULT, isShape } from './Shapes.js';
+import { SHAPE, SHAPE_DEFAULT, isShape, surfaceAlong } from './Shapes.js';
 import { Palette } from './Palette.js';
 
 // ============================================================
@@ -142,12 +142,37 @@ export function touchesLine(part, local, quat, radius) {
  * block. Sockets are gone, but this is still the sensible default when the
  * builder clicks on a surface, and it keeps the presets readable.
  */
-export function faceAnchor(parentPart, face, childSize = [0, 0, 0]) {
+export function faceAnchor(parentPart, face, childSize = [0, 0, 0], at = null) {
   const axis = FACE_AXIS[face];
   const n = FACE_NORMAL[face];
-  const half = (parentPart.size?.[axis] ?? 1) / 2;
-  const d = half + (childSize[axis] ?? 0) / 2;
-  return [n[0] * d, n[1] * d, n[2] * d];
+  const size = parentPart.size ?? [1, 1, 1];
+  const half = (size[axis] ?? 1) / 2;
+  const out = [0, 0, 0];
+  let reach = half;
+
+  if (at) {
+    // Slide along the face to where the click landed rather than always
+    // stacking on its centre — the difference between building a shoulder
+    // and building a tower. Kept far enough in that the child still has its
+    // whole footprint on the face it is standing on.
+    const rest = [0, 1, 2].filter((i) => i !== axis);
+    for (const i of rest) {
+      const lim = Math.max(0, (size[i] ?? 1) / 2 - (childSize[i] ?? 0) / 2);
+      out[i] = Math.min(lim, Math.max(-lim, at[i] ?? 0));
+    }
+    // And out to the parent's own skin at that point, not to the corner of
+    // a bounding box: fourteen of the twenty-one shapes curve or taper away
+    // from theirs, and a part left on the box hangs in mid-air.
+    const hu = (size[rest[0]] ?? 1) / 2 || 1;
+    const hv = (size[rest[1]] ?? 1) / 2 || 1;
+    reach = half * surfaceAlong(
+      parentPart.shape ?? SHAPE_DEFAULT, axis, n[axis] >= 0 ? 1 : -1,
+      out[rest[0]] / hu, out[rest[1]] / hv,
+    );
+  }
+
+  out[axis] = n[axis] * (reach + (childSize[axis] ?? 0) / 2);
+  return out;
 }
 
 /** Where a child sits when threaded onto a bone, `t` units along the shaft. */
@@ -590,11 +615,17 @@ export class Assembly {
     return true;
   }
 
-  setBoneShape(id, { length, radius } = {}) {
+  setBoneShape(id, { length, radius, limit, gain, lag } = {}) {
     const part = this.parts.get(id);
     if (!part || part.kind !== 'bone') return false;
     if (length !== undefined) part.length = clamp(length, BONE_LENGTH_MIN, BONE_LENGTH_MAX);
     if (radius !== undefined) part.radius = clamp(radius, BONE_RADIUS_MIN, BONE_RADIUS_MAX);
+    // The joint limit lives here too. It used to be written onto the part
+    // from the panel directly, which meant it was the one bone property
+    // that could not be undone.
+    if (limit !== undefined) part.limit = clamp(limit, 1, 180);
+    if (gain !== undefined) part.gain = clamp(gain, 0, BONE_GAIN_MAX);
+    if (lag !== undefined) part.lag = clamp(lag, 0, BONE_LAG_MAX);
     return true;
   }
 

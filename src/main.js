@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Assembly, PRESETS } from './core/Assembly.js';
-import { EditorScene, TOOL } from './editor/EditorScene.js';
+import { EditorScene, TOOL, PART_TOOLS } from './editor/EditorScene.js';
 import { History } from './editor/History.js';
 import { PartLibrary } from './editor/PartLibrary.js';
 import { FieldScene } from './game/FieldScene.js';
@@ -163,6 +163,9 @@ export class App {
     ed.onChange = (stats) => this.ui?.renderStats(stats);
     ed.onSelect = (parts) => this.ui?.renderInspector(parts);
     ed.onBeforeChange = (label) => this.pushHistory(label);
+    // A drag that lays a row of parts is ONE change, the way a slider drag is.
+    ed.onGesture = (open) => (open ? this.beginGesture() : this.endGesture());
+    ed.onHint = (hint) => this.ui?.showPlacementHint?.(hint);
     ed.onReject = (msg) => this.ui?.toastMsg(msg);
     return ed;
   }
@@ -185,8 +188,34 @@ export class App {
   _snapshot() { return JSON.stringify(this.assembly.toJSON()); }
 
   /** Record the state as it is now, before `label` changes it. */
+  /**
+   * Treat everything until `endGesture` as ONE undoable change.
+   *
+   * A slider is not a change, it is a hundred of them. Dragging one from 1.0
+   * to 3.0 used to leave nine entries behind — nine presses of Ctrl+Z to
+   * undo one adjustment — and since every entry is a full snapshot of the
+   * machine, seven such drags were enough to push an hour of real work off
+   * the end of the history.
+   *
+   * The gizmo already got this right: it records once when the drag starts
+   * (see `_beginDrag`). This is the same idea for anything the player holds
+   * on to, and it is opened and closed by the widget rather than guessed at
+   * from timing — two deliberate resizes half a second apart are two
+   * changes, and no clock can tell that from one slow drag.
+   */
+  beginGesture() {
+    this._gestureOpen = true;
+    this._gestureRecorded = false;
+  }
+
+  endGesture() { this._gestureOpen = false; }
+
   pushHistory(label) {
     if (!this.ui) return;                    // still booting
+    if (this._gestureOpen) {
+      if (this._gestureRecorded) return;     // the "before" is already kept
+      this._gestureRecorded = true;
+    }
     this.history.push(label, this._snapshot());
     this.ui.syncHistory();
   }
@@ -512,8 +541,21 @@ export class App {
     this.ui.toastMsg(n ? `${n} パーツの連結を解除しました` : '解除できる連結がありません');
   }
 
+  /**
+   * Pick a colour: arm it for the next part, and paint what is selected now.
+   *
+   * It used to only arm it. Recolouring a block you had already placed meant
+   * opening the folded colour section, choosing, scrolling the inspector
+   * down to 中身 and pressing 全塗り — four actions for the decision a
+   * builder makes most often, and nothing on the swatch to suggest it.
+   *
+   * Painting the selection as well costs nothing when there is none, and
+   * arming stays in place either way: picking a colour and then placing
+   * something still gives you that colour.
+   */
   setColor(i) {
     this.editor.colorIndex = i;
+    this.paintSelected(i);
     this.ui.syncColor(i);
   }
 
@@ -522,6 +564,10 @@ export class App {
     const idx = this.assembly.palette.ensure(hex);
     if (idx < 0) { this.ui.toastMsg('カラーが上限に達しました'); return; }
     this.editor.colorIndex = idx;
+    // A colour off the wheel is the same decision as a colour off the
+    // palette, and has to do the same thing. Two ways to pick a colour that
+    // behave differently is one of them being wrong.
+    this.paintSelected(idx);
     this.ui.renderPalette();
   }
 
@@ -535,11 +581,16 @@ export class App {
     this.ui.toastMsg(`加工の細かさを 1/${n} にしました`);
   }
 
+  /**
+   * Push one of the new-bone sliders onto whatever bones are selected.
+   *
+   * Everything goes through the editor's setter, including the joint limit.
+   * It used to be written straight onto the part — no history entry, no
+   * rebuild — so the one bone property you tune by feel was the one property
+   * you could not undo.
+   */
   applyBoneOptionToSelection(key, value) {
-    const part = this.editor.selected ? this.assembly.get(this.editor.selected) : null;
-    if (!part || part.kind !== 'bone') return;
-    if (key === 'length' || key === 'radius') this.editor.setBoneShapeSelected({ [key]: value });
-    else part[key] = value;
+    this.editor.setBoneShapeSelected({ [key]: value });
   }
 
   uniformSize(v) {
@@ -571,12 +622,26 @@ export class App {
     this._afterVoxelEdit(part);
   }
 
-  repaintSelected() {
-    const part = this._selectedBlock();
-    if (!part) return;
-    this.pushHistory('全塗り');
-    part.vox.repaint(this.editor.colorIndex);
-    this._afterVoxelEdit(part);
+  repaintSelected() { return this.paintSelected(this.editor.colorIndex); }
+
+  /**
+   * Repaint every block in the selection.
+   *
+   * One history entry for the lot, and nothing at all when the selection
+   * holds no blocks — clicking a swatch with a bone selected should arm the
+   * colour and otherwise be silent, not push an empty undo step.
+   */
+  paintSelected(colorIndex) {
+    const blocks = this.editor.selectedParts().filter((p) => p?.vox);
+    if (!blocks.length) return 0;
+    this.pushHistory('塗る');
+    for (const part of blocks) {
+      part.vox.repaint(colorIndex);
+      this.editor.rig.refreshBlock(part.id);
+    }
+    this.editor.refreshStats();
+    this.ui.renderInspector(this.editor.selectedParts());
+    return blocks.length;
   }
 
   _afterVoxelEdit(part) {
@@ -764,7 +829,19 @@ export class App {
         const tool = TOOL_KEYS[e.code];
         if (tool) { e.preventDefault(); this.setTool(tool); }
         if (e.code === 'KeyT') { e.preventDefault(); this.setGizmoMode('translate'); }
-        if (e.code === 'KeyR') { e.preventDefault(); this.setGizmoMode('rotate'); }
+        if (e.code === 'KeyR') {
+          e.preventDefault();
+          // With a part in hand, R turns the part rather than the gizmo:
+          // most of the shapes have a front and a top, and until now the
+          // only way to point one was to place it and then type an angle
+          // into the inspector.
+          if (PART_TOOLS.has(this.editor.tool)) this.editor.turnPlacement(e.shiftKey ? -1 : 1);
+          else this.setGizmoMode('rotate');
+        }
+        if (e.code === 'PageUp' || e.code === 'PageDown') {
+          e.preventDefault();
+          this.editor.liftWorkPlane(e.code === 'PageUp' ? 1 : -1);
+        }
         if (e.code === 'KeyJ') {
           e.preventDefault();
           if (e.shiftKey) this.disconnectSelected();

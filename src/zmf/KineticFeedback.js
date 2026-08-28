@@ -77,10 +77,158 @@ export class KineticFeedback {
     noiseGain.connect(master);
     noise.start();
 
+    // A second bus for the things that HAPPEN. The drone above is driven
+    // by numbers the physics produced and never starts or stops; an event
+    // is the opposite of that, and mixing the two into one gain leaves no
+    // way to hear a shot over your own engine.
+    const events = ctx.createGain();
+    events.gain.value = 0.9;
+    events.connect(master);
+    this.events = events;
+    this.noiseBuffer = buf;
+
     this.master = master;
     this.nodes = { oscA, oscB, filter, thrustGain, noiseFilter, noiseGain };
     this.enabled = true;
     return true;
+  }
+
+  // ---------------------------------------------------------- one-shots
+  //
+  //  Synthesised, not sampled. A shot is a noise burst through a filter
+  //  that falls; an impact is the same burst, shorter and higher; an
+  //  explosion is a long one with a sine thump under it. Three shapes cover
+  //  a whole game's worth of events, they weigh nothing, and there is no
+  //  audio file anywhere to go missing.
+  //
+  //  Every one of these is DECORATION: they read the fight and never touch
+  //  it. Called with the sound off, or before the player has clicked
+  //  anything, they return immediately.
+
+  /** Is there anywhere for a sound to go right now? */
+  get audible() { return !!(this.enabled && this.ctx && !this.muted); }
+
+  /**
+   * One burst of filtered noise.
+   *
+   * @param {object} o
+   * @param {number} o.gain    peak, before the event bus
+   * @param {number} o.from    filter cutoff at the attack, Hz
+   * @param {number} o.to      ...and where it falls to
+   * @param {number} o.life    seconds
+   * @param {number} [o.q]     how tight the band is
+   */
+  _burst({ gain, from, to, life, q = 1 }) {
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    src.loop = true;
+    // Start somewhere random in the buffer, or every shot is the same shot.
+    const offset = Math.random() * (this.noiseBuffer.duration - life - 0.01);
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.Q.value = q;
+    filter.frequency.setValueAtTime(from, t);
+    filter.frequency.exponentialRampToValueAtTime(Math.max(40, to), t + life);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain), t + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + life);
+
+    src.connect(filter);
+    filter.connect(g);
+    g.connect(this.events);
+    src.start(t, Math.max(0, offset));
+    src.stop(t + life + 0.02);
+    // Nothing is kept: the graph is collected once the source has stopped.
+    src.onended = () => { g.disconnect(); filter.disconnect(); };
+    return { t, g };
+  }
+
+  /** A sine that drops — the body under an explosion, or a heavy hit. */
+  _thump({ gain, from, to, life }) {
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(from, t);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(20, to), t + life);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain), t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + life);
+
+    osc.connect(g);
+    g.connect(this.events);
+    osc.start(t);
+    osc.stop(t + life + 0.02);
+    osc.onended = () => { g.disconnect(); };
+  }
+
+  /**
+   * Something left a barrel.
+   * @param {number} weight 0..1 — a pellet or a cannon
+   * @param {boolean} mine  ours is brighter and louder; theirs sits behind it
+   */
+  fire(weight = 0.5, mine = true) {
+    if (!this.audible) return;
+    const w = clamp01(weight);
+    this._burst({
+      gain: (mine ? 0.20 : 0.10) * (0.55 + w * 0.7),
+      from: 2600 - w * 1200,
+      to: 320 - w * 160,
+      life: 0.05 + w * 0.09,
+      q: 0.7,
+    });
+    if (w > 0.5) this._thump({ gain: 0.14 * w, from: 160, to: 55, life: 0.10 + w * 0.1 });
+  }
+
+  /** Something arrived. `mine` is a hit WE landed — the one worth hearing. */
+  hit(weight = 0.5, mine = true) {
+    if (!this.audible) return;
+    const w = clamp01(weight);
+    this._burst({
+      gain: (mine ? 0.16 : 0.22) * (0.5 + w),
+      from: 5200,
+      to: 900 - w * 400,
+      life: 0.035 + w * 0.05,
+      q: 1.6,
+    });
+    // Being hit gets a body to it, so it is never mistaken for landing one.
+    if (!mine) this._thump({ gain: 0.12 + w * 0.16, from: 220, to: 60, life: 0.16 });
+  }
+
+  /** A machine came apart. */
+  boom(size = 1) {
+    if (!this.audible) return;
+    const w = clamp01(size);
+    this._burst({ gain: 0.26 * (0.6 + w), from: 1800, to: 90, life: 0.5 + w * 0.4, q: 0.5 });
+    this._thump({ gain: 0.30 * (0.5 + w), from: 120, to: 28, life: 0.6 + w * 0.4 });
+  }
+
+  /** A target was acquired, or lost. Two notes, one order or the other. */
+  lock(on = true) {
+    if (!this.audible) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    for (const [i, f] of (on ? [880, 1320] : [1320, 660]).entries()) {
+      const osc = ctx.createOscillator();
+      osc.type = 'square';
+      osc.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t + i * 0.055);
+      g.gain.exponentialRampToValueAtTime(0.045, t + i * 0.055 + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.055 + 0.07);
+      osc.connect(g);
+      g.connect(this.events);
+      osc.start(t + i * 0.055);
+      osc.stop(t + i * 0.055 + 0.09);
+      osc.onended = () => { g.disconnect(); };
+    }
   }
 
   setMuted(m) {

@@ -174,6 +174,36 @@ export const SHAPES = {
   },
 };
 
+/**
+ * How far out a shape's own skin sits along one face axis, as a fraction of
+ * the box half-extent, at the point (a, b) across that face.
+ *
+ * A box answers 1 everywhere, which is the flush mount the editor has always
+ * done. A dome answers less as you move off its pole, so something placed
+ * near its edge lands ON it instead of hanging in the air off the corner of
+ * a bounding box nothing can see.
+ *
+ * `a` and `b` are the other two axes in ascending order, each -1..1. When
+ * the line misses the shape entirely — the hole down the middle of a tube —
+ * the answer is the bounding box, because burying the part at the centre of
+ * the parent is a stranger answer than the one we already gave.
+ */
+export function surfaceAlong(shape, axis, sign = 1, a = 0, b = 0) {
+  const spec = SHAPES[shape];
+  if (!spec || shape === SHAPE_DEFAULT) return 1;
+  const rest = [0, 1, 2].filter((i) => i !== axis);
+  const p = [0, 0, 0];
+  p[rest[0]] = a;
+  p[rest[1]] = b;
+  const STEPS = 32;
+  for (let i = 0; i <= STEPS; i++) {
+    const w = 1 - i / STEPS;
+    p[axis] = sign * w;
+    if (spec.mask(p[0], p[1], p[2])) return w;
+  }
+  return 1;
+}
+
 export const SHAPE_IDS = Object.keys(SHAPES);
 
 /** The picker's rows, in table order. */
