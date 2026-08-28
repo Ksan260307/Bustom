@@ -359,6 +359,172 @@ describe('joint limits', () => {
     expect(Math.abs(rigged.animator.bodyLean.y)).toBeLessThanOrEqual(0.21);
   });
 
+  it('a rocked machine reels away from the blow', () => {
+    // A round lands on the BODY, not on the feet, so the machine goes over
+    // backwards when it is shot in the chest. That is the opposite sign to
+    // the lean a run produces — where the feet drive and the top lags — and
+    // getting it wrong has the machine bow politely to whoever shot it.
+    const rigged = makeAnimator(PRESETS.biped.build());
+    const still = {
+      dt: 1 / 60, speed: 0, planarSpeed: 0, grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 0, thrust: 0, jerk: 0,
+    };
+    for (let i = 0; i < 60; i++) rigged.animator.update(still);
+    const rest = rigged.animator.bodyLean.x;
+
+    // Shot from in front: thrown backwards, so the top goes backwards too.
+    const shove = { ...still, stagger: 1, staggerDir: new THREE.Vector3(0, 0, -1) };
+    for (let i = 0; i < 10; i++) rigged.animator.update(shove);
+    expect(rigged.animator.bodyLean.x, 'it reels').toBeLessThan(rest - 0.1);
+    expect(rigged.animator.bodyBob, 'and drops on its legs').toBeLessThan(0);
+
+    // Shot from the left: it rolls away to the right.
+    const side = { ...still, stagger: 1, staggerDir: new THREE.Vector3(1, 0, 0) };
+    const rigged2 = makeAnimator(PRESETS.biped.build());
+    for (let i = 0; i < 60; i++) rigged2.animator.update(still);
+    for (let i = 0; i < 10; i++) rigged2.animator.update(side);
+    expect(rigged2.animator.bodyLean.y).toBeLessThan(-0.1);
+  });
+
+  it('the reel lands fast and lets go with the stagger', () => {
+    // A flinch that eases in over a fifth of a second is not a flinch, it is
+    // a machine changing its mind.
+    const rigged = makeAnimator(PRESETS.biped.build());
+    const still = {
+      dt: 1 / 60, speed: 0, planarSpeed: 0, grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 0, thrust: 0, jerk: 0,
+    };
+    for (let i = 0; i < 60; i++) rigged.animator.update(still);
+    const shove = { ...still, stagger: 1, staggerDir: new THREE.Vector3(0, 0, -1) };
+    for (let i = 0; i < 4; i++) rigged.animator.update(shove);
+    expect(Math.abs(rigged.animator.bodyLean.x), 'most of it inside four frames')
+      .toBeGreaterThan(0.12);
+
+    for (let i = 0; i < 120; i++) rigged.animator.update(still);
+    expect(Math.abs(rigged.animator.bodyLean.x), 'and gone once the stagger is')
+      .toBeLessThan(0.02);
+  });
+
+  it('a heavy machine folds its knees when it lands', () => {
+    // The brace is added ON TOP of the gait rather than replacing it, so a
+    // machine that lands running keeps running — it just does the first
+    // fraction of a second of it from a crouch.
+    const rigged = makeAnimator(PRESETS.biped.build());
+    const still = {
+      dt: 1 / 60, speed: 0, planarSpeed: 0, grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 0, thrust: 0, jerk: 0,
+    };
+    for (let i = 0; i < 90; i++) rigged.animator.update(still);
+    const bend = () => rigged.rig.limbs
+      .flatMap((l) => l.chain)
+      .reduce((n, j) => n + j.joint.quaternion.angleTo(IDENTITY), 0);
+    const standing = bend();
+    const level = rigged.animator.bodyBob;
+
+    const planted = { ...still, landing: 1 };
+    for (let i = 0; i < 20; i++) rigged.animator.update(planted);
+    expect(bend(), 'the legs fold').toBeGreaterThan(standing + 0.2);
+    expect(rigged.animator.bodyBob, 'and the body sinks onto them')
+      .toBeLessThan(level - 0.1);
+
+    for (let i = 0; i < 180; i++) rigged.animator.update(still);
+    expect(bend(), 'and it stands back up').toBeLessThan(standing + 0.05);
+  });
+
+  it('a machine that is not landing is not crouching', () => {
+    const rigged = makeAnimator(PRESETS.biped.build());
+    const still = {
+      dt: 1 / 60, speed: 0, planarSpeed: 0, grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 0, thrust: 0, jerk: 0,
+    };
+    for (let i = 0; i < 60; i++) rigged.animator.update(still);
+    expect(Math.abs(rigged.animator.bodyBob)).toBeLessThan(0.06);
+  });
+
+  it('going sideways faster than it can walk, it stops walking', () => {
+    // Above the machine's own ground speed there is no stride that could
+    // keep up: the leg would have to swing further than it can reach,
+    // faster than it can move. What came out instead was a machine
+    // moonwalking at thirty metres a second.
+    const rigged = makeAnimator(PRESETS.biped.build());
+    const going = (vx) => ({
+      dt: 1 / 60, speed: Math.abs(vx), planarSpeed: Math.abs(vx), grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(vx, 0, 0), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 0, thrust: 0, jerk: 0,
+      walkCap: 16, dashSpeed: 34,
+    });
+
+    for (let i = 0; i < 120; i++) rigged.animator.update(going(10));
+    expect(rigged.animator.slide, 'at a walk, it walks').toBeLessThan(0.05);
+
+    for (let i = 0; i < 60; i++) rigged.animator.update(going(34));
+    expect(rigged.animator.slide, 'past a dash, it skates').toBeGreaterThan(0.8);
+    expect(rigged.animator.slideDir, 'and it knows which way it is going').toBe(1);
+
+    for (let i = 0; i < 120; i++) rigged.animator.update(going(4));
+    expect(rigged.animator.slide, 'and it stops again').toBeLessThan(0.05);
+  });
+
+  it('the legs cant over onto the side it is being dragged from', () => {
+    // Feet held back by the floor, body carried on ahead. Both legs the
+    // same way — this is one machine being taken sideways, not two legs
+    // each doing something.
+    const build = (vx) => {
+      const rigged = makeAnimator(PRESETS.biped.build());
+      const s = {
+        dt: 1 / 60, speed: Math.abs(vx), planarSpeed: Math.abs(vx), grounded: 1, airborne: 0,
+        velocity: new THREE.Vector3(vx, 0, 0), bodyQ: new THREE.Quaternion(),
+        aimDir: null, locked: 0, thrust: 0, jerk: 0, walkCap: 16, dashSpeed: 34,
+      };
+      for (let i = 0; i < 90; i++) rigged.animator.update(s);
+      return rigged;
+    };
+    // Measured off the built rig rather than off a quaternion: where the
+    // foot ENDS UP is the thing being claimed, and it survives any change
+    // to which axis the pose is expressed about.
+    const feet = (rigged) => {
+      rigged.rig.root.updateMatrixWorld(true);
+      return rigged.rig.limbs.map((l) => {
+        const last = l.chain[l.chain.length - 1];
+        return last.far.getWorldPosition(new THREE.Vector3()).x;
+      });
+    };
+
+    const still = feet(build(0));
+    const right = feet(build(34));
+    const left = feet(build(-34));
+    right.forEach((x, i) => {
+      expect(x, `going right, foot ${i} trails left`).toBeLessThan(still[i] - 0.1);
+    });
+    left.forEach((x, i) => {
+      expect(x, `and the other way round, foot ${i}`).toBeGreaterThan(still[i] + 0.1);
+    });
+  });
+
+  it('a machine thrown off its feet goes right over', () => {
+    // Rocked is a lean. Thrown is the same motion several times as far, and
+    // it does not come back until the machine lands.
+    const rigged = makeAnimator(PRESETS.biped.build());
+    const base = {
+      dt: 1 / 60, speed: 0, planarSpeed: 0, grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 0, thrust: 0, jerk: 0,
+    };
+    for (let i = 0; i < 60; i++) rigged.animator.update(base);
+
+    const rocked = { ...base, stagger: 1, staggerDir: new THREE.Vector3(0, 0, -1) };
+    for (let i = 0; i < 12; i++) rigged.animator.update(rocked);
+    const lean = rigged.animator.bodyLean.x;
+
+    const thrown = { ...base, stagger: 1, downed: 1, staggerDir: new THREE.Vector3(0, 0, -1) };
+    for (let i = 0; i < 12; i++) rigged.animator.update(thrown);
+    expect(rigged.animator.bodyLean.x, 'much further over').toBeLessThan(lean - 0.3);
+  });
+
   it('produces no NaN under absurd signals', () => {
     const rigged = makeAnimator(PRESETS.multileg.build());
     swingRange(rigged, {

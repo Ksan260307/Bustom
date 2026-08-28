@@ -153,6 +153,18 @@ export function faceAnchor(parentPart, face, childSize = [0, 0, 0]) {
 /** Where a child sits when threaded onto a bone, `t` units along the shaft. */
 export const boneAnchor = (t) => [0, t, 0];
 
+/**
+ * The tag a saved machine carries, and what it used to carry.
+ *
+ * The old one is still accepted on the way IN. A game changing its name is
+ * not a reason for a file somebody saved last week to stop opening.
+ */
+export const ASSEMBLY_FORMAT = 'blostom.assembly';
+export const ASSEMBLY_FORMAT_WAS = 'brostom.assembly';
+/** Is this the tag of a machine document of ours, old name or new? */
+export const isAssemblyFormat = (tag) =>
+  tag === ASSEMBLY_FORMAT || tag === ASSEMBLY_FORMAT_WAS;
+
 export class Assembly {
   constructor(name = 'NEW ROBO') {
     this.name = name;
@@ -825,7 +837,7 @@ export class Assembly {
       parts.push(o);
     });
     return {
-      format: 'brostom.assembly',
+      format: ASSEMBLY_FORMAT,
       version: 4,
       name: this.name,
       root: this.rootId,
@@ -1465,9 +1477,12 @@ export function presetBits() {
 }
 
 export const PRESETS = {
-  biped: { label: '2脚 STRIDER', build: presetBiped },
-  hopper: { label: '1脚 POGO', build: presetHopper },
-  multileg: { label: '4脚 CRAWLER', build: presetMultileg },
+  // Named, not classified: how many legs a machine has is visible from
+  // looking at it, and putting the count in the name makes the list read as
+  // a menu of categories to pick from rather than as four machines.
+  biped: { label: 'STRIDER', build: presetBiped },
+  hopper: { label: 'POGO', build: presetHopper },
+  multileg: { label: 'CRAWLER', build: presetMultileg },
   bits: { label: '浮遊ビット FUNNEL', build: presetBits },
   core: { label: 'コアのみ', build: () => Assembly.createDefault() },
 };

@@ -5,7 +5,7 @@ import { SyntheticInput, Robot, SimpleAI } from '../src/game/Robot.js';
 import { Assembly, PRESETS, computeStats } from '../src/core/Assembly.js';
 import { Rig } from '../src/core/Rig.js';
 import { testWorld, stripEquips } from './helpers/dom.js';
-import { EQUIP_META } from '../src/core/constants.js';
+import { EQUIP_META, STAGGER, LANDING } from '../src/core/constants.js';
 
 const STATS = computeStats(stripEquips(PRESETS.biped.build()));
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -686,6 +686,246 @@ describe('equipment on the body', () => {
     input.hold('up', true);
     run(b, input, 3);
     expect(b.position.y).toBeGreaterThan(12);
+  });
+});
+
+describe('being knocked about', () => {
+  it('a stagger throws the machine and takes its drive away', () => {
+    const b = makeBody();
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    run(b, input, 1.5);
+    const cruise = b.speed;
+
+    b.applyStagger(1, V(-1, 0, 0));           // shoved to the left
+    expect(b.stagger, 'rocked').toBeCloseTo(1, 6);
+    expect(b.velocity.x, 'and thrown that way').toBeLessThan(-4);
+
+    // Still holding forward, and going nowhere new: the thrust is gone
+    // until it rides the stagger out.
+    const heldZ = b.velocity.z;
+    run(b, input, 0.1);
+    expect(b.speed, 'no driving out of it').toBeLessThan(cruise + 1);
+    expect(b.velocity.z, 'and what it had, it keeps').toBeGreaterThan(heldZ * 0.5);
+  });
+
+  it('and then lets go of it', () => {
+    const b = makeBody();
+    b.applyStagger(1, V(0, 0, -1));
+    run(b, input, 1.2);
+    expect(b.stagger, 'it wears off on its own').toBe(0);
+
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    run(b, input, 2);
+    expect(b.speed, 'and the machine drives again').toBeGreaterThan(5);
+  });
+
+  it('a second blow deepens the stagger rather than replacing it', () => {
+    // A heavy round followed by a light one has to leave the machine rocked
+    // by the heavy one. Taking the newest figure would let a stream of
+    // pinpricks talk a machine out of the stagger it had just earned.
+    const b = makeBody();
+    b.applyStagger(0.9, V(1, 0, 0));
+    b.applyStagger(0.1, V(1, 0, 0));
+    expect(b.stagger).toBeCloseTo(0.9, 6);
+  });
+
+  it('a shove is horizontal: being shot is not being launched', () => {
+    // Shot from above, a machine stumbles — it does not get driven into the
+    // floor, and one shot from below does not take off. The knock is what
+    // puts it off its feet, and neither of those is a thing feet do.
+    const b = makeBody();
+    const up = b.velocity.y;
+    b.applyStagger(1, V(0, 1, 0));
+    expect(b.velocity.y, 'nothing vertical came out of it').toBeCloseTo(up, 6);
+    expect(Math.hypot(b.velocity.x, b.velocity.z), 'it went over instead')
+      .toBeGreaterThan(STAGGER.knockback * 0.5);
+  });
+
+  it('nothing carries over into the next life', () => {
+    const b = makeBody();
+    b.applyStagger(1, V(1, 0, 0));
+    b.reset(V(0, 2, 0));
+    expect(b.stagger).toBe(0);
+  });
+});
+
+describe('being blown away', () => {
+  it('a blow worth more than a full stagger throws the machine', () => {
+    // The cap used to be one stagger, so a magnum and a sniper round
+    // through the chest both just wobbled you. Past a full one the shove
+    // grows and some of it turns upward.
+    const rocked = makeBody();
+    rocked.applyStagger(1, V(0, 0, -1));
+    const thrown = makeBody();
+    thrown.applyStagger(STAGGER.launchFull, V(0, 0, -1));
+
+    expect(thrown.knockback.length(), 'shoved harder')
+      .toBeGreaterThan(rocked.knockback.length() * 1.8);
+    expect(rocked.knockback.y, 'a stagger stays on the floor').toBe(0);
+    expect(thrown.knockback.y, 'a throw does not').toBeGreaterThan(4);
+    expect(thrown.downed, 'and it is off its feet').toBeCloseTo(1, 5);
+    expect(thrown.launched, 'which the effects layer gets told about once')
+      .toBeCloseTo(1, 5);
+  });
+
+  it('and it really leaves the floor', () => {
+    const b = makeBody();
+    b.applyStagger(STAGGER.launchFull, V(1, 0, 0));
+    let highest = 0;
+    let furthest = 0;
+    for (let i = 0; i < 90; i++) {
+      b.update(input, 1 / 60);
+      input.endFrame();
+      highest = Math.max(highest, b.position.y - 2);
+      furthest = Math.max(furthest, Math.abs(b.position.x));
+    }
+    expect(highest, 'up').toBeGreaterThan(0.6);
+    expect(furthest, 'and away').toBeGreaterThan(6);
+  });
+
+  it('a machine in the air cannot shrug it off by waiting', () => {
+    // Being thrown is not on a clock. It lasts as long as the machine has
+    // nothing to stand on, which is what makes it different from a stagger.
+    const b = makeBody();
+    b.applyStagger(STAGGER.launchFull, V(1, 0, 0));
+    for (let i = 0; i < 12; i++) { b.update(input, 1 / 60); input.endFrame(); }
+    const mid = b.downed;
+    expect(b.grounded, 'off the floor').toBeLessThan(0.5);
+    expect(mid, 'and still just as downed').toBeGreaterThan(0.85);
+  });
+
+  it('once it lands it gets up on its own', () => {
+    const b = makeBody();
+    b.applyStagger(STAGGER.launchFull, V(1, 0, 0));
+    run(b, input, 3);
+    expect(b.downed).toBe(0);
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    run(b, input, 2);
+    expect(b.speed, 'and drives again').toBeGreaterThan(5);
+  });
+
+  it('it lands badly however light it is', () => {
+    // The weight gate is what tells a step down from a drop. Being blown
+    // across the arena is neither, so it does not get to use that excuse:
+    // a machine too light to ever plant itself still hits the deck when it
+    // was thrown there.
+    const feather = { ...STATS, weightClass: 0 };
+    const dropped = makeBody(feather);
+    expect(dropped._touchdown(12), 'a light machine merely landing').toBe(0);
+
+    const thrown = makeBody(feather);
+    thrown.applyStagger(STAGGER.launchFull, V(1, 0, 0));
+    expect(thrown._touchdown(12), 'a light machine arriving').toBeGreaterThan(0);
+  });
+
+  it('a blow under the bar rocks it and no more', () => {
+    const b = makeBody();
+    b.applyStagger(STAGGER.launchAt * 0.9, V(1, 0, 0));
+    expect(b.stagger).toBeGreaterThan(0);
+    expect(b.downed, 'still on its feet').toBe(0);
+    expect(b.knockback.y).toBe(0);
+  });
+
+  it('nothing carries over into the next life', () => {
+    const b = makeBody();
+    b.applyStagger(STAGGER.launchFull, V(1, 0, 0));
+    b.reset(V(0, 2, 0));
+    expect(b.downed).toBe(0);
+    expect(b.launched).toBe(0);
+    expect(b.knockback.length()).toBe(0);
+  });
+});
+
+describe('coming down off something', () => {
+  /** Stats for a machine of a given weight class, everything else the biped. */
+  const weighing = (weightClass) => ({ ...STATS, weightClass });
+
+  /** Drop `body` from `height` and report the landing it produced. */
+  const drop = (body, height = 20) => {
+    body.reset(V(0, height, 0));
+    let landed = 0;
+    for (let i = 0; i < 240 && landed === 0; i++) {
+      body.update(input, 1 / 60);
+      input.endFrame();
+      landed = body.landed;
+    }
+    return landed;
+  };
+
+  it('a heavy machine plants itself', () => {
+    const b = makeBody(weighing(0.8));
+    const landed = drop(b);
+    expect(landed, 'it came down hard').toBeGreaterThan(0.15);
+    expect(b.landing).toBeGreaterThan(0.15);
+  });
+
+  it('a light one just touches down', () => {
+    // The gate is the whole point. A skirmisher that braced every time it
+    // hopped would only ever feel sluggish.
+    const b = makeBody(weighing(LANDING.weight * 0.5));
+    expect(drop(b)).toBe(0);
+    expect(b.landing).toBe(0);
+  });
+
+  it('and the heavier it is, the harder it lands', () => {
+    // Off the same fall, so the comparison is about the weight and not
+    // about drag — which is itself a function of weight, and pulls the
+    // other way. A dropped tank arrives more slowly than a dropped kite.
+    const mid = makeBody(weighing(0.4));
+    const heavy = makeBody(weighing(1));
+    expect(heavy._touchdown(14)).toBeGreaterThan(mid._touchdown(14));
+  });
+
+  it('and the harder the fall, the harder the landing', () => {
+    const b = makeBody(weighing(1));
+    const gentle = b._touchdown(LANDING.speed + 1);
+    b.landing = 0;
+    const brutal = b._touchdown(LANDING.hard * 2);
+    expect(brutal).toBeGreaterThan(gentle);
+    expect(brutal, 'and it stops at a full one').toBeCloseTo(1, 6);
+  });
+
+  it('stepping off a kerb is not a landing', () => {
+    const b = makeBody(weighing(1));
+    expect(drop(b, 2.15), 'barely off the floor').toBe(0);
+  });
+
+  it('the touchdown is one step, the brace outlives it', () => {
+    // `landed` is an event — whoever throws the dust gets exactly one go at
+    // it. `landing` is a state, and it is what the legs read.
+    const b = makeBody(weighing(1));
+    const landed = drop(b);
+    expect(landed).toBeGreaterThan(0);
+
+    b.update(input, 1 / 60);
+    expect(b.landed, 'the event is over').toBe(0);
+    expect(b.landing, 'the brace is not').toBeGreaterThan(0);
+
+    run(b, input, 1.2);
+    expect(b.landing, 'and then it stands back up').toBe(0);
+  });
+
+  it('landing does not take the machine’s legs away', () => {
+    // Bracing is a pose, not a stagger: a heavy machine that could not drive
+    // for half a second after every drop would be unplayable, and nobody
+    // asked for that.
+    const b = makeBody(weighing(1));
+    drop(b);
+    input.move.set(0, 0, 1);
+    input.intensity = 1;
+    run(b, input, 1.5);
+    expect(b.speed).toBeGreaterThan(4);
+  });
+
+  it('nothing carries over into the next life', () => {
+    const b = makeBody(weighing(1));
+    drop(b);
+    b.reset(V(0, 2, 0));
+    expect(b.landing).toBe(0);
+    expect(b.landed).toBe(0);
   });
 });
 

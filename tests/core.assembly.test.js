@@ -758,7 +758,7 @@ describe('serialisation', () => {
 
   it('declares its format', () => {
     const json = a.toJSON();
-    expect(json.format).toBe('brostom.assembly');
+    expect(json.format).toBe('blostom.assembly');
     expect(json.version).toBe(4);
   });
 

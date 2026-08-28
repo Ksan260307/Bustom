@@ -88,10 +88,15 @@ export function toolSection(title, body) {
 //  Resizable windows
 // ============================================================
 
-const SIZE_STORE = 'brostom.ui.size.v1';
+const SIZE_STORE = 'blostom.ui.size.v1';
+/** What it was called before the rename. Read as a fallback, never written. */
+const SIZE_STORE_WAS = 'brostom.ui.size.v1';
 
 function loadSizes() {
-  try { return JSON.parse(localStorage.getItem(SIZE_STORE) ?? '{}') ?? {}; } catch { return {}; }
+  try {
+    const raw = localStorage.getItem(SIZE_STORE) ?? localStorage.getItem(SIZE_STORE_WAS);
+    return JSON.parse(raw ?? '{}') ?? {};
+  } catch { return {}; }
 }
 
 function saveSizes(all) {

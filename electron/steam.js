@@ -31,7 +31,7 @@ const require = createRequire(import.meta.url);
 const PLACEHOLDER_APP_ID = 480;
 
 function readAppId() {
-  const fromEnv = Number(process.env.BROSTOM_STEAM_APP_ID);
+  const fromEnv = Number(process.env.BLOSTOM_STEAM_APP_ID);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
 
   // Steam itself looks for this file next to the executable when the game is

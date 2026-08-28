@@ -37,9 +37,9 @@ function boot() {
   overlay.id = 'overlay';
   host.append(gl, hud, overlay);
 
-  localStorage.removeItem('brostom.assembly.v1');
-  localStorage.removeItem('brostom.parts.v1');
-  localStorage.removeItem('brostom.keys.v1');
+  localStorage.removeItem('blostom.assembly.v1');
+  localStorage.removeItem('blostom.parts.v1');
+  localStorage.removeItem('blostom.keys.v1');
   const a = new App({ canvas: gl, hudCanvas: hud, overlay });
   // Drive frames by hand at a fixed step: rAF is throttled in hidden tabs.
   a.renderer.setAnimationLoop(null);
@@ -1575,7 +1575,7 @@ describe('resizing the windows', () => {
   };
 
   const forget = () => {
-    localStorage.removeItem('brostom.ui.size.v1');
+    localStorage.removeItem('blostom.ui.size.v1');
     for (const el of [left(), right()]) el.resetSize();
   };
 
@@ -1649,12 +1649,12 @@ describe('resizing the windows', () => {
     const el = left();
     const original = el.offsetWidth;
     dragGrip(el, '.grip-e', 60, 0);
-    const stored = JSON.parse(localStorage.getItem('brostom.ui.size.v1'));
+    const stored = JSON.parse(localStorage.getItem('blostom.ui.size.v1'));
     expect(stored.leftpanel.w).toBe(original + 60);
 
     el.querySelector('.grip-e').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     expect(el.offsetWidth, 'back to the stylesheet width').toBe(original);
-    const after = JSON.parse(localStorage.getItem('brostom.ui.size.v1'));
+    const after = JSON.parse(localStorage.getItem('blostom.ui.size.v1'));
     expect(after.leftpanel === undefined, 'and forgets it').toBe(true);
     forget();
   });
@@ -1991,34 +1991,56 @@ describe('the help window', () => {
   });
 });
 
-describe('a machine with no legs has no gait', () => {
-  it('the spec panel drops the badge entirely', () => {
-    app.setMode('edit');
-    app.loadPreset('core');
-    app.ui.renderStats(app.editor.stats);
-    expect(app.editor.stats.legs).toBe(0);
-    expect(app.ui.statsEl.querySelector('.gaitbadge'), 'no badge at all').toBe(null);
-    expect(app.ui.statsEl.textContent, 'and it does not say hover either').not.toContain('ホバー');
+describe('the machine is never put in a box', () => {
+  // The gait is how the code decides which legs to swing. It is not a class
+  // of machine, and the moment it is put on screen it becomes one: the next
+  // thing anyone builds is built toward the label rather than toward the
+  // shape they wanted. So the categories stay inside.
+  // The category NAMES. The counted forms ("2脚") are checked separately,
+  // because a panel read end to end runs one row's value into the next
+  // row's label — "慣性 31.1" followed by "脚 / 腕" spells 1脚 and means
+  // nothing at all.
+  const TAXONOMY = ['単脚', '二足', '多脚', 'ホバー'];
+  const COUNTED = ['2脚', '1脚', '4脚'];
 
+  it('the spec panel names no category', () => {
+    app.setMode('edit');
+    for (const preset of ['core', 'biped', 'hopper', 'multileg']) {
+      app.loadPreset(preset);
+      app.ui.renderStats(app.editor.stats);
+      const text = app.ui.statsEl.textContent;
+      for (const word of TAXONOMY) expect(text, `${preset}: ${word}`).not.toContain(word);
+    }
+    // The leg COUNT is still there: that is a fact about the parts.
     app.loadPreset('biped');
     app.ui.renderStats(app.editor.stats);
-    expect(app.ui.statsEl.querySelector('.gaitbadge').textContent).toBe('二足歩行');
+    expect(app.ui.statsEl.textContent).toContain('脚 / 腕');
   });
 
-  it('the field read-out drops the row too', () => {
+  it('the preset list is four machines, not four categories', () => {
     app.setMode('edit');
-    app.loadPreset('core');
+    const names = Object.values(PRESETS).map((p) => p.label);
+    for (const name of names) {
+      for (const word of [...TAXONOMY, ...COUNTED]) expect(name, name).not.toContain(word);
+    }
+  });
+
+  it('the field read-out reports legs, not a gait', () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
     app.setMode('field');
     step(4);
     const bag = (p) => ({ telemetry: p.body.telemetry(), gait: p.stats.gait, legs: p.stats.legs });
     const rows = app.field.hud.debugRows(bag(app.field.player));
-    expect(rows.some(([k]) => k === 'GAIT'), 'nothing to report').toBe(false);
+    expect(rows.some(([k]) => k === 'GAIT'), 'no category on screen').toBe(false);
+    expect(rows.find(([k]) => k === 'LEGS')?.[1], 'a count instead').toBe('2');
     app.setMode('edit');
 
-    app.loadPreset('biped');
+    app.loadPreset('core');
     app.setMode('field');
     step(4);
-    expect(app.field.hud.debugRows(bag(app.field.player)).some(([k]) => k === 'GAIT')).toBe(true);
+    expect(app.field.hud.debugRows(bag(app.field.player)).some(([k]) => k === 'LEGS'),
+      'and nothing at all with no legs').toBe(false);
     app.setMode('edit');
   });
 });
@@ -2461,6 +2483,339 @@ describe('the rest of the rack, in the field', () => {
     }
     expect(p.weapons.readout()).toHaveLength(WEAPON_TYPES.length);
     shouldNotThrow(() => step(10), 'hud');
+    app.setMode('edit');
+  });
+});
+
+describe('fighting something', () => {
+  const deployed = () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.paused = false;
+    app.field.respawn();
+    // Zoom is a preference and survives a respawn on purpose, so a test
+    // about where the camera SITS has to say what it is starting from.
+    app.field.cameraRig.zoom = 1;
+    app.field.cameraRig.recenter();
+    step(20);
+    return app.field;
+  };
+
+  it('locking on gets the camera off the firing line', () => {
+    // Straight down the tail the machine stands directly in front of what
+    // it is shooting at and hides it, along with every round crossing the
+    // gap. The whole reason for a lock is to be able to see the fight.
+    const f = deployed();
+    // Both of them somewhere known: this is about the framing, not about
+    // where three wandering opponents happened to have got to.
+    f.player.body.reset(new THREE.Vector3(0, f.player.body.rideHeight, 0));
+    const mark = f.enemies.find((e) => e.alive);
+    mark.body.reset(new THREE.Vector3(0, mark.body.rideHeight, 26));
+    f.cameraRig.snap(f.player.position, f.player.body.forward);
+    f.lock = null;
+    f.player.setLocked(false);
+    step(60);
+    expect(f.cameraRig.engage, 'a chase cam while nothing is happening')
+      .toBeLessThan(0.05);
+    const behind = Math.abs(f.cameraRig.position.x - f.player.position.x);
+
+    f.lock = { robot: mark, aimPoint: mark.position.clone() };
+    f._applyLock();
+    step(90);
+    expect(f.cameraRig.engage, 'and a fight camera once there is a fight')
+      .toBeGreaterThan(0.8);
+
+    // Off the line: the camera is no longer on the axis between the two.
+    const along = new THREE.Vector3().copy(f.lock.robot.position).sub(f.player.position).setY(0);
+    const off = new THREE.Vector3().copy(f.cameraRig.position).sub(f.player.position).setY(0);
+    if (along.lengthSq() > 1e-6) along.normalize();
+    const sideways = Math.abs(off.x * along.z - off.z * along.x);
+    expect(sideways, 'a pace to the side').toBeGreaterThan(1.2);
+    expect(sideways).toBeGreaterThan(behind);
+
+    // And looking down the gap rather than at either end of it.
+    const gaze = f.cameraRig.gaze.distanceTo(f.player.position);
+    const gap = f.player.position.distanceTo(f.lock.robot.position);
+    expect(gaze, 'past the machine').toBeGreaterThan(1);
+    expect(gaze, 'but short of the target').toBeLessThan(gap * 0.75);
+    app.setMode('edit');
+  });
+
+  it('a heavy hit rocks the machine that took it, and shakes the view', () => {
+    const f = deployed();
+    forceLock();
+    const p = f.player;
+    const before = p.position.clone();
+
+    p.damage(p.maxHp * 0.3, f.lock.robot.position.clone());
+    expect(p.body.stagger, 'rocked').toBeGreaterThan(0.3);
+    step(8);
+    expect(p.animator.bodyLean.x !== 0 || p.animator.bodyBob !== 0,
+      'and reeling with it').toBe(true);
+    expect(p.position.distanceTo(before), 'knocked off its spot')
+      .toBeGreaterThan(0.3);
+
+    step(90);
+    expect(p.body.stagger, 'it wears off').toBe(0);
+    app.setMode('edit');
+  });
+
+  it('rounds are slow enough to watch cross the gap', () => {
+    // Fired at a machine twenty-odd metres away, a round has to still be in
+    // the air several frames later. At three hundred metres a second it was
+    // there before the frame it was fired in had finished.
+    const f = deployed();
+    forceLock();
+    app.input.keys.add('Mouse0');
+    step(2);
+    app.input.keys.clear();
+    const live = f.projectiles.pool.filter((s) => s.life > 0);
+    expect(live.length, 'something left the barrel').toBeGreaterThan(0);
+    const shot = live[0];
+    const from = shot.mesh.position.clone();
+    step(6);
+    expect(shot.life, 'still in the air a tenth of a second later')
+      .toBeGreaterThan(0);
+    expect(shot.mesh.position.distanceTo(from), 'and it has visibly moved')
+      .toBeGreaterThan(1);
+    app.setMode('edit');
+  });
+});
+
+describe('what a fight looks like', () => {
+  const deployed = () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.paused = false;
+    app.field.respawn();
+    app.field.effects.clear();
+    step(20);
+    return app.field;
+  };
+
+  const live = (pool) => pool.filter((x) => x.life > 0).length;
+
+  it('firing puts a flash on the barrel it came out of', () => {
+    const f = deployed();
+    forceLock();
+    expect(live(f.effects.muzzles), 'nothing burning to start with').toBe(0);
+
+    app.input.keys.add('Mouse0');
+    step(2);
+    app.input.keys.clear();
+    expect(live(f.effects.muzzles), 'something went off').toBeGreaterThan(0);
+
+    // And it is where the gun is, not where the machine's origin is.
+    const flash = f.effects.muzzles.find((m) => m.life > 0);
+    expect(flash.group.position.distanceTo(f.player.position)).toBeLessThan(6);
+    expect(flash.group.position.y, 'up on the machine, not on the floor')
+      .toBeGreaterThan(f.player.position.y - 3);
+
+    step(20);
+    expect(live(f.effects.muzzles), 'and gone again straight away').toBe(0);
+    app.setMode('edit');
+  });
+
+  it('a round arriving leaves a mark, in its own colour', () => {
+    const f = deployed();
+    forceLock();
+    f.effects.clear();
+    app.input.keys.add('Mouse0');
+    let sparks = 0;
+    for (let i = 0; i < 90 && !sparks; i++) {
+      step(1);
+      sparks = live(f.effects.impacts);
+    }
+    app.input.keys.clear();
+    expect(sparks, 'something landed and said so').toBeGreaterThan(0);
+    const burst = f.effects.impacts.find((x) => x.life > 0);
+    expect(burst.mat.opacity).toBeGreaterThan(0);
+    app.setMode('edit');
+  });
+
+  it('running kicks up dust, and standing still does not', () => {
+    const f = deployed();
+    // The opponents are running about too, so the trail has to be counted
+    // where the PLAYER is rather than anywhere on the field.
+    const mine = () => f.effects.puffs.filter(
+      (p) => p.life > 0 && p.mesh.position.distanceTo(f.player.position) < 12,
+    ).length;
+    f.effects.clear();
+    step(30);
+    expect(mine(), 'parked: nothing').toBe(0);
+
+    app.input.keys.add('KeyW');
+    step(120);
+    app.input.keys.clear();
+    expect(f.player.body.env.grounded, 'still on the floor').toBeGreaterThan(0.5);
+    expect(mine(), 'a trail behind it').toBeGreaterThan(0);
+
+    step(120);
+    expect(mine(), 'and it settles once you stop').toBe(0);
+    app.setMode('edit');
+  });
+
+  it('a machine has a blot under it wherever it stands', () => {
+    // The key light throws a real shadow, but only over the patch of floor
+    // its shadow box happens to cover. The blot is what says "this machine
+    // is HERE, and this far off the ground" from anywhere in the arena.
+    const f = deployed();
+    step(10);
+    const blot = f.effects.shadows.get(f.player);
+    expect(blot, 'the player has one').toBeTruthy();
+    expect(blot.visible).toBe(true);
+    expect(blot.position.x).toBeCloseTo(f.player.position.x, 3);
+    for (const e of f.enemies) {
+      if (e.alive) expect(f.effects.shadows.has(e), 'and so does everyone else').toBe(true);
+    }
+    app.setMode('edit');
+  });
+
+  it('the shadow box follows the machine instead of sitting at the origin', () => {
+    // A box wide enough to cover the arena from a fixed origin spends its
+    // pixels on empty floor, and everything far out casts nothing at all.
+    const f = deployed();
+    const key = f.world.keyLight;
+    step(10);
+    const near = key.target.position.clone();
+
+    f.player.body.reset(new THREE.Vector3(70, f.player.body.rideHeight, 40));
+    step(10);
+    expect(key.target.position.distanceTo(near), 'it came along').toBeGreaterThan(50);
+    expect(key.target.position.distanceTo(f.player.position), 'and it is pointed at us')
+      .toBeLessThan(2);
+    // The DIRECTION is untouched: a key light that swings as you walk makes
+    // the whole arena look like it is turning.
+    const dir = key.position.clone().sub(key.target.position).normalize();
+    expect(dir.y).toBeGreaterThan(0.5);
+    app.setMode('edit');
+  });
+
+  it('a heavy machine plants itself when it comes down, and says so', () => {
+    const f = deployed();
+    f.effects.clear();
+    // Straight up and drop it: high enough that the fall counts.
+    f.player.body.reset(new THREE.Vector3(0, 26, 0));
+    let ring = 0;
+    for (let i = 0; i < 200 && !ring; i++) {
+      step(1);
+      ring = f.effects.rings.filter((r) => r.life > 0).length;
+    }
+    expect(ring, 'a ring along the floor').toBeGreaterThan(0);
+    expect(f.player.body.landing, 'and the machine braced').toBeGreaterThan(0);
+    expect(f.effects.puffs.filter((p) => p.life > 0).length, 'with dust off the feet')
+      .toBeGreaterThan(2);
+    app.setMode('edit');
+  });
+
+  it('none of it comes back with the machine after a respawn', () => {
+    const f = deployed();
+    forceLock();
+    app.input.keys.add('Mouse0');
+    step(10);
+    app.input.keys.clear();
+    f.respawn();
+    step(1);
+    expect(live(f.effects.muzzles) + live(f.effects.impacts) + live(f.effects.rings)).toBe(0);
+    app.setMode('edit');
+  });
+});
+
+describe('being hit, and hitting back', () => {
+  const deployed = () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.paused = false;
+    app.field.respawn();
+    app.field.effects.clear();
+    app.field.hud.marks.length = 0;
+    app.field.hud.hurts.length = 0;
+    step(20);
+    return app.field;
+  };
+
+  it('landing one puts a mark on the machine that took it', () => {
+    const f = deployed();
+    const t = f.enemies.find((e) => e.alive);
+    t.damage(t.maxHp * 0.2, f.player.position.clone());
+    step(1);
+    expect(f.hud.marks.length, 'the read-out was told').toBeGreaterThan(0);
+    expect(f.hud.hurts, 'and it did not think WE were hit').toHaveLength(0);
+    expect(t.blows, 'the log was drained').toHaveLength(0);
+    app.setMode('edit');
+  });
+
+  it('taking one puts an arc round the reticle, pointing at whoever did it', () => {
+    const f = deployed();
+    const t = f.enemies.find((e) => e.alive);
+    f.player.damage(f.player.maxHp * 0.2, t.position.clone());
+    step(1);
+    expect(f.hud.hurts.length, 'we were told').toBeGreaterThan(0);
+    expect(f.hud.hurts[0].world.distanceTo(t.position), 'from over there')
+      .toBeLessThan(1);
+    expect(f.hud.marks, 'and nothing is claiming a hit').toHaveLength(0);
+    app.setMode('edit');
+  });
+
+  it('nine pellets from one gun are one warning, not nine', () => {
+    const f = deployed();
+    const t = f.enemies.find((e) => e.alive);
+    for (let i = 0; i < 9; i++) f.player.damage(4, t.position.clone());
+    step(1);
+    expect(f.hud.hurts).toHaveLength(1);
+    app.setMode('edit');
+  });
+
+  it('the marks and arcs clear themselves', () => {
+    const f = deployed();
+    const t = f.enemies.find((e) => e.alive);
+    t.damage(20, f.player.position.clone());
+    f.player.damage(20, t.position.clone());
+    step(1);
+    expect(f.hud.marks.length + f.hud.hurts.length).toBeGreaterThan(0);
+    step(120);
+    expect(f.hud.marks, 'the mark is gone').toHaveLength(0);
+    expect(f.hud.hurts, 'and so is the arc').toHaveLength(0);
+    app.setMode('edit');
+  });
+
+  it('a heavy enough blow throws the machine, and the floor says where it was', () => {
+    const f = deployed();
+    const t = f.enemies.find((e) => e.alive);
+    t.body.reset(new THREE.Vector3(0, t.body.rideHeight, 14));
+    f.effects.clear();
+    step(2);
+    const before = t.position.clone();
+
+    t.damage(t.maxHp * 0.55, f.player.position.clone());
+    expect(t.body.downed, 'off its feet').toBeGreaterThan(0.4);
+    step(1);
+    expect(f.effects.rings.filter((r) => r.life > 0).length, 'a ring where it stood')
+      .toBeGreaterThan(0);
+
+    step(40);
+    expect(t.position.distanceTo(before), 'and it went somewhere').toBeGreaterThan(3);
+    // Put it back on its feet: the next describe expects an opponent that
+    // can be shot, not one lying where this test threw it.
+    t.revive(before);
+    step(2);
+    app.setMode('edit');
+  });
+
+  it('the machine on the field really lights up when it is hit', () => {
+    const f = deployed();
+    const t = f.enemies.find((e) => e.alive);
+    expect(t.rig.bodyMaterial.emissiveIntensity).toBe(0);
+    t.damage(t.maxHp * 0.25, f.player.position.clone());
+    expect(t.rig.bodyMaterial.emissiveIntensity).toBeGreaterThan(0.05);
+    step(30);
+    expect(t.rig.bodyMaterial.emissiveIntensity, 'and goes out again').toBe(0);
     app.setMode('edit');
   });
 });
@@ -2976,7 +3331,7 @@ describe('the title screen', () => {
   });
 
   it('shows the best run so far, once there has been one', () => {
-    localStorage.removeItem('brostom.solo.best.v1');
+    localStorage.removeItem('blostom.solo.best.v1');
     app.goTitle();
     expect(document.querySelector('.titlebest').textContent).toContain('まだ');
 
@@ -2989,7 +3344,7 @@ describe('the title screen', () => {
     expect(recordBest({ score: 10, wave: 1, kills: 0, time: 4 }), 'a worse run is not the best')
       .toBe(false);
     expect(loadBest().score).toBe(4200);
-    localStorage.removeItem('brostom.solo.best.v1');
+    localStorage.removeItem('blostom.solo.best.v1');
     app.setMode('edit');
   });
 });
@@ -3075,7 +3430,7 @@ describe('solo play', () => {
 
   it('ends the run when the lives are gone, and says how it went', () => {
     const d = app.field.director;
-    localStorage.removeItem('brostom.solo.best.v1');
+    localStorage.removeItem('blostom.solo.best.v1');
     while (d.lives > 0) { downPlayer(); if (d.state === 'down') play(3.5); }
     play(3.5);
     expect(d.finished).toBe(true);
@@ -3550,7 +3905,7 @@ describe('save and load', () => {
     app.setMode('edit');
     app.loadPreset('biped');
     app.assembly.name = 'CTRL S';
-    localStorage.removeItem('brostom.assembly.v1');
+    localStorage.removeItem('blostom.assembly.v1');
 
     const ev = new KeyboardEvent('keydown', {
       code: 'KeyS', ctrlKey: true, bubbles: true, cancelable: true,
@@ -3558,7 +3913,7 @@ describe('save and load', () => {
     window.dispatchEvent(ev);
 
     expect(ev.defaultPrevented, 'the browser save dialog is suppressed').toBe(true);
-    const raw = localStorage.getItem('brostom.assembly.v1');
+    const raw = localStorage.getItem('blostom.assembly.v1');
     expect(raw).toBeTruthy();
     expect(JSON.parse(raw).name).toBe('CTRL S');
     expect(app.ui.toast.textContent).toContain('保存');
@@ -3566,11 +3921,11 @@ describe('save and load', () => {
 
   it('does not fire while typing in a field', () => {
     app.setMode('edit');
-    localStorage.removeItem('brostom.assembly.v1');
+    localStorage.removeItem('blostom.assembly.v1');
     app.ui.nameInput.dispatchEvent(new KeyboardEvent('keydown', {
       code: 'KeyS', ctrlKey: true, bubbles: true, cancelable: true,
     }));
-    expect(localStorage.getItem('brostom.assembly.v1')).toBeNull();
+    expect(localStorage.getItem('blostom.assembly.v1')).toBeNull();
   });
 
   it('round-trips a build, free positions included', () => {
@@ -4327,10 +4682,10 @@ describe('key config', () => {
     kc().show();
     rowFor('ブースト').querySelector('.keychiplabel').click();
     press('KeyH');
-    expect(JSON.parse(localStorage.getItem('brostom.keys.v1'))).toEqual({ boost: ['KeyH'] });
+    expect(JSON.parse(localStorage.getItem('blostom.keys.v1'))).toEqual({ boost: ['KeyH'] });
 
     kc().reset();
-    expect(JSON.parse(localStorage.getItem('brostom.keys.v1'))).toEqual({});
+    expect(JSON.parse(localStorage.getItem('blostom.keys.v1'))).toEqual({});
     expect(app.input.keysFor('boost')).toEqual(['KeyE']);
   });
 
@@ -4543,6 +4898,18 @@ describe('destruction and respawn', () => {
 
     const enemy = forceLock().robot;
     enemy.hp = 12;                       // one burst is enough
+    // Stood in front of us, because this is about what happens WHEN a
+    // machine is shot down, not about whether a gatling can land five
+    // rounds on something jinking forty metres away. It often cannot —
+    // that is the point of the dodging — and a test that quietly depends
+    // on it is a test that fails for a reason it is not about.
+    const f = app.field;
+    enemy.body.reset(new THREE.Vector3(
+      f.player.position.x, enemy.body.rideHeight, f.player.position.z + 10,
+    ));
+    enemy.syncTransform();
+    step(2);
+
     app.input.keys.add('Mouse0');
     let sawWreck = false;
     for (let i = 0; i < 240 && !sawWreck; i++) {
@@ -5354,7 +5721,7 @@ describe('part library', () => {
   it('the shelf is written through to storage', () => {
     clearShelf();
     buildPart('POD');
-    const raw = localStorage.getItem('brostom.parts.v1');
+    const raw = localStorage.getItem('blostom.parts.v1');
     expect(raw).toBeTruthy();
     expect(JSON.parse(raw).items).toHaveLength(1);
   });

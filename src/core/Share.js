@@ -1,4 +1,4 @@
-import { Assembly } from './Assembly.js';
+import { Assembly, isAssemblyFormat } from './Assembly.js';
 
 // ============================================================
 //  Share codes : one build, one string.
@@ -12,9 +12,18 @@ import { Assembly } from './Assembly.js';
 //  gets a new one instead of a silent misread.
 // ============================================================
 
-export const SHARE_PREFIX = 'BRO1:';
+export const SHARE_PREFIX = 'BLO1:';
 /** Uncompressed fallback, for environments with no CompressionStream. */
-export const SHARE_PREFIX_RAW = 'BRO0:';
+export const SHARE_PREFIX_RAW = 'BLO0:';
+/**
+ * What the codes were stamped with before the game was renamed.
+ *
+ * Read, never written. A code somebody has already shared — printed, pasted
+ * into a message, saved as a QR — has to keep working, and the format on
+ * the other side of the prefix never changed.
+ */
+export const SHARE_PREFIX_WAS = 'BRO1:';
+export const SHARE_PREFIX_RAW_WAS = 'BRO0:';
 
 /** The most a QR code can carry in byte mode (version 40, ECC L). */
 export const QR_BYTE_LIMIT = 2953;
@@ -61,7 +70,8 @@ async function inflate(bytes) {
 /** Does this look like one of our codes at all? */
 export function isShareCode(text) {
   const t = String(text ?? '').trim();
-  return t.startsWith(SHARE_PREFIX) || t.startsWith(SHARE_PREFIX_RAW);
+  return t.startsWith(SHARE_PREFIX) || t.startsWith(SHARE_PREFIX_RAW)
+    || t.startsWith(SHARE_PREFIX_WAS) || t.startsWith(SHARE_PREFIX_RAW_WAS);
 }
 
 /**
@@ -83,10 +93,12 @@ export async function encodeShare(assembly) {
  */
 export async function decodeShare(text) {
   const t = String(text ?? '').trim();
-  if (!isShareCode(t)) throw new Error('BroStom の共有コードではありません');
+  if (!isShareCode(t)) throw new Error('BLOSTOM の共有コードではありません');
 
-  const raw = t.startsWith(SHARE_PREFIX_RAW);
-  const body = t.slice((raw ? SHARE_PREFIX_RAW : SHARE_PREFIX).length).replace(/\s+/g, '');
+  // The prefix is four characters either way, and only ONE bit of it
+  // matters: whether the payload behind it was compressed.
+  const raw = t.startsWith(SHARE_PREFIX_RAW) || t.startsWith(SHARE_PREFIX_RAW_WAS);
+  const body = t.slice(SHARE_PREFIX.length).replace(/\s+/g, '');
 
   let bytes;
   try {
@@ -109,7 +121,7 @@ export async function decodeShare(text) {
   } catch {
     throw new Error('共有コードが壊れています');
   }
-  if (data?.format !== 'brostom.assembly') throw new Error('BroStom のデータではありません');
+  if (!isAssemblyFormat(data?.format)) throw new Error('BLOSTOM のデータではありません');
 
   return Assembly.fromJSON(data);
 }

@@ -1,5 +1,5 @@
 // ============================================================
-//  BroStom : core constants
+//  BLOSTOM : core constants
 // ============================================================
 
 /** The nominal block edge, in world units. Parts scale freely around it. */
@@ -74,7 +74,7 @@ export const BONE = {
 export const BONE_META = {
   [BONE.LEG]: {
     label: 'レッグボーン', color: 0x6fe3ff, mass: 1.4, torque: 26,
-    blurb: '脚。本数で歩き方が決まります（1本=跳ぶ、2本=歩く、3本以上=多脚）',
+    blurb: '脚。地面を蹴って進みます。本数が増えるほど接地が安定します',
   },
   [BONE.ARM]: {
     label: 'アームボーン', color: 0xffc861, mass: 1.0, torque: 18,
@@ -195,7 +195,11 @@ export const snapEquipSize = (v) => Math.min(
  *  auto            true = held trigger keeps firing; false = one per press
  *  shots / spread  pellets per trigger pull, and their half-angle in radians
  *  speed           projectile speed, m/s
+ *  lead            how much of the intercept a locked shot aims off by, 0..1
  *  colorable       may the player pick the bullet colour?
+ *
+ * Rounds travel slowly enough to be SEEN, and a lock leads by less than the
+ * intercept it can solve. See WEAPON_LEAD below.
  */
 export const EQUIP_META = {
   [EQUIP.BEAM]: {
@@ -205,22 +209,25 @@ export const EQUIP_META = {
     // interval is the price of the damage, and it is what stops the beam
     // from being the gatling with better numbers.
     ammo: 5, reload: 1.4, interval: 0.55, auto: false,
-    shots: 1, spread: 0, speed: 320, damage: 26, life: 2.2, radius: 0.14, mass: 0.55,
-    shape: 'beam', streak: 14,
+    shots: 1, spread: 0, speed: 112, damage: 26, life: 2.2, radius: 0.14, mass: 0.55,
+    lead: 0.5,
+    shape: 'beam', streak: 6,
     blurb: '長く細い一線を撃つビームライフル。連射は効かない',
   },
   [EQUIP.GATLING]: {
     label: 'ガトリング', category: 'weapon', plate: 0x2b3a49, accent: 0xffd166,
     colorable: true, bullet: 0xffd166,
     ammo: 30, reload: 3.0, interval: 0.07, auto: true,
-    shots: 1, spread: 0.022, speed: 175, damage: 2.4, life: 1.6, radius: 0.13, mass: 0.7,
+    shots: 1, spread: 0.022, speed: 88, damage: 2.4, life: 1.9, radius: 0.13, mass: 0.7,
+    lead: 0.3,
     blurb: '押しっぱなしで連射。30発でリロード3秒',
   },
   [EQUIP.SHOT]: {
     label: 'ショット', category: 'weapon', plate: 0x2b3a49, accent: 0xff9f5c,
     colorable: true, bullet: 0xff9f5c,
     ammo: 6, reload: 3.0, interval: 0.42, auto: false,
-    shots: 3, spread: 0.14, speed: 110, damage: 7, life: 1.1, radius: 0.2, mass: 0.6,
+    shots: 3, spread: 0.14, speed: 62, damage: 7, life: 1.9, radius: 0.2, mass: 0.6,
+    lead: 0.25,
     blurb: '3方向へ拡散。6発でリロード3秒',
   },
   [EQUIP.BLADE]: {
@@ -236,7 +243,8 @@ export const EQUIP_META = {
     // Five small ones thrown wide, each homing back in: the spread is what
     // makes a salvo read as a salvo rather than one fat round.
     ammo: 2, reload: 3.4, interval: 0.5, auto: false,
-    shots: 5, spread: 0.34, speed: 38, damage: 9, life: 6, radius: 0.17, mass: 0.9,
+    shots: 5, spread: 0.34, speed: 30, damage: 9, life: 6, radius: 0.17, mass: 0.9,
+    lead: 0.5,                     // the homing does the rest
     turn: 2.6,                     // homing authority, rad/s
     shape: 'missile', trail: 0xffffff, scatter: 0.55,
     blurb: '小型ミサイルを5発ばらまく。白い航跡を引いて追尾する',
@@ -245,8 +253,9 @@ export const EQUIP_META = {
     label: 'スナイパー', category: 'weapon', plate: 0x2b3a49, accent: 0x9fffe0,
     colorable: true, bullet: 0x9fffe0,
     ammo: 3, reload: 2.6, interval: 1.1, auto: false,
-    shots: 1, spread: 0, speed: 620, damage: 52, life: 3.2, radius: 0.1, mass: 0.9,
-    shape: 'beam', streak: 26, scope: 0.42,      // FOV multiplier while scoped
+    shots: 1, spread: 0, speed: 180, damage: 52, life: 3.2, radius: 0.1, mass: 0.9,
+    lead: 0.6,                     // the aimed shot, and the closest to right
+    shape: 'beam', streak: 14, scope: 0.42,      // FOV multiplier while scoped
     blurb: '超長射程の一撃。スコープ（Q）で狙える',
   },
   [EQUIP.LASER]: {
@@ -262,7 +271,8 @@ export const EQUIP_META = {
     label: 'スプレッド', category: 'weapon', plate: 0x2b3a49, accent: 0xffe066,
     colorable: true, bullet: 0xffe066,
     ammo: 8, reload: 2.4, interval: 0.5, auto: false,
-    shots: 9, spread: 0.30, speed: 95, damage: 5, life: 0.9, radius: 0.16, mass: 0.75,
+    shots: 9, spread: 0.30, speed: 54, damage: 5, life: 1.5, radius: 0.16, mass: 0.75,
+    lead: 0.25,
     streak: 1.1,                   // pellets, not tracers
     blurb: '9発を大きく拡散。近ければ全弾当たる',
   },
@@ -271,7 +281,8 @@ export const EQUIP_META = {
     colorable: true, bullet: 0xff8a3d,
     // Short life is the range limit: the round simply stops existing.
     ammo: 4, reload: 2.0, interval: 0.7, auto: false,
-    shots: 1, spread: 0.01, speed: 130, damage: 44, life: 0.28, radius: 0.34, mass: 0.85,
+    shots: 1, spread: 0.01, speed: 70, damage: 44, life: 0.5, radius: 0.34, mass: 0.85,
+    lead: 0.2,
     streak: 1.6,                   // a fat slug
     blurb: '至近距離用の一撃。射程は短いが非常に重い',
   },
@@ -279,7 +290,8 @@ export const EQUIP_META = {
     label: 'グレネード', category: 'weapon', plate: 0x2b3a49, accent: 0x8effc9,
     colorable: true, bullet: 0x8effc9,
     ammo: 3, reload: 2.8, interval: 0.8, auto: false,
-    shots: 1, spread: 0.02, speed: 46, damage: 16, life: 4, radius: 0.3, mass: 0.95,
+    shots: 1, spread: 0.02, speed: 40, damage: 16, life: 4, radius: 0.3, mass: 0.95,
+    lead: 0.45,
     shape: 'grenade', gravity: 14, blast: { radius: 7, damage: 34 },
     blurb: '山なりに飛ぶ爆弾。着弾点で小爆発を起こす',
   },
@@ -346,6 +358,143 @@ export const isRingPlane = (v) => RING_PLANE_IDS.includes(v);
 export const SPIN_RPM_MIN = 5;
 export const SPIN_RPM_MAX = 400;
 
+/**
+ * How much of a solved intercept a locked shot is allowed to use.
+ *
+ * A weapon that leads perfectly cannot be dodged: whatever the target does,
+ * the round is already on its way to where the target will be, and a lock
+ * stops being aim and starts being a guarantee. Aiming SHORT of the
+ * intercept is what turns "the shot lands" into "the shot is going THERE —
+ * move", which is the only version of this that is worth playing.
+ *
+ * Per weapon, because the ones you point should be allowed to be right and
+ * the ones you spray should not. Together with rounds slow enough to watch
+ * cross the gap, sidestepping and dashing become the answer to being shot
+ * at, rather than decoration on a fight that was already decided.
+ */
+export const WEAPON_LEAD_DEFAULT = 0.4;
+export const weaponLead = (meta) =>
+  Math.min(1, Math.max(0, meta?.lead ?? WEAPON_LEAD_DEFAULT));
+
+/**
+ * When a hit is hard enough to rock the machine.
+ *
+ * Measured against the durability of the machine that took it, so a heavy
+ * chassis shrugs off what folds a light one, and accumulated over a short
+ * window so a shotgun's nine pellets land as one blow rather than nine
+ * unnoticeable ones. A stream of small rounds never reaches the threshold:
+ * held fire is supposed to whittle, not to stunlock.
+ */
+export const STAGGER = {
+  /** Damage inside one window that starts a stagger, as a fraction of max HP. */
+  threshold: 0.08,
+  /** This much again on top of it is a full one. */
+  span: 0.22,
+  /** How fast the running total of recent damage bleeds away, in seconds. */
+  memory: 0.18,
+  /** Knockback of a full stagger, in m/s. */
+  knockback: 9.5,
+  /** How long a full stagger holds the machine, in seconds. */
+  seconds: 0.45,
+  /** How much of the machine's own thrust a full stagger takes away. */
+  authority: 0.85,
+  /** Rocked this hard, the trigger stops answering. */
+  fireBlock: 0.35,
+
+  /**
+   * Past a full stagger, the blow stops rocking the machine and starts
+   * THROWING it.
+   *
+   * A cap at "as rocked as it gets" makes every heavy weapon feel the same
+   * once it clears the bar — a magnum and a sniper round through the chest
+   * both just wobble you. Letting the figure run past 1 gives the top end
+   * somewhere to go: the machine leaves the floor, loses the fight for as
+   * long as it is in the air, and has to land before it can do anything.
+   *
+   * `launchAt` is the blow that starts lifting; `launchFull` is the one that
+   * lifts as hard as it gets. Both are in units of "one full stagger", so
+   * they scale with the machine that took it.
+   */
+  launchAt: 1,
+  launchFull: 2.2,
+  /** Extra shove a full launch adds along the blow, in m/s. */
+  launchPush: 15,
+  /** And how much of it goes UP — enough to take the feet off the floor. */
+  launchLift: 8.5,
+  /** How fast a downed machine gets its feet back, once it has landed. */
+  riseSeconds: 0.55,
+};
+
+/**
+ * Sliding: what a two-legged machine does when it is going sideways faster
+ * than it could ever step.
+ *
+ * Past its own dash speed there is no gait left to run — the legs cannot
+ * reach that far that fast — so the machine stops pretending to walk. It
+ * plants both legs on the trailing side, leans into the direction it is
+ * carried, and skates. That is what the numbers were already saying; it was
+ * just still animating a stride.
+ */
+export const SLIDE = {
+  /**
+   * A slide begins where the machine's own legs give out — its ground
+   * speed cap — and is complete at its dash speed.
+   *
+   * Both figures come from the machine, so this is not a number anyone
+   * picked: below the cap it can walk that fast, so it walks. Above it, it
+   * is being carried, and the only thing that gets it there sideways is a
+   * dash — an impulse rather than a thrust. So a lateral dash starts fully
+   * sideways and skates out of it as the speed bleeds back down to a walk,
+   * and nothing a machine does under its own power ever slides.
+   */
+  /**
+   * Rise and fall half-lives: it snaps on, and eases off.
+   *
+   * The rise is very short because the speed it is tracking is not: a dash
+   * is an impulse and the drag above the walking cap eats it in about a
+   * fifth of a second, so anything slower to react never sees the peak.
+   */
+  riseHalfLife: 0.015,
+  fallHalfLife: 0.12,
+  /** How far the legs cant over, in degrees. */
+  tilt: 42,
+  /** How much of the tilt each joint further down the leg takes. */
+  taper: 0.6,
+  /** Extra body lean into the slide, in radians. */
+  lean: 0.16,
+};
+
+/**
+ * When coming down off something counts as a LANDING rather than a step.
+ *
+ * A machine that drops out of the sky and carries on running as if nothing
+ * happened weighs nothing, whatever the numbers say. Planting itself — a
+ * brace, a ring of dust, a moment of settling — is where the weight is
+ * actually felt.
+ *
+ * Gated on the machine's own weight, because that is the whole point: a
+ * light frame touches down and a heavy one arrives. A skirmisher that
+ * braced every time it hopped would just feel sluggish.
+ */
+export const LANDING = {
+  /** Below this weight class a machine only ever touches down... */
+  weight: 0.22,
+  /** ...and at this one it plants itself as hard as it gets. */
+  full: 0.58,
+  /** Downward speed, m/s, at which a landing starts to count... */
+  speed: 8,
+  /**
+   * ...and at which it is as planted as it gets.
+   *
+   * Well under what free-fall would reach, because the machine never does:
+   * drag settles a long drop at about thirteen metres a second, and a
+   * ceiling nothing can touch is a ceiling that does nothing.
+   */
+  hard: 17,
+  /** How long the brace holds, in seconds. */
+  seconds: 0.42,
+};
+
 export const EQUIP_TYPES = Object.keys(EQUIP_META);
 export const WEAPON_TYPES = EQUIP_TYPES.filter((t) => EQUIP_META[t].category === 'weapon');
 export const SYSTEM_TYPES = EQUIP_TYPES.filter((t) => EQUIP_META[t].category === 'system');
@@ -357,10 +506,14 @@ export const equipShape = (type) =>
 /** Lock-on accent colour, used by HUD + world reticle. */
 export const LOCK_COLOR = '#4fd2ff';
 
-/** Gait keys, and how they read in the UI. */
-export const GAIT_LABEL = {
-  hover: 'ホバー',
-  hop: '単脚',
-  walk: '二足歩行',
-  multileg: '多脚',
-};
+/**
+ * Gait keys.
+ *
+ * Internal only, and deliberately unlabelled. Naming the categories on
+ * screen — "one leg", "two legs", "many" — turns a machine you BUILT into a
+ * machine that belongs to a class, and invites the player to build toward
+ * the label rather than toward the shape they wanted. The leg count is
+ * shown, because it is a fact about the parts; what the count implies is
+ * left to the machine's own behaviour.
+ */
+export const GAITS = ['hover', 'hop', 'walk', 'multileg'];

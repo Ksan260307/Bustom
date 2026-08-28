@@ -117,7 +117,7 @@ describe('share codes', () => {
   it('refuses a well-formed document that is not a build', async () => {
     const notOurs = `${SHARE_PREFIX_RAW}${btoa('{"format":"something.else"}')
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')}`;
-    await expect(decodeShare(notOurs)).rejects.toThrow('BroStom のデータではありません');
+    await expect(decodeShare(notOurs)).rejects.toThrow('BLOSTOM のデータではありません');
   });
 
   it('an uncompressed code still loads', async () => {
@@ -134,5 +134,33 @@ describe('share codes', () => {
     const wrapped = code.slice(0, 5) + code.slice(5).replace(/(.{40})/g, '$1\n');
     const back = await decodeShare(wrapped);
     expect(back.size).toBe(PRESETS.hopper.build().size);
+  });
+});
+
+describe('the rename does not orphan anything', () => {
+  it('a code stamped with the old name still opens', async () => {
+    // Somebody has already shared one of these — printed it, pasted it into
+    // a message, saved the QR. The format on the other side of the prefix
+    // never changed, so the only thing standing between them and their
+    // machine would be four characters of branding.
+    const code = await encodeShare(PRESETS.biped.build());
+    const old = code.replace(/^BLO/, 'BRO');
+    expect(old).not.toBe(code);
+    expect(isShareCode(old), 'still recognised').toBe(true);
+    const back = await decodeShare(old);
+    expect(back.size).toBe(PRESETS.biped.build().size);
+  });
+
+  it('a machine saved under the old name still loads', () => {
+    const json = PRESETS.hopper.build().toJSON();
+    expect(json.format).toBe('blostom.assembly');
+    const older = { ...json, format: 'brostom.assembly' };
+    expect(Assembly.fromJSON(older).size).toBe(json.parts.length);
+  });
+
+  it('and a document that was never ours is still refused', async () => {
+    const notOurs = 'BLO0:' + btoa(JSON.stringify({ format: 'something.else' }))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    await expect(decodeShare(notOurs)).rejects.toThrow('BLOSTOM のデータではありません');
   });
 });

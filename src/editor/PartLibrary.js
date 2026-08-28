@@ -9,7 +9,14 @@ import { Assembly } from '../core/Assembly.js';
 //  merges the palette — the same path copy/paste uses.
 // ============================================================
 
-const KEY = 'brostom.parts.v1';
+const KEY = 'blostom.parts.v1';
+/**
+ * What the store was called before the game was renamed.
+ *
+ * Read as a fallback and never written. A rebranding is not a reason for
+ * anyone to lose the parts they saved.
+ */
+const KEY_WAS = 'brostom.parts.v1';
 
 let _seq = 0;
 const nextId = () => `pl${Date.now().toString(36)}${(_seq++).toString(36)}`;
@@ -26,7 +33,7 @@ export class PartLibrary {
     this.items = [];
     if (!this.storage) return this;
     try {
-      const raw = this.storage.getItem(KEY);
+      const raw = this.storage.getItem(KEY) ?? this.storage.getItem(KEY_WAS);
       if (!raw) return this;
       const data = JSON.parse(raw);
       if (Array.isArray(data?.items)) this.items = data.items;

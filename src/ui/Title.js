@@ -9,12 +9,14 @@ import { onDesktop, quitGame, toggleFullscreen, steamStatus } from '../platform/
 //  arena directly — they call the app, and the app decides.
 // ============================================================
 
-const BEST_KEY = 'brostom.solo.best.v1';
+const BEST_KEY = 'blostom.solo.best.v1';
+/** What it was called before the rename. Read as a fallback, never written. */
+const BEST_KEY_WAS = 'brostom.solo.best.v1';
 
 /** The best solo run so far, or null if nobody has finished one yet. */
 export function loadBest() {
   try {
-    const raw = localStorage.getItem(BEST_KEY);
+    const raw = localStorage.getItem(BEST_KEY) ?? localStorage.getItem(BEST_KEY_WAS);
     if (!raw) return null;
     const v = JSON.parse(raw);
     return typeof v?.score === 'number' ? v : null;
@@ -105,7 +107,7 @@ export class TitleScreen {
     this.el = h('div', { id: 'title', class: 'hidden' },
       h('div', { class: 'titleinner' },
         h('div', { class: 'titlebrand' },
-          h('h1', {}, 'BroStom'),
+          h('h1', {}, 'BLOSTOM'),
           h('p', {}, 'ブロックで組んで、戦う'),
         ),
         this.listEl,

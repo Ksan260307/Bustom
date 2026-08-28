@@ -4,6 +4,7 @@ import { computeStats } from '../core/Assembly.js';
 import { ZMFBody } from '../zmf/ZMFBody.js';
 import { Animator } from '../anim/Animator.js';
 import { clamp01, damp } from '../zmf/math.js';
+import { STAGGER } from '../core/constants.js';
 import { WeaponSystem } from './Weapons.js';
 
 // ============================================================
@@ -13,6 +14,47 @@ import { WeaponSystem } from './Weapons.js';
 const _v = new THREE.Vector3();
 const _aim = new THREE.Vector3();
 const _flat = new THREE.Vector3();
+const _knock = new THREE.Vector3();
+
+/**
+ * How much fatter the hit column is than an equal-volume cylinder.
+ *
+ * The material is not spread evenly up the machine: the legs are thin and
+ * the body is not, so averaging the whole solid volume over the whole height
+ * understates the part anyone is actually aiming at. This puts the width
+ * back where the body is.
+ */
+const HIT_COLUMN_SPREAD = 1.3;
+
+/**
+ * The hit flash: how hard the machine lights up when something lands on it.
+ *
+ * A hit that only moves a number on a bar is a hit nobody feels. This is
+ * the cheapest honest answer — the machine itself reacts — and it scales
+ * with the blow, so a gatling stipples and a magnum whites the thing out.
+ *
+ * `share` is the damage, as a fraction of the machine's own durability,
+ * that lights it fully. Deliberately the same figure a stagger starts at:
+ * a blow big enough to rock the machine is a blow big enough to see.
+ */
+const HIT_FLASH = {
+  share: 0.34,
+  /** Seconds to fall to about a third. Short: this is a flash, not a glow. */
+  decay: 0.07,
+  /**
+   * Where it stops.
+   *
+   * Measured on screen rather than picked: the tone mapping saturates a
+   * long way below 1, and anything past this is a white blob with no
+   * machine left in it. At the cap the silhouette, the panel lines and the
+   * plates are all still there — it just looks like it has been hit very
+   * hard, which is the entire brief.
+   */
+  cap: 0.45,
+  /** What it looks like when it is us, and when it is somebody else. */
+  mine: 0xff6a5c,
+  theirs: 0xfff0d0,
+};
 
 export class Robot {
   /**
@@ -68,7 +110,21 @@ export class Robot {
     this.wrecked = false;
     /** The barrier a SHIELD plate puts up, while it lasts. */
     this.shield = null;
+    /**
+     * Damage this machine has taken in the last moment, kept just long
+     * enough for a volley to land as one blow. See `_takeShock`.
+     */
+    this.shock = 0;
+    /** How brightly the machine is lit by whatever just hit it, 0..1-ish. */
+    this.hitFlash = 0;
+    /**
+     * Blows taken since anyone last looked, for the read-out to turn into
+     * marks. Drained by the field; capped, because a shotgun at point blank
+     * is one event to the player however many pellets it was.
+     */
+    this.blows = [];
     this.radius = Math.max(1.0, this.stats.extent * 0.8);
+    this._measureHitVolume();
 
     this._buildThrusterFx();
     this.body.reset(new THREE.Vector3(opts.x ?? 0, rideHeight, opts.z ?? 0));
@@ -77,6 +133,38 @@ export class Robot {
 
   get position() { return this.body.position; }
   get velocity() { return this.body.velocity; }
+
+  /**
+   * The standing column a round has to actually cross to hit this machine.
+   *
+   * `radius` — half the bounding diagonal — is the right figure for the
+   * coarse questions: how far to stand off, how wide a blast reaches, when
+   * two machines are in contact. It is the wrong one for a bullet. A seven
+   * metre walker measures three and a half, so anything passing three
+   * metres wide of it counted as a hit, and no amount of dodging could
+   * change that.
+   *
+   * So a bullet is answered with a column instead: as tall as the machine
+   * is TALL, and as thick as the machine has SUBSTANCE to be — the width of
+   * a cylinder that would hold the same amount of solid material over the
+   * same height. Measuring the bounding box instead reads whatever is
+   * sticking out of it, so bolting a gun barrel onto each shoulder would
+   * double the width of a machine that had not gained an inch of body.
+   */
+  _measureHitVolume() {
+    const b = this.rig.bounds;
+    const height = Math.max(0.2, b.max.y - b.min.y);
+    const solid = Math.max(0.05, this.stats.solidVolume ?? 0.5);
+    // Never wider than the machine itself, however dense it is.
+    const widest = Math.max(0.35, Math.min(b.max.x - b.min.x, b.max.z - b.min.z) * 0.5);
+    this.hitRadius = Math.min(widest, Math.max(0.35, Math.sqrt(solid / (Math.PI * height)) * HIT_COLUMN_SPREAD));
+    // The column runs the height of the machine, its own caps taken off the
+    // ends so a capsule is not taller than the thing it stands for.
+    const top = b.max.y - this.hitRadius;
+    const bottom = b.min.y + this.hitRadius;
+    this.hitOffsetY = (top + bottom) / 2;
+    this.hitHalfHeight = Math.max(0, (top - bottom) / 2);
+  }
 
   _buildThrusterFx() {
     // Sized off the machine, and mounted behind it — a plume that swallows
@@ -117,6 +205,10 @@ export class Robot {
 
   update(input, dt) {
     if (!this.alive) return;
+    if (this.shock > 0) {
+      this.shock *= Math.exp(-dt / STAGGER.memory);
+      if (this.shock < 1e-4) this.shock = 0;
+    }
     if (this.lockTarget) {
       // keep the tracked handle pointing at live data
       this.body.target = { position: this.lockTarget.position, radius: this.lockTarget.radius };
@@ -175,6 +267,12 @@ export class Robot {
       locked: b.locked ? 1 : 0,
       thrust: b.inertia.thrustOutput,
       jerk: b.inertia.jerkMag,
+      stagger: b.stagger,
+      staggerDir: b.staggerDir,
+      downed: b.downed,
+      landing: b.landing,
+      dashSpeed: b.dashSpeed,
+      walkCap: b.groundSpeedCap,
     });
 
     this.rig.updateRollers(dt);
@@ -188,6 +286,14 @@ export class Robot {
     // The boost flame belongs to the plates that produce it, not to the
     // machine's general exhaust.
     this.rig.setBoostGlow(this.body.boostOutput ?? 0, Math.sin(this.body.time * 47) * 0.5 + 0.5);
+
+    if (this.hitFlash > 0) {
+      this.hitFlash *= Math.exp(-dt / HIT_FLASH.decay);
+      if (this.hitFlash < 1e-3) this.hitFlash = 0;
+    }
+    // Red for our own machine, hot white for anyone else's: which of those
+    // two things just happened is the single most useful bit on the screen.
+    this.rig.setHitFlash(this.hitFlash, this.isPlayer ? HIT_FLASH.mine : HIT_FLASH.theirs);
 
     const out = this.body.inertia.thrustOutput;
     const fwd = Math.max(0, this.body.inertia.spool.z);
@@ -213,7 +319,7 @@ export class Robot {
     return this;
   }
 
-  damage(n) {
+  damage(n, from = null) {
     if (!this.alive) return;
     // A raised barrier takes the hit first, and only what it cannot absorb
     // reaches the machine. It breaks when it runs out rather than lingering
@@ -226,6 +332,21 @@ export class Robot {
       if (n <= 0) return;
     }
     this.hp = Math.max(0, this.hp - n);
+    // The flash goes on whether or not the blow was heavy enough to rock
+    // the machine: a light round still has to LOOK like it connected, or
+    // held fire reads as firing into thin air.
+    this.hitFlash = Math.min(
+      HIT_FLASH.cap, this.hitFlash + n / Math.max(1, this.maxHp * HIT_FLASH.share),
+    );
+    // Lit HERE, not on the next step's effects pass. Damage is resolved
+    // after every machine has already been posed, so leaving it to the pass
+    // that decays it put the flash one frame behind the round that caused
+    // it — and one frame is the whole of it.
+    this.rig.setHitFlash(this.hitFlash, this.isPlayer ? HIT_FLASH.mine : HIT_FLASH.theirs);
+    if (this.blows.length < 8) {
+      this.blows.push({ damage: n, from: from ? from.clone() : null, fatal: this.hp <= 0 });
+    }
+    if (this.hp > 0) this._takeShock(n, from);
     if (this.hp <= 0) {
       this.alive = false;
       // The wreck is produced by the caller, which owns the debris pool; all
@@ -238,11 +359,60 @@ export class Robot {
     }
   }
 
+  /**
+   * Damage remembered for a moment, and turned into a stagger once enough
+   * of it has landed at once.
+   *
+   * Accumulated rather than judged shot by shot, because a shotgun arrives
+   * as nine pellets and ought to land as one blow — nine separate hits, none
+   * of them individually heavy, would rock the machine not at all. The
+   * memory is short, so a stream of small rounds settles well below the
+   * threshold: held fire is meant to whittle a machine down, not to hold it
+   * still while it happens.
+   *
+   * Measured against this machine's own durability, so the same round folds
+   * a light frame and barely troubles a heavy one.
+   */
+  _takeShock(n, from = null) {
+    if (!(n > 0)) return 0;
+    this.shock += n;
+    const gate = this.maxHp * STAGGER.threshold;
+    if (this.shock < gate) return 0;
+    // Measured in full staggers, and NOT clamped: past 1 the body turns the
+    // surplus into lift and throws the machine instead of rocking it. A cap
+    // here made a magnum and a sniper round through the chest feel the same.
+    const power = (this.shock - gate) / (this.maxHp * STAGGER.span);
+    this.shock = 0;                       // spent on this one
+    this.stagger(power, from);
+    return power;
+  }
+
+  /**
+   * Rock the machine away from `from` — the point the blow came from, if
+   * anything knows it.
+   *
+   * Away from, not along the round's own line: what the player has to read
+   * off the screen is which side they were hit from, and the shove that
+   * says so is the one pointing out of the impact.
+   */
+  stagger(power, from = null) {
+    if (!this.alive || !(power > 0)) return this;
+    if (from) _knock.copy(this.position).sub(from);
+    else _knock.copy(this.body.forward).negate();
+    if (_knock.lengthSq() < 1e-8) _knock.copy(this.body.forward).negate();
+    this.body.applyStagger(power, _knock);
+    return this;
+  }
+
   /** Put it back together at `position`, whole and reloaded. */
   revive(position) {
     this.hp = this.maxHp;
     this.alive = true;
     this.wrecked = false;
+    this.shock = 0;
+    this.hitFlash = 0;
+    this.blows.length = 0;
+    this.rig.setHitFlash(0);
     this.object3D.visible = true;
     this.body.reset(position ?? this.position.clone());
     this.rearm();

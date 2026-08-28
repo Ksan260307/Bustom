@@ -216,7 +216,7 @@ export class ShareDialog {
     drawQR(big, this.code, { module: EXPORT_MODULE });
     const a = document.createElement('a');
     a.href = big.toDataURL('image/png');
-    a.download = `${(this.app.assembly.name || 'brostom').replace(/\s+/g, '_')}.qr.png`;
+    a.download = `${(this.app.assembly.name || 'blostom').replace(/\s+/g, '_')}.qr.png`;
     a.click();
     this._note('PNG を保存しました');
   }
@@ -241,7 +241,7 @@ export class ShareDialog {
   async _import(text) {
     const t = String(text ?? '').trim();
     if (!t) { this._note('コードが空です'); return; }
-    if (!isShareCode(t)) { this._note('BroStom の共有コードではありません'); return; }
+    if (!isShareCode(t)) { this._note('BLOSTOM の共有コードではありません'); return; }
     try {
       const assembly = await decodeShare(t);
       const where = this.app.adoptShared(assembly);

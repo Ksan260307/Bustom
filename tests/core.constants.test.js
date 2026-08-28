@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   FACE, FACE_NORMAL, FACE_AXIS, FACE_OPPOSITE, FACE_NAME,
   VOX_LEVELS, DEFAULT_VOX, chunkSizeFor, snapSize,
-  SIZE_MIN, SIZE_MAX, BONE_GAUGE, BONE_META, BONE, GAIT_LABEL,
+  SIZE_MIN, SIZE_MAX, BONE_GAUGE, BONE_META, BONE, GAITS,
 } from '../src/core/constants.js';
 
 describe('face tables', () => {
@@ -86,10 +86,12 @@ describe('bone metadata', () => {
   });
 });
 
-describe('gait labels', () => {
-  it('labels every gait, and calls 3+ legs multileg', () => {
-    expect(Object.keys(GAIT_LABEL).sort()).toEqual(['hop', 'hover', 'multileg', 'walk']);
-    expect(GAIT_LABEL.multileg).toBe('多脚');
-    expect(GAIT_LABEL.hop).toBe('単脚');
+describe('gaits', () => {
+  it('are a set of keys and nothing a player is ever shown', () => {
+    // The gait is how the code decides which legs to swing. It is not a
+    // class of machine, and the moment it is put on screen it becomes one:
+    // the next thing anyone builds is built toward the label rather than
+    // toward the shape they wanted. There are no display names to show.
+    expect([...GAITS].sort()).toEqual(['hop', 'hover', 'multileg', 'walk']);
   });
 });

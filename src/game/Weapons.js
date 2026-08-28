@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { EQUIP_META } from '../core/constants.js';
+import { EQUIP_META, weaponLead, STAGGER } from '../core/constants.js';
 import { clamp01 } from '../zmf/math.js';
 
 // ============================================================
@@ -23,6 +23,8 @@ const _lead = new THREE.Vector3();
 const _prev = new THREE.Vector3();
 const _seg = new THREE.Vector3();
 const _near = new THREE.Vector3();
+const _near2 = new THREE.Vector3();
+const _hitAt = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 const _zero = new THREE.Vector3();
 /** +Z, the axis every bolt and beam is modelled along. */
@@ -45,6 +47,126 @@ export function segmentHitsSphere(a, b, centre, radius, out) {
   return out.distanceTo(centre) <= radius ? out : null;
 }
 
+/**
+ * Closest approach of the segment a→b to an upright capsule: a vertical
+ * segment of half-length `halfHeight` centred on `centre`, thickened by
+ * `radius`. Writes the contact point on the SHOT into `out` and returns it,
+ * or null for a miss.
+ *
+ * A machine is not a ball. Modelled as one, the sphere has to be as wide as
+ * the machine is tall or its head and feet stop existing — and a seven-metre
+ * walker then eats every round that passes three metres to the side of it.
+ * That is most of what "everything hits" was: not the aim, the target.
+ *
+ * A standing column is the honest shape. It is as wide as the machine
+ * actually is, so stepping aside works; it is as tall as the machine
+ * actually is, so shooting one in the legs still counts.
+ */
+export function segmentHitsCapsule(a, b, centre, halfHeight, radius, out) {
+  if (!(halfHeight > 0)) return segmentHitsSphere(a, b, centre, radius, out);
+  _seg.copy(b).sub(a);                      // d
+  _v.copy(a).sub(centre);                   // w
+
+  // With the axis exactly upright, the vertical term drops out of the
+  // distance the moment the axis point is free to slide: what is left is the
+  // horizontal miss, and that is what picks the point along the shot.
+  const flat2 = _seg.x * _seg.x + _seg.z * _seg.z;
+  let u = flat2 > 1e-12
+    ? clamp01(-(_v.x * _seg.x + _v.z * _seg.z) / flat2)
+    : 0;
+  let t = _v.y + u * _seg.y;
+
+  // Past the end of the column the axis point is pinned, and the best point
+  // along the shot has to be solved again against that fixed end — the cap.
+  if (t < -halfHeight || t > halfHeight) {
+    t = t < -halfHeight ? -halfHeight : halfHeight;
+    const len2 = _seg.lengthSq();
+    if (len2 > 1e-12) {
+      u = clamp01(-((_v.x * _seg.x) + (_v.y - t) * _seg.y + (_v.z * _seg.z)) / len2);
+    }
+  }
+
+  out.copy(a).addScaledVector(_seg, u);
+  _near2.copy(centre).setY(centre.y + t);
+  return out.distanceTo(_near2) <= radius ? out : null;
+}
+
+// ---------------------------------------------------------- how a round looks
+//
+// Rounds are drawn additively in the player's chosen colour, so their
+// texture is a GREYSCALE mask: it multiplies that colour rather than
+// replacing it, and a blue beam and an orange one get the same shape from
+// the same map. Baked as pixels rather than drawn into a canvas, so the
+// module still works with no DOM — the tests build these too.
+
+/** A triangular bump of half-width `w` centred on `c`. */
+const bump = (v, c, w) => Math.max(0, 1 - Math.abs(v - c) / w);
+
+/** Wrap a greyscale ramp into a DataTexture. `at(u, v)` returns 0..1. */
+function maskTexture(w, h, at) {
+  const data = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const k = Math.max(0, Math.min(1, at((x + 0.5) / w, (y + 0.5) / h)));
+      const i = (y * w + x) * 4;
+      const v = Math.round(k * 255);
+      data[i] = data[i + 1] = data[i + 2] = v;
+      data[i + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
+  tex.needsUpdate = true;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = THREE.RepeatWrapping;
+  return tex;
+}
+
+/**
+ * A bolt: white-hot at the nose, falling away down the tail, with two tight
+ * bands across it.
+ *
+ * The cylinder is modelled along +Z with v = 1 at the nose, so the ramp runs
+ * straight down v. The bands are what stop a fast round reading as a smear —
+ * they give the eye something fixed to track it by.
+ */
+function boltTexture() {
+  return maskTexture(4, 64, (u, v) => {
+    let a = 0.14 + (v ** 2.2) * 0.86;
+    a *= 1 - 0.5 * bump(v, 0.62, 0.035) - 0.5 * bump(v, 0.46, 0.035);
+    return a;
+  });
+}
+
+/**
+ * A missile: a dark body with the motor burning at the tail and a bright
+ * warhead at the tip.
+ *
+ * The opposite shape to a bolt on purpose. A missile is a THING with an
+ * engine, and the one part of it that should be brightest is the end you
+ * are not being hit by.
+ */
+function missileTexture() {
+  return maskTexture(4, 64, (u, v) => {
+    let a = 0.22;
+    a += 0.95 * bump(v, 0.0, 0.16);        // exhaust
+    a += 0.55 * (v ** 6);                  // the tip catches the light
+    a -= 0.14 * bump(v, 0.34, 0.06);       // a seam, so the body has scale
+    return a;
+  });
+}
+
+/**
+ * A grenade: a mottled shell, so a lobbed round tumbling through the air
+ * reads as tumbling rather than as a smooth dot sliding sideways.
+ */
+function grenadeTexture() {
+  return maskTexture(32, 32, (u, v) => {
+    const bands = Math.sin(u * Math.PI * 6) * Math.sin(v * Math.PI * 5);
+    return 0.55 + bands * 0.35;
+  });
+}
+
 /** Unit bolt: a cylinder lying along +Z, so a scale is (radius, radius, length). */
 function boltGeometry() {
   const g = new THREE.CylinderGeometry(1, 1, 1, 7, 1, true);
@@ -65,6 +187,16 @@ function grenadeGeometry() {
 /** How many points a missile's smoke trail remembers. */
 const TRAIL_POINTS = 16;
 
+/**
+ * How far a missile has to open up past its closest approach before it
+ * accepts that it missed, in metres.
+ *
+ * Not zero: a target jinking across the nose makes the range wobble by a
+ * few centimetres, and a missile that gave up on that would never reach
+ * anything. Not large either — the whole point is that it gives up.
+ */
+const HOMING_GIVE_UP = 2;
+
 export class Projectiles {
   /**
    * @param {THREE.Scene} scene
@@ -80,6 +212,13 @@ export class Projectiles {
     this.boltGeo = boltGeometry();
     this.missileGeo = missileGeometry();
     this.grenadeGeo = grenadeGeometry();
+
+    // One map per shape, made once and shared by every slot. Swapping which
+    // texture a material points at is free; adding or removing one is not,
+    // so every slot always has one.
+    this.boltTex = boltTexture();
+    this.missileTex = missileTexture();
+    this.grenadeTex = grenadeTexture();
 
     /**
      * Beams are not projectiles: a laser exists between two points for as
@@ -99,7 +238,7 @@ export class Projectiles {
 
   _makeSlot() {
     const mat = new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0.95,
+      color: 0xffffff, map: this.boltTex, transparent: true, opacity: 0.95,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
     const mesh = new THREE.Mesh(this.boltGeo, mat);
@@ -107,9 +246,11 @@ export class Projectiles {
     mesh.frustumCulled = false;
     this.group.add(mesh);
     return {
-      mesh, mat, life: 0, kind: 'bolt',
+      mesh, mat, life: 0, kind: 'bolt', color: 0xffffff,
       velocity: new THREE.Vector3(),
       damage: 0, radius: 0.2, speed: 0, turn: 0, owner: null, target: null,
+      /** Homing state: whether it is still steering, and its best approach. */
+      homing: false, closest: Infinity,
       gravity: 0, blast: null, streak: 0, trail: null, trailColor: 0xffffff,
     };
   }
@@ -226,11 +367,16 @@ export class Projectiles {
     s.turn = turn;
     s.owner = owner;
     s.target = target;
+    s.homing = turn > 0;
+    s.closest = Infinity;
 
     s.velocity.copy(direction).normalize().multiplyScalar(speed);
     s.mesh.geometry = kind === 'missile' ? this.missileGeo
       : kind === 'grenade' ? this.grenadeGeo : this.boltGeo;
+    s.mat.map = kind === 'missile' ? this.missileTex
+      : kind === 'grenade' ? this.grenadeTex : this.boltTex;
     s.mesh.position.copy(position);
+    s.color = color;
     s.mat.color.setHex(color);
     s.mat.opacity = 0.95;
     s.mesh.visible = true;
@@ -284,19 +430,32 @@ export class Projectiles {
 
       // ---- homing: steer, never teleport. A missile you cannot outrun is
       // not a missile, it is a cutscene.
-      if (s.turn > 0 && s.target?.alive) {
+      //
+      // And it gets ONE go. The moment it has passed its closest approach —
+      // flown by, or been outrun — the steering stops and it carries
+      // straight on. A missile that keeps turning until its fuel runs out
+      // circles back and comes at you again, and again, so dodging it buys
+      // nothing: the only thing that ever ends the chase is being hit by
+      // it. Giving up is what makes the dodge mean something.
+      if (s.homing && s.target?.alive) {
         _to.copy(s.target.position).sub(s.mesh.position);
-        if (_to.lengthSq() > 1e-6) {
-          _to.normalize();
-          _dir.copy(s.velocity).normalize();
-          const cos = Math.min(1, Math.max(-1, _dir.dot(_to)));
-          const step = Math.min(Math.acos(cos), s.turn * dt);
-          if (step > 1e-5) {
-            _v.crossVectors(_dir, _to);
-            if (_v.lengthSq() < 1e-8) _v.copy(_up);
-            _dir.applyAxisAngle(_v.normalize(), step);
-            s.velocity.copy(_dir).multiplyScalar(s.speed);
+        const range = _to.length();
+        if (range <= s.closest + HOMING_GIVE_UP) {
+          if (range < s.closest) s.closest = range;
+          if (range > 1e-3) {
+            _to.divideScalar(range);
+            _dir.copy(s.velocity).normalize();
+            const cos = Math.min(1, Math.max(-1, _dir.dot(_to)));
+            const step = Math.min(Math.acos(cos), s.turn * dt);
+            if (step > 1e-5) {
+              _v.crossVectors(_dir, _to);
+              if (_v.lengthSq() < 1e-8) _v.copy(_up);
+              _dir.applyAxisAngle(_v.normalize(), step);
+              s.velocity.copy(_dir).multiplyScalar(s.speed);
+            }
           }
+        } else {
+          s.homing = false;
         }
       }
 
@@ -317,7 +476,7 @@ export class Projectiles {
         // A plain round reports where it struck; one with a blast reports
         // the blast instead, which is the bigger event and the one worth
         // drawing.
-        if (!s.blast) this.hits.push({ position: p.clone(), robot: null, damage: 0 });
+        if (!s.blast) this.hits.push(this._hitRecord(s, p, null, 0));
         this._detonate(s, p, targets);
         this._kill(s);
         continue;
@@ -329,9 +488,9 @@ export class Projectiles {
       // endpoint would let fast rounds pass straight through small targets.
       for (const t of targets) {
         if (!t || t === s.owner || !t.alive) continue;
-        if (this._sweepHits(_prev, p, t.position, t.radius + s.radius) === null) continue;
-        t.damage(s.damage);
-        this.hits.push({ position: _near.clone(), robot: t, damage: s.damage });
+        if (this._sweepHits(_prev, p, t, s.radius) === null) continue;
+        t.damage(s.damage, _near);
+        this.hits.push(this._hitRecord(s, _near, t, s.damage));
         this._detonate(s, _near, targets, t);
         this._kill(s);
         break;
@@ -341,11 +500,35 @@ export class Projectiles {
   }
 
   /**
-   * Closest approach of the segment a→b to a sphere. Returns the point of
-   * contact (in the shared temp `_near`) or null.
+   * What a hit looks like to whatever is going to draw it: where, on whom,
+   * how hard — and the two things only the round itself knows, which way it
+   * was travelling and what colour it was.
    */
-  _sweepHits(a, b, centre, radius) {
-    return segmentHitsSphere(a, b, centre, radius, _near);
+  _hitRecord(s, at, robot, damage) {
+    return {
+      position: at.clone(),
+      robot,
+      damage,
+      color: s.color,
+      dir: s.velocity.clone().normalize(),
+      radius: s.radius,
+    };
+  }
+
+  /**
+   * Closest approach of the segment a→b to a machine's own hit volume.
+   * Returns the point of contact (in the shared temp `_near`) or null.
+   *
+   * `hitRadius` / `hitHalfHeight` are what a Robot measures off its own
+   * built body. Anything without them — a stand-in, a wreck — is still a
+   * plain ball of `radius`.
+   */
+  _sweepHits(a, b, t, pad) {
+    _hitAt.copy(t.position);
+    _hitAt.y += t.hitOffsetY ?? 0;
+    return segmentHitsCapsule(
+      a, b, _hitAt, t.hitHalfHeight ?? 0, (t.hitRadius ?? t.radius) + pad, _near,
+    );
   }
 
   /**
@@ -363,7 +546,7 @@ export class Projectiles {
       const d = at.distanceTo(t.position) - t.radius;
       if (d > radius) continue;
       const falloff = 1 - clamp01(Math.max(0, d) / radius);
-      t.damage(damage * falloff);
+      t.damage(damage * falloff, at);
     }
     // Reported wherever it went off — on the floor or on somebody — so the
     // explosion is drawn in both cases.
@@ -373,6 +556,8 @@ export class Projectiles {
   _kill(s) {
     s.life = 0;
     s.target = null;
+    s.homing = false;
+    s.closest = Infinity;
     s.owner = null;
     s.mesh.visible = false;
     if (s.trail) s.trail.line.visible = false;
@@ -399,6 +584,9 @@ export class Projectiles {
       if (s.trail) { s.trail.geo.dispose(); s.trail.mat.dispose(); }
     }
     for (const b of this.beams) b.mat.dispose();
+    this.boltTex.dispose();
+    this.missileTex.dispose();
+    this.grenadeTex.dispose();
     this.boltGeo.dispose();
     this.missileGeo.dispose();
     this.grenadeGeo.dispose();
@@ -525,9 +713,12 @@ export class WeaponSystem {
    * @param {object|null} ctx.lockTarget the locked machine, for homing
    */
   update(ctx, dt) {
+    let {
+      firing = false,
+    } = ctx;
     const {
-      firing = false, aimPoint = null, projectiles = null, targets = [],
-      lockTarget = null, scoping = false,
+      aimPoint = null, projectiles = null, targets = [],
+      lockTarget = null, scoping = false, effects = null,
     } = ctx;
     let blade = 0;
 
@@ -539,6 +730,12 @@ export class WeaponSystem {
     const live = this.active;
     this.scoped = !!scoping && !!live?.meta.scope;
     this._shieldTick(targets, dt);
+
+    // A machine that has just been rocked cannot shoot back for a moment.
+    // Without this a stagger is decoration: you get knocked halfway across
+    // the arena and land the same volley you were going to land anyway, and
+    // the heavy weapons buy nothing that the light ones do not.
+    if ((this.robot.body?.stagger ?? 0) > STAGGER.fireBlock) firing = false;
 
     for (const s of this.slots) {
       // Cooldowns and reloads run on EVERY plate, selected or not. Switching
@@ -561,14 +758,14 @@ export class WeaponSystem {
       if (s.meta.dps) {
         // ---- blade: no ammo, no projectile. Contact damage while held.
         blade = 1;
-        this._blade(s, targets, dt);
+        this._blade(s, targets, dt, effects);
         continue;
       }
 
       if (s.meta.beam) {
         // ---- laser: a line that exists while the trigger is down, paid
         // for in heat rather than rounds.
-        if (s.reloadT <= 0) this._laser(s, { aimPoint, projectiles, targets, lockTarget }, dt);
+        if (s.reloadT <= 0) this._laser(s, { aimPoint, projectiles, targets, lockTarget, effects }, dt);
         continue;
       }
 
@@ -577,7 +774,7 @@ export class WeaponSystem {
       if (s.ammo <= 0) { s.reloadT = s.meta.reload; continue; }
 
       if (s.meta.shield) this._raiseShield(s);
-      else this._shoot(s, { aimPoint, projectiles, lockTarget });
+      else this._shoot(s, { aimPoint, projectiles, lockTarget, effects });
       s.ammo--;
       s.cooldown = s.meta.interval;
       s.armed = false;
@@ -596,10 +793,19 @@ export class WeaponSystem {
    * Where a plate's shots leave from, and which way they go.
    *
    * With a target locked each weapon solves its OWN intercept, because the
-   * lead depends on how fast that particular weapon's round travels — the
-   * machine's aim assist leads for steering, which is a different problem
-   * and, at range, a different point in space. Two passes of fixed-point
-   * iteration is plenty: the third moves the answer by centimetres.
+   * flight time depends on how fast that particular weapon's round travels —
+   * the machine's aim assist leads for steering, which is a different
+   * problem and, at range, a different point in space. Two passes of
+   * fixed-point iteration is plenty: the third moves the answer by
+   * centimetres.
+   *
+   * And then it deliberately aims SHORT of the answer, by the weapon's own
+   * lead figure. A gun that solves the intercept exactly cannot be dodged —
+   * the round is already going wherever the target is about to be, so the
+   * lock does the fighting and the player watches. Aiming short leaves the
+   * shot going somewhere the target can choose not to be, which is the
+   * whole game: a machine that keeps moving is missed, one that stands
+   * still is not. See WEAPON_LEAD_DEFAULT.
    */
   muzzle(slot, ctx, outPos = new THREE.Vector3(), outDir = new THREE.Vector3()) {
     const { aimPoint = null, lockTarget = null } = ctx ?? {};
@@ -613,6 +819,9 @@ export class WeaponSystem {
         _lead.copy(lockTarget.position).addScaledVector(lockTarget.velocity ?? _zero, t);
         t = outPos.distanceTo(_lead) / speed;
       }
+      // Back off the intercept toward where the target actually IS.
+      _lead.copy(lockTarget.position)
+        .addScaledVector(lockTarget.velocity ?? _zero, t * weaponLead(slot.meta));
       outDir.copy(_lead).sub(outPos);
     } else if (aimPoint) {
       outDir.copy(aimPoint).sub(outPos);
@@ -629,13 +838,21 @@ export class WeaponSystem {
   }
 
   _shoot(slot, ctx) {
-    const { projectiles, lockTarget } = ctx;
+    const { projectiles, lockTarget, effects = null } = ctx;
     if (!projectiles) return;
     const meta = slot.meta;
     const { position, direction } = this.muzzle(slot, ctx);
     const color = slot.part.bulletColor ?? meta.bullet;
     const scale = slot.part.size / 0.7;
     const shots = meta.shots ?? 1;
+
+    // The flash belongs to the PLATE, not to the round: a shotgun throwing
+    // nine pellets fires once, and nine flashes stacked on one barrel is a
+    // white blob rather than a gun going off.
+    effects?.muzzle(position, direction, {
+      scale: scale * (0.5 + Math.min(1.4, meta.damage * (meta.shots ?? 1) / 40)),
+      color,
+    });
 
     // Local frame of the shot: right, then up. Used for both the deliberate
     // fan of a shotgun and the random scatter of a gatling.
@@ -695,7 +912,9 @@ export class WeaponSystem {
    * cannot express that.
    */
   _laser(slot, ctx, dt) {
-    const { projectiles = null, targets = [], aimPoint = null, lockTarget = null } = ctx;
+    const {
+      projectiles = null, targets = [], aimPoint = null, lockTarget = null, effects = null,
+    } = ctx;
     const spec = slot.meta.beam;
     const { position, direction } = this.muzzle(slot, { aimPoint, lockTarget });
 
@@ -712,13 +931,28 @@ export class WeaponSystem {
     let best = Infinity;
     for (const t of targets) {
       if (!t || t === this.robot || !t.alive) continue;
-      if (segmentHitsSphere(position, _to, t.position, t.radius + spec.width, _near) === null) continue;
+      _hitAt.copy(t.position);
+      _hitAt.y += t.hitOffsetY ?? 0;
+      if (segmentHitsCapsule(
+        position, _to, _hitAt, t.hitHalfHeight ?? 0,
+        (t.hitRadius ?? t.radius) + spec.width, _near,
+      ) === null) continue;
       const d = position.distanceTo(t.position);
       if (d < best) { best = d; hit = t; }
     }
     if (hit) {
-      hit.damage(spec.dps * dt);
+      hit.damage(spec.dps * dt, position);
       _to.copy(position).addScaledVector(direction, Math.max(1, best));
+      // A shower where it lands, thinned out in time. Every frame would
+      // recycle the whole pool into one spot and leave nothing for the
+      // rounds arriving anywhere else.
+      slot.sparkT = (slot.sparkT ?? 0) - dt;
+      if (effects && slot.sparkT <= 0) {
+        slot.sparkT = 0.06;
+        effects.impact(_near, direction, {
+          color: slot.part.bulletColor ?? slot.meta.bullet, scale: 0.5, life: 0.16,
+        });
+      }
     }
     projectiles?.beam({
       from: position, to: _to,
@@ -759,17 +993,26 @@ export class WeaponSystem {
     for (const t of targets) {
       if (!t || t === this.robot || !t.alive) continue;
       if (this.robot.position.distanceTo(t.position) > this.robot.radius + sh.reach + t.radius) continue;
-      t.damage(bite);
+      t.damage(bite, this.robot.position);
     }
   }
 
-  _blade(slot, targets, dt) {
+  _blade(slot, targets, dt, effects = null) {
     const reach = slot.meta.reach * (slot.part.size / 0.7);
     slot.node.plate.getWorldPosition(_v);
+    slot.sparkT = (slot.sparkT ?? 0) - dt;
     for (const t of targets) {
       if (!t || t === this.robot || !t.alive) continue;
       if (_v.distanceTo(t.position) > t.radius + reach) continue;
-      t.damage(slot.meta.dps * dt);
+      t.damage(slot.meta.dps * dt, _v);
+      // Sparks off the blade itself, thinned in time the way the laser's are.
+      if (effects && slot.sparkT <= 0) {
+        slot.sparkT = 0.05;
+        _to.copy(t.position).sub(_v);
+        effects.impact(_v, _to, {
+          color: slot.part.bulletColor ?? slot.meta.bullet, scale: 0.6, life: 0.18,
+        });
+      }
     }
   }
 }

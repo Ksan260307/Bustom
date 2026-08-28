@@ -20,7 +20,8 @@ export class EnvironmentInterference {
     this.world = world;
     this.repulsion = new THREE.Vector3();
     this.groundNormal = new THREE.Vector3(0, 1, 0);
-    this.grounded = 0;         // smoothed 0..1
+    this.grounded = 0;
+    this.landingSpeed = 0;         // smoothed 0..1
     this.groundY = 0;
     this.contact = null;       // nearest non-ground contact
     this.slideFactor = 0;      // 0..1, how much we are grazing a surface
@@ -57,6 +58,7 @@ export class EnvironmentInterference {
   probe(position, velocity, inputDir, radius, rideHeight, dt) {
     this.repulsion.set(0, 0, 0);
     this.impactImpulse = 0;
+    this.landingSpeed = 0;
 
     // -------------------------------------------------- support surface
     // The floor, or the top of whatever box we happen to be standing over.
@@ -81,6 +83,10 @@ export class EnvironmentInterference {
         position.y = groundY + rideHeight;
       }
       if (velocity.y < 0) {
+        // How fast it was coming down at the moment of contact, before the
+        // bounce takes it away. This is the only substep on which that
+        // number exists: the next one has already had its fall cancelled.
+        this.landingSpeed = -velocity.y;
         if (velocity.y < -9) this.impactImpulse = Math.min(1, -velocity.y / 34);
         velocity.y *= -this.config.restitution * smoothstep(2, 14, -velocity.y);
         if (Math.abs(velocity.y) < 0.6) velocity.y = 0;

@@ -15,6 +15,8 @@ const _up = new THREE.Vector3();
 const _boom = new THREE.Vector3();
 const _boomUp = new THREE.Vector3();
 const _axis = new THREE.Vector3();
+const _line = new THREE.Vector3();
+const _side = new THREE.Vector3();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 /** Steepest the camera boom may tilt, as a sine of the angle from horizontal. */
@@ -70,7 +72,40 @@ export class CameraDynamics {
       orbitPitchLimit: 1.15,         // ~66°, short of straight over the top
       /** How fast the boom eases back behind the machine, per unit of speed. */
       recenterRate: 2.4,
+      /**
+       * How the camera reframes once there is a fight on.
+       *
+       * A chase cam is a driving camera: it sits on the tail, looks where
+       * the nose is going, and puts the machine dead centre. Every one of
+       * those is wrong for a gunfight. The target ends up directly BEHIND
+       * the machine on screen, the rounds crossing the gap are seen almost
+       * end-on, and the one thing the player needs to read — where the shot
+       * went and what is coming back — is the one thing hidden by their own
+       * machine.
+       *
+       * So with a target locked the boom lines itself up along the firing
+       * line, steps off it to one side, and lifts. The gap between the two
+       * machines opens across the screen instead of into it, and the rounds
+       * travel across the frame where they can be seen and dodged.
+       */
+      combat: {
+        /** How far along the line to the target the camera looks. */
+        gazeBias: 0.40,
+        /** How firmly the boom lines up behind the firing line, 0..1. */
+        align: 0.85,
+        /** Step off that line, as a fraction of the boom length. */
+        shoulder: 0.34,
+        /** And up, as a fraction of the boom's own height. */
+        lift: 0.60,
+        /** Range at which the boom has opened out by `open`. */
+        openAt: 45,
+        open: 0.5,
+        /** How fast the framing changes when a lock comes or goes. */
+        halfLife: 0.30,
+      },
     };
+    /** 0..1, how far into the combat framing we are. */
+    this.engage = 0;
     this._framed = false;
   }
 
@@ -112,6 +147,7 @@ export class CameraDynamics {
 
   /** Put the boom where it belongs right now, with no easing. */
   snap(position, forward) {
+    this.engage = 0;
     _tmp.copy(forward).multiplyScalar(-this.config.distance * this.zoom);
     this.position.copy(position).add(_tmp);
     this.position.y += this.config.height;
@@ -139,16 +175,28 @@ export class CameraDynamics {
 
     const speed = p.velocity.length();
     const speedN = clamp01(speed / 34);
+    const cbt = this.config.combat;
+
+    // How much of the combat framing to apply. Driven by whether there IS a
+    // target rather than by how hard the assist is pulling: the assist backs
+    // off the moment the player looks away by hand, and a camera that
+    // reframed every time they did would be unusable.
+    this.engage = damp(this.engage, p.aimPoint ? 1 : 0, cbt.halfLife, dt);
+    const engage = this.engage;
 
     // ---------------------------------------------------- gaze
-    // Look at the machine, biased toward wherever it is about to be.
-    _gaze.copy(p.position).addScaledVector(p.forward, this.config.leadDistance * (0.35 + speedN * 0.9));
+    // Look at the machine, biased toward wherever it is about to be. The
+    // nose-lead is a driving aid, so it gives way to the fight.
+    _gaze.copy(p.position).addScaledVector(
+      p.forward, this.config.leadDistance * (0.35 + speedN * 0.9) * (1 - engage * 0.85),
+    );
 
-    if (p.aimPoint && p.assistAuthority > 0.02) {
-      // Frame both the machine and the target: the gaze slides toward the
-      // midpoint, weighted by how much the assist is actually engaged.
-      _tmp.copy(p.aimPoint).add(p.position).multiplyScalar(0.5);
-      _gaze.lerp(_tmp, clamp01(p.assistAuthority * 0.65));
+    if (p.aimPoint && engage > 0.001) {
+      // Look down the firing line rather than at either end of it. Short of
+      // the middle, so the machine keeps the near half of the frame and the
+      // target sits ahead of it with the gap between them on screen.
+      _tmp.copy(p.position).lerp(p.aimPoint, cbt.gazeBias);
+      _gaze.lerp(_tmp, engage);
     }
 
     // While planted on the ground the machine must stay in frame. A target
@@ -195,6 +243,24 @@ export class CameraDynamics {
       _boom.y = sign * BOOM_TILT_CAP;
     }
 
+    // Line the boom up behind the FIRING line, not behind the nose. On the
+    // ground the two mostly agree — the machine turns to face what it is
+    // shooting — but the moment it strafes, or fights something above it,
+    // they come apart, and it is the firing line that the player needs to
+    // see down.
+    let range = 0;
+    if (p.aimPoint && engage > 0.001) {
+      _line.copy(p.aimPoint).sub(p.position);
+      range = _line.length();
+      _line.y = 0;
+      if (_line.lengthSq() > 1e-6) {
+        _line.normalize();
+        _boom.lerp(_line, cbt.align * engage);
+        if (_boom.lengthSq() < 1e-8) _boom.copy(_line);
+        _boom.normalize();
+      }
+    }
+
     // The player's own swing goes on AFTER the cap: the cap exists to stop
     // the machine's pitch from throwing the view around, not to overrule a
     // deliberate look.
@@ -227,11 +293,25 @@ export class CameraDynamics {
     // horizon stays roughly where the player left it.
     _boomUp.copy(WORLD_UP).lerp(p.up, 0.35).normalize();
 
-    const dist = this.config.distance * this.zoom * (1 + speedN * 0.30);
+    // Open the boom out with the range, so a fight at forty metres has both
+    // machines in the frame rather than one of them and a dot.
+    const open = 1 + engage * clamp01(range / cbt.openAt) * cbt.open;
+    const dist = this.config.distance * this.zoom * (1 + speedN * 0.30) * open;
     _desired.copy(p.position)
       .addScaledVector(_boom, -dist)
-      .addScaledVector(_boomUp, this.config.height)
+      .addScaledVector(_boomUp, this.config.height * (1 + engage * cbt.lift))
       .addScaledVector(p.right ?? WORLD_UP, this.config.shoulder);
+
+    // Step off the firing line. Straight down it the machine sits directly
+    // in front of what it is shooting at and hides it; a pace to the side
+    // separates the two across the screen and turns the gap between them
+    // into something the player can read a round crossing.
+    if (engage > 0.001) {
+      _side.crossVectors(WORLD_UP, _boom);
+      if (_side.lengthSq() > 1e-8) {
+        _desired.addScaledVector(_side.normalize(), dist * cbt.shoulder * engage);
+      }
+    }
 
     // Pull the boom back along the velocity vector a touch — the machine
     // drifts forward in frame under acceleration, which is where the

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import {
-  BONE_META, BONE_GAUGE, GAIT_LABEL, VOX_LEVELS,
+  BONE_META, BONE_GAUGE, VOX_LEVELS,
   SIZE_MIN, SIZE_MAX, SIZE_STEP,
   BONE_LENGTH_MIN, BONE_LENGTH_MAX, BONE_RADIUS_MIN, BONE_RADIUS_MAX,
   EQUIP_META, WEAPON_TYPES, SYSTEM_TYPES,
@@ -103,7 +103,7 @@ export class EditorUI {
     this.redoBtn = h('button', { class: 'icon', title: 'やり直し (Ctrl+Y)', onClick: () => app.redo() }, '↷');
 
     this.topbar = h('div', { id: 'topbar' },
-      h('div', { class: 'brand' }, 'BroStom', h('small', {}, 'BLOCK ROBO ARENA')),
+      h('div', { class: 'brand' }, 'BLOSTOM', h('small', {}, 'BLOCK ROBO ARENA')),
       h('div', { class: 'sep' }),
       this.nameInput,
       this.presetSelect,
@@ -1172,13 +1172,12 @@ export class EditorUI {
     const pct = (v) => `${Math.round(v * 100)}%`;
 
     this.statsEl.replaceChildren(
-      // No legs, no gait: "ホバー" is not a walking style, it is the absence
-      // of one, and showing it invites you to tune a walk that cannot exist.
-      stats.legs > 0
-        ? h('div', { style: 'margin-bottom:8px' },
-          h('span', { class: 'gaitbadge' }, GAIT_LABEL[stats.gait] ?? stats.gait))
-        : null,
-
+      // The machine's gait is not named here, and deliberately. Stamping a
+      // build with "one leg" / "two legs" / "many" turns something you MADE
+      // into something that belongs to a category, and the next thing you
+      // do is build toward the label. The leg COUNT is below, because that
+      // is a fact about the parts; what it implies, the machine shows you
+      // by moving.
       h('div', { class: 'stat' }, h('span', { class: 'k' }, '質量'),
         h('span', { class: 'v' }, stats.mass.toFixed(2))),
       h('div', { class: 'meter' }, h('i', { style: `width:${stats.weightClass * 100}%` })),

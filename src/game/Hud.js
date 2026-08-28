@@ -31,6 +31,40 @@ export class Hud {
     /** Seconds left on the "you just switched to X" banner. */
     this.weaponFlash = 0;
     this.weaponFlashLabel = '';
+
+    /**
+     * Marks for hits that have just landed on somebody else, and arcs for
+     * ones that have just landed on us.
+     *
+     * A hit that only shows up as a number moving on a bar is a hit you do
+     * not feel. These are the two halves of knowing it happened: WHERE the
+     * one you landed went, and WHICH WAY the one you took came from.
+     */
+    this.marks = [];
+    this.hurts = [];
+  }
+
+  /** A round of ours just connected, out there in the world. */
+  markHit(world, weight = 0.5, killed = false) {
+    if (this.marks.length >= 12) this.marks.shift();
+    this.marks.push({ world: world.clone(), t: 0, life: killed ? 0.55 : 0.3, weight, killed });
+    return this;
+  }
+
+  /** Something just hit US, from over there. */
+  markHurt(world, weight = 0.5) {
+    // One arc per direction rather than one per pellet: nine of them
+    // stacked on the same bearing is a white smear, not a warning.
+    for (const h of this.hurts) {
+      if (h.world.distanceToSquared(world) < 36) {
+        h.t = 0;
+        h.weight = Math.min(1, h.weight + weight);
+        return this;
+      }
+    }
+    if (this.hurts.length >= 6) this.hurts.shift();
+    this.hurts.push({ world: world.clone(), t: 0, life: 1.1, weight });
+    return this;
   }
 
   /** Call it when the player cycles the set: the name pops, then fades. */
@@ -56,8 +90,11 @@ export class Hud {
       ['GROUND', `${(t.grounded * 100).toFixed(0)}%`],
       ['FRAME', `${(t.frameLock * 100).toFixed(0)}%`],
     ];
-    // A legless machine has no gait to report.
-    if ((s.legs ?? 0) > 0) rows.push(['GAIT', s.gait.toUpperCase()]);
+    // The gait is NOT reported. It is a category the code sorts machines
+    // into so it knows which legs to swing; put it on screen and it becomes
+    // a label the player builds toward. How many legs there are is a fact
+    // about the parts, so that is what gets said.
+    if ((s.legs ?? 0) > 0) rows.push(['LEGS', `${s.legs}`]);
     return rows;
   }
 
@@ -101,9 +138,89 @@ export class Hud {
     this._drawCandidates(s, ctx);
     if (s.lock) this._drawLock(s, ctx);
     this._drawCrosshair(s, ctx);
+    this._drawHits(s, ctx, dt);
     this._drawTelemetry(s, ctx);
     this._drawWeapons(s, ctx);
     if (s.mission) this._drawMission(s.mission, ctx);
+  }
+
+  /**
+   * Everything that says a hit happened: a mark where ours landed, an arc
+   * for where theirs came from.
+   *
+   * Both are drawn in SCREEN space off a world position, so the mark sits on
+   * the machine that took it and the arc points at the machine that fired
+   * — and both keep working when the thing in question is off screen or
+   * behind you, which is precisely when you need to be told.
+   */
+  _drawHits(s, ctx, dt) {
+    const cam = s.camera;
+    if (!cam) return;
+    const cx = this.w / 2;
+    const cy = this.h / 2;
+
+    // ---- ours, landing on them
+    for (let i = this.marks.length - 1; i >= 0; i--) {
+      const m = this.marks[i];
+      m.t += dt;
+      if (m.t >= m.life) { this.marks.splice(i, 1); continue; }
+      const p = this.project(m.world, cam);
+      if (p.behind) continue;
+      const k = m.t / m.life;
+      // Snaps out and fades: the shape carries the weight, the timing
+      // carries the impact.
+      const r = (7 + m.weight * 13) * (0.35 + k * 0.9);
+      ctx.save();
+      ctx.globalAlpha = (1 - k) ** 1.5;
+      ctx.strokeStyle = m.killed ? '#ff8a6a' : '#ffffff';
+      ctx.lineWidth = m.killed ? 2.6 : 1.6 + m.weight * 1.4;
+      ctx.lineCap = 'round';
+      // Four ticks around the point, angled: a cross reads as a reticle, an
+      // X reads as a hit.
+      const gap = r * 0.42;
+      for (let a = 0; a < 4; a++) {
+        const ang = Math.PI / 4 + a * (Math.PI / 2);
+        const dx = Math.cos(ang);
+        const dy = Math.sin(ang);
+        ctx.beginPath();
+        ctx.moveTo(p.x + dx * gap, p.y + dy * gap);
+        ctx.lineTo(p.x + dx * r, p.y + dy * r);
+        ctx.stroke();
+      }
+      if (m.killed) {
+        ctx.globalAlpha = (1 - k) ** 2 * 0.8;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r * 1.25, 0, TAU);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // ---- theirs, landing on us
+    for (let i = this.hurts.length - 1; i >= 0; i--) {
+      const hrt = this.hurts[i];
+      hrt.t += dt;
+      if (hrt.t >= hrt.life) { this.hurts.splice(i, 1); continue; }
+      const p = this.project(hrt.world, cam);
+      // Behind the camera the projection flips, so the bearing has to be
+      // turned back round or you get told to look the wrong way.
+      const dx = (p.behind ? -1 : 1) * (p.x - cx);
+      const dy = (p.behind ? -1 : 1) * (p.y - cy);
+      const ang = Math.atan2(dy, dx);
+      const k = hrt.t / hrt.life;
+      const radius = Math.min(this.w, this.h) * 0.30;
+      const half = 0.34;
+
+      ctx.save();
+      ctx.globalAlpha = (1 - k) ** 1.6 * (0.4 + hrt.weight * 0.6);
+      ctx.strokeStyle = '#ff6a5c';
+      ctx.lineWidth = 3 + hrt.weight * 5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius * (1 + k * 0.12), ang - half, ang + half);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   /**

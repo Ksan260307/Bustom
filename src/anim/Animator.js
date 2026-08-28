@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { clamp, clamp01, damp, lerp, smoothstep } from '../zmf/math.js';
+import { SLIDE } from '../core/constants.js';
 
 // ============================================================
 //  Procedural animation driven by bone ATTRIBUTE.
@@ -25,10 +26,33 @@ const _v = new THREE.Vector3();
 const _axis = new THREE.Vector3();
 const _axis2 = new THREE.Vector3();
 const _t2 = new THREE.Vector2();
+const _push = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 const BODY_X = new THREE.Vector3(1, 0, 0);
 const BODY_Y = new THREE.Vector3(0, 1, 0);
 const BODY_Z = new THREE.Vector3(0, 0, 1);
+
+/**
+ * How far a full stagger throws the carriage: pitch, roll and a dip, in
+ * radians and metres.
+ *
+ * A round lands on the BODY, not on the feet, so the machine rocks away
+ * from where it was hit — shot in the chest, the top goes backwards. That
+ * is the opposite of the lean a run produces, where the feet drive and the
+ * top lags behind, and getting the sign wrong makes a machine bow politely
+ * to whoever just shot it.
+ */
+const FLINCH = { pitch: 0.34, roll: 0.26, drop: 0.11, sprawl: 2.6 };
+
+/**
+ * How far a full landing folds the machine: knee bend in degrees, and how
+ * far the body sinks onto it in metres.
+ *
+ * A machine that drops out of the sky and carries on running as if nothing
+ * happened weighs nothing, whatever its stats say. This is where the weight
+ * is actually seen.
+ */
+const BRACE = { bend: 40, drop: 0.34 };
 
 /** Limit a rotation to `maxDeg` away from rest. */
 function limitQuat(q, maxDeg) {
@@ -59,6 +83,10 @@ export class Animator {
     this.hopCharge = 0;
     this.bodyBob = 0;
     this.bodyLean = new THREE.Vector2(); // x = pitch, y = roll
+    /** 0..1, how much of the pose is a sideways skate rather than a walk. */
+    this.slide = 0;
+    /** Which way that skate is going, +1 or -1 in body space. */
+    this.slideDir = 1;
     this.aimBlend = 0;
     /**
      * Direction of travel in the body's own horizontal plane, as (x, z).
@@ -96,6 +124,8 @@ export class Animator {
     this.hopCharge = 0;
     this.bodyBob = 0;
     this.bodyLean.set(0, 0);
+    this.slide = 0;
+    this.slideDir = 1;
     this.aimBlend = 0;
     this.travel.set(0, 1);
     this.travelBlend = 0;
@@ -206,6 +236,12 @@ export class Animator {
    * @param {number} s.locked          0..1
    * @param {number} s.thrust          0..1
    * @param {number} s.jerk
+   * @param {number} [s.stagger]       0..1, how hard it was just hit
+   * @param {THREE.Vector3} [s.staggerDir]  world direction it was thrown
+   * @param {number} [s.landing]       0..1, how hard it just came down
+   * @param {number} [s.downed]        0..1, thrown off its feet
+   * @param {number} [s.dashSpeed]     the machine's own dash speed, m/s
+   * @param {number} [s.walkCap]       ...and the fastest its legs can carry it
    */
   update(s) {
     const dt = s.dt;
@@ -241,13 +277,46 @@ export class Animator {
         * bobAmp * (1 + this.gaitFreq * 0.2) * s.grounded;
     // Track faster when the gait is faster, or the smoothing eats the peaks.
     const bobHalfLife = clamp(0.22 / Math.max(1, this.gaitFreq * bobHz), 0.02, 0.06);
-    this.bodyBob = damp(this.bodyBob, bobTarget, bobHalfLife, dt);
 
+    // `_q` holds the inverse of the body's orientation from here on: the
+    // flinch below reads its push direction out of the same one.
     const localVel = this.localVel.copy(s.velocity).applyQuaternion(_q.copy(s.bodyQ).invert());
     // Lean INTO the run. A machine that stays bolt upright while sprinting is
     // the other half of looking rigid: the legs move and the body does not.
-    this.bodyLean.x = damp(this.bodyLean.x, clamp(localVel.z * 0.019, -0.28, 0.28), 0.15, dt);
-    this.bodyLean.y = damp(this.bodyLean.y, clamp(-localVel.x * 0.014, -0.20, 0.20), 0.15, dt);
+    let pitch = clamp(localVel.z * 0.019, -0.28, 0.28);
+    let roll = clamp(-localVel.x * 0.014, -0.20, 0.20);
+    let drop = 0;
+    // ---- flinch: rocked away from the blow, and snappier than a lean.
+    // Folded into the same carriage rather than posed separately, so it
+    // reads as the machine's own weight moving. The half-life drops with
+    // it: a flinch that eases in over a fifth of a second is not a flinch,
+    // it is a machine changing its mind.
+    const shock = clamp01(s.stagger ?? 0);
+    const load = clamp01(s.landing ?? 0);
+    if (load > 1e-3) drop += BRACE.drop * load;
+    // Skating sideways, the feet are held back and the top carries on: the
+    // machine tips the way it is being taken, further than a strafe ever
+    // does. Same sign as the strafe lean, just more of it.
+    if (this.slide > 1e-3) roll -= SLIDE.lean * this.slide * this.slideDir;
+    // Thrown off its feet, it goes right over.
+    const sprawl = clamp01(s.downed ?? 0);
+    let leanHalfLife = 0.15;
+    if ((shock > 1e-3 || sprawl > 1e-3) && s.staggerDir) {
+      _push.copy(s.staggerDir).applyQuaternion(_q);
+      const flat = Math.hypot(_push.x, _push.z);
+      // Rocked is a lean. THROWN is a machine going over: the same motion,
+      // several times as far, and it does not come back until it lands.
+      const rock = shock + sprawl * FLINCH.sprawl;
+      if (flat > 1e-5) {
+        pitch += FLINCH.pitch * rock * (_push.z / flat);
+        roll -= FLINCH.roll * rock * (_push.x / flat);
+      }
+      drop = Math.max(drop, FLINCH.drop * shock);
+      leanHalfLife = 0.045;
+    }
+    this.bodyBob = damp(this.bodyBob, bobTarget - drop, bobHalfLife, dt);
+    this.bodyLean.x = damp(this.bodyLean.x, pitch, leanHalfLife, dt);
+    this.bodyLean.y = damp(this.bodyLean.y, roll, leanHalfLife, dt);
 
     // ---- travel direction
     // Rotated toward the target rather than lerped: a straight reversal would
@@ -267,6 +336,29 @@ export class Animator {
     }
     this.travelBlend = damp(this.travelBlend, clamp01((planar - 0.4) / 2.5), 0.12, dt);
 
+    // ---- sliding
+    // Going sideways faster than the machine could ever step. There is no
+    // gait left to run at that speed — the legs cannot reach that far that
+    // fast — so it stops pretending to walk, plants both legs on the
+    // trailing side and skates. Measured against the machine's OWN dash,
+    // because "too fast to walk" is a fact about the machine and not a
+    // number that could be picked in advance.
+    const dash = s.dashSpeed ?? 0;
+    const walk = s.walkCap ?? 0;
+    const sideways = dash > walk + 1
+      ? clamp01((Math.abs(localVel.x) - walk) / (dash - walk))
+      : 0;
+    // On fast, off slowly. A slide that faded in would be a machine
+    // deciding to slide; it is supposed to be a machine that has no choice.
+    const want = sideways * s.grounded;
+    this.slide = damp(
+      this.slide, want,
+      want > this.slide ? SLIDE.riseHalfLife : SLIDE.fallHalfLife, dt,
+    );
+    this.slideDir = Math.abs(localVel.x) > 0.05
+      ? Math.sign(localVel.x)
+      : (this.slideDir || 1);
+
     this._sway(dt);
 
     // ---- limbs
@@ -281,10 +373,35 @@ export class Animator {
       }
     }
 
+    this._brace(s);
     this._arms(s, dt);
     this._faces(s, dt);
     this._customs(s, dt);
     this._commit(dt);
+  }
+
+  /**
+   * A heavy machine coming down plants itself: the knees fold and the body
+   * sinks onto them, and it takes a moment to stand back up.
+   *
+   * Added ON TOP of whatever the gait is doing rather than replacing it, so
+   * a machine that lands running keeps running — it just does the first
+   * fraction of a second of it from a crouch. The sign alternates down the
+   * chain so the leg CLOSES like a knee rather than swinging like a
+   * pendulum, which is the same trick the hop uses.
+   */
+  _brace(s) {
+    const load = clamp01(s.landing ?? 0);
+    if (load <= 1e-3) return;
+    for (const limb of this.rig.limbs) {
+      const mirror = limb.root.part.invert ? -1 : 1;
+      limb.chain.forEach((node, i) => {
+        const bend = BRACE.bend * DEG * load * (i % 2 === 0 ? 1 : -1.35) * mirror;
+        _q.setFromAxisAngle(this._strideAxis(node), bend * Animator.gainOf(node));
+        node.target.multiply(_q);
+        limitQuat(node.target, node.part.limit);
+      });
+    }
   }
 
   /**
@@ -337,13 +454,26 @@ export class Animator {
     });
   }
 
-  /** Two legs: opposed sine stride with a knee that only bends one way. */
+  /**
+   * Two legs: opposed sine stride with a knee that only bends one way —
+   * unless the machine is going sideways faster than it can step, in which
+   * case it stops stepping.
+   *
+   * Above its own dash speed there is no stride that could keep up: a leg
+   * would have to swing further than it can reach, faster than it can move,
+   * and the result is the machine moonwalking at thirty metres a second.
+   * So the stride is blended OUT and both legs cant over onto the trailing
+   * side, which is the shape a thing being carried sideways actually makes
+   * — the feet held back by the floor, the body going on ahead.
+   */
   _walk(s, dt) {
     const drive = clamp01(this.gaitFreq / 2.6);
     const amp = lerp(10, 40, drive) * DEG;
     const kneeAmp = lerp(8, 55, drive) * DEG;
     const idle = 1 - clamp01(this.gaitFreq * 2.2);
     const air = 1 - s.grounded;
+    const skate = this.slide;
+    const walking = 1 - skate;
 
     for (const limb of this.rig.limbs) {
       const mirror = limb.root.part.invert ? -1 : 1;
@@ -363,8 +493,22 @@ export class Animator {
         } else {
           angle = (-stride * amp * 0.35 + lift * kneeAmp * 0.4) * mirror;
         }
-        _q.setFromAxisAngle(this._strideAxis(node), angle * Animator.gainOf(node));
+        _q.setFromAxisAngle(this._strideAxis(node), angle * walking * Animator.gainOf(node));
         node.target.copy(limitQuat(_q, node.part.limit));
+
+        // Cant the whole leg over onto the side it is being dragged from.
+        // A positive turn about the splay axis takes the tip toward -X, so
+        // travelling +X wants a positive one: the feet trail, the body goes
+        // on without them.
+        if (skate > 1e-3) {
+          const taper = i === 0 ? 1 : SLIDE.taper ** i;
+          _q.setFromAxisAngle(
+            node.axisSplay,
+            SLIDE.tilt * DEG * skate * this.slideDir * taper * Animator.gainOf(node),
+          );
+          node.target.multiply(_q);
+          limitQuat(node.target, node.part.limit);
+        }
       });
     }
   }

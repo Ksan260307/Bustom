@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openSteam } from './steam.js';
 
 // ============================================================
-//  BroStom — the desktop shell.
+//  BLOSTOM — the desktop shell.
 //
 //  The game itself is unchanged: it is the same renderer, the same fixed
 //  step, the same DOM. What this adds is everything a browser was doing for
@@ -37,13 +37,13 @@ const HOME = `${SCHEME}://app/index.html`;
 /**
  * Point the shell at a running Vite server instead of the build.
  *
- * Set BROSTOM_DEV_SERVER (or pass --dev-server=…) and the window loads that
+ * Set BLOSTOM_DEV_SERVER (or pass --dev-server=…) and the window loads that
  * URL, so the desktop build can be worked on with hot reload rather than a
  * rebuild between every change.
  */
 function devServerUrl() {
   const flag = process.argv.find((a) => a.startsWith('--dev-server='));
-  return flag ? flag.slice('--dev-server='.length) : (process.env.BROSTOM_DEV_SERVER ?? '');
+  return flag ? flag.slice('--dev-server='.length) : (process.env.BLOSTOM_DEV_SERVER ?? '');
 }
 
 // Must be declared before the app is ready, and before any window exists.
@@ -115,7 +115,7 @@ function createWindow(steam) {
     backgroundColor: '#070a10',       // the game's own background, not white
     show: false,                      // no empty frame while it boots
     autoHideMenuBar: true,
-    title: 'BroStom',
+    title: 'BLOSTOM',
     webPreferences: {
       preload: path.join(HERE, 'preload.cjs'),
       contextIsolation: true,
@@ -168,7 +168,7 @@ function createWindow(steam) {
   if (dev) win.loadURL(dev);
   else win.loadURL(HOME);
 
-  if (process.env.BROSTOM_SMOKE) smokeTest(win);
+  if (process.env.BLOSTOM_SMOKE) smokeTest(win);
 
   win.on('closed', () => { steam?.shutdown(); });
   return win;
@@ -197,7 +197,7 @@ async function clickTitleEntry(win, index) {
     win.webContents.sendInputEvent({ type, x: at.x, y: at.y, button: 'left', clickCount: 1 });
   }
   return win.webContents.executeJavaScript(
-    'new Promise((done) => setTimeout(() => done(window.__brostom?.mode ?? null), 300));',
+    'new Promise((done) => setTimeout(() => done(window.__blostom?.mode ?? null), 300));',
   );
 }
 
@@ -223,13 +223,13 @@ function smokeTest(win) {
         new Promise((done) => setTimeout(async () => {
           let saves = false;
           try {
-            localStorage.setItem('brostom.smoke', 'ok');
-            saves = localStorage.getItem('brostom.smoke') === 'ok';
-            localStorage.removeItem('brostom.smoke');
+            localStorage.setItem('blostom.smoke', 'ok');
+            saves = localStorage.getItem('blostom.smoke') === 'ok';
+            localStorage.removeItem('blostom.smoke');
           } catch (e) { saves = false; }
           done({
-            mode: window.__brostom?.mode ?? null,
-            drawn: window.__brostom?.renderer?.info?.render?.calls ?? 0,
+            mode: window.__blostom?.mode ?? null,
+            drawn: window.__blostom?.renderer?.info?.render?.calls ?? 0,
             desktop: !!window.desktop,
             saves,
             steam: await window.desktop.steam.status(),

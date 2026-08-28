@@ -22,6 +22,25 @@ export class World {
 
   groundHeight() { return 0; }
 
+  /**
+   * Point the shadow box at `at`.
+   *
+   * Called every frame with wherever the fight is. The box is a fraction of
+   * the arena, so this is the difference between shadows near the middle
+   * and shadows everywhere — and it buys sharper ones at the same cost,
+   * since the same shadow map now covers a much smaller patch of floor.
+   *
+   * Output only: shadows have never decided anything.
+   */
+  focusShadows(at) {
+    const key = this.keyLight;
+    if (!key || !at) return this;
+    key.position.copy(at).add(this.keyOffset);
+    key.target.position.copy(at);
+    key.target.updateMatrixWorld();
+    return this;
+  }
+
   _build() {
     const scene = this.scene;
 
@@ -49,18 +68,33 @@ export class World {
     scene.add(hemi);
 
     const key = new THREE.DirectionalLight(0xfff2df, 2.25);
-    key.position.set(38, 62, 24);
+    /**
+     * The light's offset from whatever it is lighting. Held fixed while the
+     * light is moved around, so following the fight changes WHERE the
+     * shadows are cast, never which way — a key light that swings as the
+     * player walks makes the whole arena appear to rotate.
+     */
+    this.keyOffset = new THREE.Vector3(38, 62, 24);
+    key.position.copy(this.keyOffset);
     key.castShadow = true;
     key.shadow.mapSize.set(2048, 2048);
-    const d = 46;
+    /**
+     * The shadow box. Small, because it follows: a box wide enough to cover
+     * a 120m arena from a fixed origin spends its 2048 pixels on empty
+     * floor, and everything more than forty metres out casts no shadow at
+     * all — which is what "the machines have no shadows" actually was.
+     */
+    const d = 30;
     key.shadow.camera.left = -d;
     key.shadow.camera.right = d;
     key.shadow.camera.top = d;
     key.shadow.camera.bottom = -d;
+    key.shadow.camera.near = 1;
     key.shadow.camera.far = 190;
     key.shadow.bias = -0.0012;
     key.shadow.normalBias = 0.03;
     scene.add(key);
+    scene.add(key.target);
     this.keyLight = key;
 
     // Two rims rather than one: a cold one behind and a warm one low to the

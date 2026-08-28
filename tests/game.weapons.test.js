@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import * as THREE from 'three';
 import { Projectiles, WeaponSystem } from '../src/game/Weapons.js';
-import { Robot } from '../src/game/Robot.js';
+import { Robot, SyntheticInput } from '../src/game/Robot.js';
 import { Assembly, PRESETS, computeStats, _resetIds } from '../src/core/Assembly.js';
-import { EQUIP, EQUIP_META, WEAPON_TYPES } from '../src/core/constants.js';
+import { EQUIP, EQUIP_META, WEAPON_TYPES, weaponLead } from '../src/core/constants.js';
 import { testWorld, stripEquips } from './helpers/dom.js';
 
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -137,6 +137,155 @@ describe('Projectiles', () => {
     p.clear();
     expect(p.liveCount).toBe(0);
     expect(() => p.dispose()).not.toThrow();
+  });
+});
+
+describe('a missile gets one go', () => {
+  let p;
+  beforeEach(() => { p = pool(); });
+
+  it('stops steering once it has flown past', () => {
+    // A missile that keeps turning until its fuel runs out circles back and
+    // comes at you again, and again, so dodging buys nothing: the only
+    // thing that ends the chase is being hit. Giving up is what makes the
+    // dodge worth doing.
+    const t = dummy(0, 8, 20, 0.4);
+    const m = p.spawn({
+      position: V(0, 8, 0), direction: V(0, 0, 1), speed: 30, life: 6,
+      turn: 2.6, target: t, damage: 5, radius: 0.3,
+    });
+    expect(m.homing, 'it starts out hunting').toBe(true);
+
+    // Sidestep hard enough that it cannot make the turn.
+    for (let i = 0; i < 120 && m.homing; i++) {
+      t.position.x += 45 / 60;
+      p.update(1 / 60, [t]);
+    }
+    expect(t.hp, 'it missed').toBe(100);
+    expect(m.homing, 'and it gave up').toBe(false);
+  });
+
+  it('and then it really does fly straight', () => {
+    const t = dummy(0, 8, 20, 0.4);
+    const m = p.spawn({
+      position: V(0, 8, 0), direction: V(0, 0, 1), speed: 30, life: 6,
+      turn: 2.6, target: t, damage: 5, radius: 0.3,
+    });
+    for (let i = 0; i < 120 && m.homing; i++) {
+      t.position.x += 45 / 60;
+      p.update(1 / 60, [t]);
+    }
+    expect(m.homing).toBe(false);
+    const heading = m.velocity.clone().normalize();
+    // Park the target right beside it: a missile still hunting would turn.
+    t.position.copy(m.mesh.position).add(V(6, 0, 0));
+    for (let i = 0; i < 30; i++) p.update(1 / 60, [t]);
+    expect(m.velocity.clone().normalize().dot(heading), 'not a degree of it')
+      .toBeGreaterThan(0.9999);
+  });
+
+  it('a target that runs is a target that gets away', () => {
+    // Thirty metres a second against a machine that dashes faster. Outrunning
+    // one is supposed to work.
+    const t = dummy(0, 8, 10, 0.4);
+    const m = p.spawn({
+      position: V(0, 8, 0), direction: V(0, 0, 1), speed: 30, life: 6,
+      turn: 2.6, target: t, damage: 5, radius: 0.3,
+    });
+    for (let i = 0; i < 120 && m.life > 0; i++) {
+      t.position.z += 40 / 60;
+      p.update(1 / 60, [t]);
+    }
+    expect(t.hp, 'never touched').toBe(100);
+    expect(m.homing).toBe(false);
+  });
+
+  it('but one that stands there still gets hit', () => {
+    const t = dummy(14, 8, 14, 1.2);
+    p.spawn({
+      position: V(0, 8, 0), direction: V(0, 0, 1), speed: 30, life: 6,
+      turn: 2.6, target: t, damage: 9, radius: 0.3,
+    });
+    for (let i = 0; i < 200 && t.hp === 100; i++) p.update(1 / 60, [t]);
+    expect(t.hp).toBeLessThan(100);
+  });
+
+  it('a fresh slot never inherits the last one\u2019s hunt', () => {
+    const t = dummy(0, 8, 20, 0.4);
+    const a = p.spawn({
+      position: V(0, 8, 0), direction: V(0, 0, 1), speed: 30, life: 6,
+      turn: 2.6, target: t, damage: 5, radius: 0.3,
+    });
+    for (let i = 0; i < 120 && a.homing; i++) {
+      t.position.x += 45 / 60;
+      p.update(1 / 60, [t]);
+    }
+    p.clear();
+    const b = p.spawn({
+      position: V(0, 8, 0), direction: V(0, 0, 1), speed: 30, life: 6,
+      turn: 2.6, target: t, damage: 5, radius: 0.3,
+    });
+    expect(b.homing).toBe(true);
+    expect(b.closest).toBe(Infinity);
+  });
+});
+
+describe('rounds are drawn, not just coloured', () => {
+  let p;
+  beforeEach(() => { p = pool(); });
+
+  it('every round carries a map, and the right one for its shape', () => {
+    const bolt = p.spawn({ position: V(0, 5, 0), direction: V(0, 0, 1), speed: 90, life: 1 });
+    expect(bolt.mat.map, 'a bolt').toBe(p.boltTex);
+    const missile = p.spawn({
+      position: V(0, 5, 0), direction: V(0, 0, 1), speed: 30, life: 1, kind: 'missile',
+    });
+    expect(missile.mat.map, 'a missile').toBe(p.missileTex);
+    const nade = p.spawn({
+      position: V(0, 5, 0), direction: V(0, 0, 1), speed: 40, life: 1, kind: 'grenade',
+    });
+    expect(nade.mat.map, 'a grenade').toBe(p.grenadeTex);
+  });
+
+  it('a slot reused for another shape takes that shape\u2019s map', () => {
+    const one = pool(1);
+    const a = one.spawn({
+      position: V(0, 5, 0), direction: V(0, 0, 1), speed: 30, life: 1, kind: 'missile',
+    });
+    expect(a.mat.map).toBe(one.missileTex);
+    const b = one.spawn({ position: V(0, 5, 0), direction: V(0, 0, 1), speed: 90, life: 1 });
+    expect(b.mat.map, 'and not the one it had before').toBe(one.boltTex);
+    one.dispose();
+  });
+
+  it('the maps are greyscale, so the bullet colour still decides the colour', () => {
+    // They MULTIPLY the colour the player picked. A map with colour of its
+    // own would quietly repaint every round in the game.
+    for (const tex of [p.boltTex, p.missileTex, p.grenadeTex]) {
+      const d = tex.image.data;
+      for (let i = 0; i < d.length; i += 4) {
+        expect(d[i] === d[i + 1] && d[i + 1] === d[i + 2], 'grey').toBe(true);
+      }
+    }
+  });
+
+  it('a bolt is brightest at the nose', () => {
+    // The cylinder runs along +Z with v = 1 at the nose, so the ramp has to
+    // run that way too — backwards, the round looks like it is flying tail
+    // first.
+    const d = p.boltTex.image.data;
+    const w = p.boltTex.image.width;
+    const h = p.boltTex.image.height;
+    const row = (y) => d[(y * w) * 4];
+    expect(row(h - 1), 'nose').toBeGreaterThan(row(0) * 3);
+  });
+
+  it('a missile burns at the tail instead', () => {
+    const d = p.missileTex.image.data;
+    const w = p.missileTex.image.width;
+    const h = p.missileTex.image.height;
+    const row = (y) => d[(y * w) * 4];
+    expect(row(0), 'the motor').toBeGreaterThan(row(Math.floor(h * 0.5)));
   });
 });
 
@@ -789,5 +938,288 @@ describe('the new weapons', () => {
     // The laser has no magazine, so it reports a heat gauge instead.
     const laser = rows[WEAPON_TYPES.indexOf(EQUIP.LASER)];
     expect(laser.gauge).toBeGreaterThan(0);
+  });
+});
+
+// ============================================================
+//  Being shot at, and being able to do something about it
+// ============================================================
+
+describe('a locked shot can be dodged', () => {
+  const world = testWorld();
+
+  const shooter = (type) => {
+    const a = stripEquips(PRESETS.biped.build());
+    a.addEquipOnFace(a.core.id, 4, type, { size: 0.7 });
+    return new Robot(a, world, { isPlayer: true });
+  };
+  const mark = (z, vx = 0) => {
+    const t = new Robot(PRESETS.biped.build(), world);
+    t.body.reset(new THREE.Vector3(0, 4.5, z));
+    t.velocity.set(vx, 0, 0);
+    t.syncTransform();
+    return t;
+  };
+
+  /** Fire one pull at a target crossing at `vx` m/s, and say if it landed. */
+  const shootAt = (type, range, vx) => {
+    const r = shooter(type);
+    const p = pool(32);
+    const t = mark(range, vx);
+    r.weapons.update({
+      firing: true, projectiles: p, targets: [t], lockTarget: t, aimPoint: null,
+    }, 1 / 60);
+    for (let i = 0; i < 300 && p.liveCount > 0; i++) {
+      t.position.addScaledVector(t.velocity, 1 / 60);
+      p.update(1 / 60, [t]);
+      if (p.hits.some((h) => h.robot === t)) return true;
+    }
+    return false;
+  };
+
+  it('standing still in front of one is still fatal', () => {
+    for (const type of [EQUIP.BEAM, EQUIP.GATLING, EQUIP.SNIPER, EQUIP.SHOT]) {
+      expect(shootAt(type, 25, 0), type).toBe(true);
+    }
+  });
+
+  it('crossing in front of one at speed is not', () => {
+    // The complaint this answers: with a lock on, every round landed, so a
+    // fight was two machines standing still trading damage. Rounds slow
+    // enough to watch, a lock that aims short of the intercept, and a target
+    // no wider than the machine actually is — between them, moving works.
+    for (const type of [EQUIP.BEAM, EQUIP.GATLING, EQUIP.MAGNUM]) {
+      expect(shootAt(type, 25, 16), type).toBe(false);
+    }
+  });
+
+  it('and it gets harder the further out you are', () => {
+    expect(shootAt(EQUIP.GATLING, 12, 8), 'in close, it lands').toBe(true);
+    expect(shootAt(EQUIP.GATLING, 40, 8), 'across the arena, it does not').toBe(false);
+  });
+
+  it('the lock aims short of the intercept it can solve', () => {
+    const r = shooter(EQUIP.BEAM);
+    const t = mark(60, 30);
+    const { position, direction } = r.weapons.muzzle(r.weapons.slots[0], { lockTarget: t });
+
+    const flight = position.distanceTo(t.position) / EQUIP_META.beam.speed;
+    const aimedAt = position.clone().addScaledVector(direction, flight * EQUIP_META.beam.speed);
+    const perfect = t.position.x + t.velocity.x * flight;
+    expect(aimedAt.x, 'it does lead').toBeGreaterThan(1);
+    expect(aimedAt.x, 'but not all the way').toBeLessThan(perfect * 0.9);
+  });
+
+  it('the weapon you aim leads better than the one you spray', () => {
+    expect(weaponLead(EQUIP_META[EQUIP.SNIPER]))
+      .toBeGreaterThan(weaponLead(EQUIP_META[EQUIP.GATLING]));
+    for (const type of WEAPON_TYPES) {
+      expect(weaponLead(EQUIP_META[type]), type + ' never solves it outright')
+        .toBeLessThan(1);
+    }
+  });
+
+  it('every round is slow enough to watch cross the gap', () => {
+    // Twenty-five metres is a normal fighting range. A round that covers it
+    // inside a couple of frames cannot be seen, let alone avoided.
+    for (const type of WEAPON_TYPES) {
+      const meta = EQUIP_META[type];
+      if (!meta.speed) continue;         // the laser is a line, not a round
+      expect(25 / meta.speed, type + ' takes long enough').toBeGreaterThan(0.1);
+    }
+  });
+
+  it('a machine is a standing column, not a ball as wide as it is tall', () => {
+    // The old proxy was half the bounding diagonal — three and a half metres
+    // for a walker — so anything passing three metres wide of it counted as
+    // a hit, and no amount of dodging could change that.
+    const t = mark(20);
+    expect(t.hitRadius, 'as thick as the body is').toBeLessThan(t.radius * 0.5);
+    expect(t.hitHalfHeight, 'as tall as the machine is').toBeGreaterThan(t.hitRadius * 2);
+
+    const p = pool(4);
+    p.spawn({
+      position: new THREE.Vector3(t.hitRadius + 1.5, t.position.y + t.hitOffsetY, 0),
+      direction: new THREE.Vector3(0, 0, 1), speed: 100, damage: 10, life: 2,
+    });
+    p.update(0.4, [t]);
+    expect(p.hits, 'a round passing wide of the body misses').toHaveLength(0);
+
+    p.spawn({
+      position: new THREE.Vector3(
+        0, t.position.y + t.hitOffsetY + t.hitHalfHeight * 0.8, 0,
+      ),
+      direction: new THREE.Vector3(0, 0, 1), speed: 100, damage: 10, life: 2,
+    });
+    p.update(0.4, [t]);
+    expect(p.hits.some((h) => h.robot === t), 'one at head height does not').toBe(true);
+  });
+});
+
+describe('knowing you were hit', () => {
+  const world = testWorld();
+  const target = (player = false) => {
+    const t = new Robot(PRESETS.biped.build(), world, { isPlayer: player });
+    t.body.reset(new THREE.Vector3(0, 4.5, 0));
+    return t;
+  };
+  const FROM = () => new THREE.Vector3(0, 4.5, -8);
+
+  it('the machine that took it lights up', () => {
+    // A hit that only moves a number on a bar is a hit nobody feels.
+    const t = target();
+    expect(t.rig.bodyMaterial.emissiveIntensity, 'dark to start with').toBe(0);
+    t.damage(t.maxHp * 0.2, FROM());
+    expect(t.hitFlash).toBeGreaterThan(0);
+    expect(t.rig.bodyMaterial.emissiveIntensity, 'lit on the frame it landed')
+      .toBeGreaterThan(0);
+  });
+
+  it('harder hits light it harder, and it never whites out', () => {
+    const light = target();
+    light.damage(light.maxHp * 0.02, FROM());
+    const heavy = target();
+    heavy.damage(heavy.maxHp * 0.3, FROM());
+    expect(heavy.hitFlash).toBeGreaterThan(light.hitFlash * 3);
+    // Past the cap there is no machine left in the picture, only a white
+    // blob — so however big the blow, the silhouette survives.
+    const huge = target();
+    huge.damage(huge.maxHp * 5, FROM());
+    expect(huge.hitFlash).toBeLessThanOrEqual(0.45 + 1e-9);
+  });
+
+  it('and it goes out again quickly', () => {
+    const t = target();
+    const input = new SyntheticInput();
+    t.damage(t.maxHp * 0.3, FROM());
+    for (let i = 0; i < 30; i++) t.update(input, 1 / 60);
+    expect(t.hitFlash).toBe(0);
+    expect(t.rig.bodyMaterial.emissiveIntensity).toBe(0);
+  });
+
+  it('ours and theirs are different colours', () => {
+    // Which of those two things just happened is the single most useful
+    // bit on the screen.
+    const mine = target(true);
+    const theirs = target(false);
+    mine.damage(10, FROM());
+    theirs.damage(10, FROM());
+    expect(mine.rig.bodyMaterial.emissive.getHex())
+      .not.toBe(theirs.rig.bodyMaterial.emissive.getHex());
+  });
+
+  it('every blow is logged for the read-out, and drained once', () => {
+    const t = target();
+    t.damage(5, FROM());
+    t.damage(9, FROM());
+    expect(t.blows).toHaveLength(2);
+    expect(t.blows[0].damage).toBe(5);
+    expect(t.blows[0].from, 'and where it came from').toBeTruthy();
+    t.blows.length = 0;
+    t.damage(3, FROM());
+    expect(t.blows).toHaveLength(1);
+  });
+
+  it('the one that finishes a machine says so', () => {
+    const t = target();
+    t.damage(t.maxHp * 0.1, FROM());
+    expect(t.blows[0].fatal).toBe(false);
+    t.damage(t.maxHp, FROM());
+    expect(t.blows[t.blows.length - 1].fatal).toBe(true);
+  });
+
+  it('the log never grows without bound', () => {
+    const t = target();
+    t.setToughness(50);
+    for (let i = 0; i < 200; i++) t.damage(1, FROM());
+    expect(t.blows.length).toBeLessThanOrEqual(8);
+  });
+
+  it('nothing survives a respawn', () => {
+    const t = target();
+    t.damage(t.maxHp * 0.3, FROM());
+    t.damage(t.maxHp);
+    t.revive(new THREE.Vector3(0, 4.5, 0));
+    expect(t.hitFlash).toBe(0);
+    expect(t.blows).toHaveLength(0);
+    expect(t.rig.bodyMaterial.emissiveIntensity).toBe(0);
+  });
+});
+
+describe('getting rocked', () => {
+  const world = testWorld();
+  const target = () => {
+    const t = new Robot(PRESETS.biped.build(), world);
+    t.body.reset(new THREE.Vector3(0, 4.5, 0));
+    return t;
+  };
+  const BEHIND = () => new THREE.Vector3(0, 4.5, -8);
+
+  it('a heavy hit rocks the machine and throws it clear', () => {
+    const t = target();
+    t.damage(t.maxHp * 0.25, BEHIND());
+    expect(t.body.stagger, 'rocked').toBeGreaterThan(0.3);
+    expect(t.velocity.z, 'and driven away from the shot').toBeGreaterThan(1);
+  });
+
+  it('a stream of small rounds never does', () => {
+    // Held fire is meant to whittle a machine down, not to hold it still
+    // while it happens. A gatling round is a fortieth of a machine.
+    const t = target();
+    const input = new SyntheticInput();
+    const meta = EQUIP_META[EQUIP.GATLING];
+    let due = 0;
+    for (let i = 0; i < 240 && t.alive; i++) {
+      due -= 1 / 60;
+      if (due <= 0) { t.damage(meta.damage, BEHIND()); due = meta.interval; }
+      t.update(input, 1 / 60);
+      expect(t.body.stagger, 'never once').toBe(0);
+    }
+  });
+
+  it('but a volley of them arriving together does', () => {
+    // Nine pellets are one blow, not nine unnoticeable ones — which is what
+    // judging each round on its own would have made them.
+    const t = target();
+    const meta = EQUIP_META[EQUIP.SPREAD];
+    for (let i = 0; i < meta.shots; i++) t.damage(meta.damage, BEHIND());
+    expect(t.body.stagger).toBeGreaterThan(0);
+  });
+
+  it('what counts as heavy is the machine’s own toughness', () => {
+    const light = target();
+    light.setToughness(0.35);
+    const heavy = target();
+    heavy.setToughness(3);
+    const blow = light.maxHp * 0.5;
+    light.damage(blow, BEHIND());
+    heavy.damage(blow, BEHIND());
+    expect(light.body.stagger, 'it folds a light frame').toBeGreaterThan(0);
+    expect(heavy.body.stagger, 'and barely troubles a heavy one').toBe(0);
+  });
+
+  it('a rocked machine cannot shoot back', () => {
+    const a = stripEquips(PRESETS.biped.build());
+    a.addEquipOnFace(a.core.id, 4, EQUIP.BEAM, { size: 0.7 });
+    const r = new Robot(a, world, { isPlayer: true });
+    const p = pool(8);
+
+    r.body.applyStagger(1, new THREE.Vector3(0, 0, -1));
+    r.weapons.update({
+      firing: true, projectiles: p, targets: [], lockTarget: null,
+      aimPoint: new THREE.Vector3(0, 4.5, 60),
+    }, 1 / 60);
+    expect(p.liveCount, 'the trigger does not answer').toBe(0);
+    expect(r.weapons.slots[0].ammo, 'and nothing was spent').toBe(EQUIP_META.beam.ammo);
+  });
+
+  it('the blow that killed it does not follow it into the next life', () => {
+    const t = target();
+    t.damage(t.maxHp * 0.3, BEHIND());
+    expect(t.shock + t.body.stagger).toBeGreaterThan(0);
+    t.damage(t.maxHp);
+    t.revive(new THREE.Vector3(0, 4.5, 0));
+    expect(t.shock).toBe(0);
+    expect(t.body.stagger).toBe(0);
   });
 });

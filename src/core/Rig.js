@@ -36,12 +36,17 @@ export function makeBodyMaterial() {
     metalness: 0.22,
     roughness: 0.46,
     envMapIntensity: 0.85,
+    // Unlit means ZERO, not "black at full intensity". Both look the same,
+    // but only one of them lets "is this machine lit" be a question with an
+    // answer. See setHitFlash.
+    emissiveIntensity: 0,
   });
 }
 
 function makeBoneMaterial(color) {
   return new THREE.MeshStandardMaterial({
     color, metalness: 0.85, roughness: 0.24, flatShading: true,
+    emissiveIntensity: 0,
     // Bones ARE the chrome. With a sky to reflect they finally read as
     // machined metal instead of grey plastic.
     envMapIntensity: 1.35,
@@ -116,6 +121,8 @@ export class Rig {
 
     this.bodyMaterial = makeBodyMaterial();
     this._boneMaterials = new Map();
+    /** Last hit-flash level written, so an unlit machine costs nothing. */
+    this._flashed = 0;
 
     this._build(assembly.rootId, this.root, null);
     this.measure();
@@ -758,6 +765,30 @@ export class Rig {
   }
 
   /** 0..1 — how hard every blade on this machine is lit right now. */
+  /**
+   * Light the whole machine up for an instant, because it was just hit.
+   *
+   * One shared body material and one material per bone type means the whole
+   * thing takes a hit flash from two or three property writes — no per-mesh
+   * work, and it costs nothing when it is off.
+   *
+   * The emissive COLOUR is left set when the flash goes out; the intensity
+   * is what is taken to zero. An unlit emissive is the same as no emissive,
+   * and it saves writing the colour back every frame of a fight.
+   */
+  setHitFlash(amount, color = 0xffffff) {
+    const a = Math.max(0, amount);
+    if (a === 0 && this._flashed === 0) return this;
+    this._flashed = a;
+    this.bodyMaterial.emissive.setHex(color);
+    this.bodyMaterial.emissiveIntensity = a;
+    for (const m of this._boneMaterials.values()) {
+      m.emissive.setHex(color);
+      m.emissiveIntensity = a;
+    }
+    return this;
+  }
+
   setBladeGlow(amount) {
     for (const node of this.equipNodes) {
       if (!node.bladeGlow) continue;

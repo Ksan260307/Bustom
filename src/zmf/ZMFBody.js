@@ -6,6 +6,7 @@ import { AngularDynamics } from './AngularDynamics.js';
 import { AssistController } from './AssistController.js';
 import { RelativeSpaceMapper } from './RelativeSpace.js';
 import { EnvironmentInterference } from './EnvInterference.js';
+import { STAGGER, LANDING } from '../core/constants.js';
 
 // ============================================================
 //  ZMF §9 : the update flow, assembled.
@@ -28,6 +29,7 @@ const _tmp = new THREE.Vector3();
 const _flat = new THREE.Vector3();
 const _assist = new THREE.Vector3();
 const _frame = new THREE.Vector3();
+const _shove = new THREE.Vector3();
 
 export class ZMFBody {
   constructor(stats, world, opts = {}) {
@@ -57,6 +59,38 @@ export class ZMFBody {
 
     this.locked = false;
     this.target = null;
+
+    /**
+     * How badly the machine has just been rocked, 0..1, and which way it was
+     * thrown. A hit hard enough to matter takes the machine's thrust away
+     * for a moment: being shot has to cost something other than a number on
+     * a bar, or a fight is two machines trading damage while neither of them
+     * ever notices. See STAGGER.
+     */
+    this.stagger = 0;
+    this.staggerDir = new THREE.Vector3(0, 0, -1);
+    /**
+     * The last shove, in m/s, and how much of it took the machine off its
+     * feet. `knockback` is what was applied; `downed` is what it cost.
+     */
+    this.knockback = new THREE.Vector3();
+    /**
+     * Off its feet: 0..1, held for as long as the machine is in the air and
+     * bled off once it lands. While this is up the machine has no say in
+     * anything — that is the difference between being rocked and being
+     * thrown.
+     */
+    this.downed = 0;
+    /** One-frame event: how hard it was just thrown. For the effects layer. */
+    this.launched = 0;
+
+    /**
+     * A heavy machine planting itself after a drop, 0..1, decaying — and
+     * the one-frame event that started it, for whoever wants to throw the
+     * dust. See LANDING.
+     */
+    this.landing = 0;
+    this.landed = 0;
 
     this.setStats(stats, opts.rideHeight ?? 1.0);
   }
@@ -130,6 +164,13 @@ export class ZMFBody {
     this.dashFlash = 0;
     this.jumpCooldown = 0;
     this.locked = false;
+    this.stagger = 0;
+    this.staggerDir.set(0, 0, -1);
+    this.knockback.set(0, 0, 0);
+    this.downed = 0;
+    this.launched = 0;
+    this.landing = 0;
+    this.landed = 0;
   }
 
   get velocity() { return this.inertia.velocity; }
@@ -145,11 +186,118 @@ export class ZMFBody {
   }
 
   /**
+   * Knock the machine back along `dir`, and take its legs for a moment.
+   *
+   * The knock is an impulse rather than a scripted shove, so a machine hit
+   * while already moving keeps what it had — being shot mid-dash throws you
+   * further, which is the read a player wants from it.
+   *
+   * Worse never overwrites better: a second hit landing on top of the first
+   * deepens the stagger, it does not reset it to whatever the newest round
+   * happened to be worth.
+   *
+   * `power` is measured in full staggers and is NOT clamped on the way in.
+   * Past 1 the blow stops rocking the machine and starts throwing it: the
+   * shove grows, some of it turns upward, and the machine leaves the floor
+   * with no say in anything until it lands. Capping at 1 made every heavy
+   * weapon feel identical once it cleared the bar.
+   *
+   * @param {number} power  in full staggers; 1 is as rocked as it gets
+   * @param {THREE.Vector3} dir  world direction the machine is thrown
+   */
+  applyStagger(power, dir) {
+    if (!(power > 0)) return this;
+    const a = clamp01(power);
+    // Horizontal to begin with. A machine shot from above should stumble,
+    // not be driven into the floor, and one shot from below should stumble
+    // rather than take off — the knock is what puts it off its feet, and
+    // neither of those is a thing feet do. Straight up or down leaves
+    // nothing to lean on, so it goes over backwards instead.
+    _shove.copy(dir).setY(0);
+    if (_shove.lengthSq() < 1e-8) _shove.copy(this.forward).negate().setY(0);
+    if (_shove.lengthSq() < 1e-8) _shove.set(0, 0, -1);
+    _shove.normalize();
+    this.staggerDir.copy(_shove);
+    this.stagger = Math.max(this.stagger, a);
+
+    // Past a full stagger the blow starts LIFTING. The vertical share is
+    // what turns a shove into being thrown: the feet leave the floor, and
+    // everything the machine does from here is decided by where it was
+    // pointed when it was hit.
+    const over = clamp01(
+      (power - STAGGER.launchAt) / (STAGGER.launchFull - STAGGER.launchAt),
+    );
+    this.knockback.copy(_shove).multiplyScalar(STAGGER.knockback * a + STAGGER.launchPush * over);
+    if (over > 0) {
+      this.knockback.y += STAGGER.launchLift * over;
+      this.downed = Math.max(this.downed, over);
+      this.launched = Math.max(this.launched, over);
+    }
+    this.inertia.applyImpulse(this.knockback);
+    return this;
+  }
+
+  /**
+   * The machine has just come down. Decide whether that was a landing.
+   *
+   * Two gates, and both of them have to be open: how hard it fell, and how
+   * much machine there is to feel it. A feather dropped from a great height
+   * still only lands; a tank stepping off a kerb still only steps.
+   *
+   * @param {number} fall  downward speed at the moment of contact, m/s
+   */
+  _touchdown(fall) {
+    if (!(fall > LANDING.speed)) return 0;
+    const hard = clamp01((fall - LANDING.speed) / (LANDING.hard - LANDING.speed));
+    const heft = clamp01(
+      ((this.stats.weightClass ?? 0) - LANDING.weight) / (LANDING.full - LANDING.weight),
+    );
+    // A machine that was THROWN here did not choose to land, so it arrives
+    // badly however light it is: the weight gate is what tells a step down
+    // from a drop, and being blown across the arena is neither.
+    const amount = Math.max(hard * heft, hard * this.downed);
+    if (amount < 0.02) return 0;
+    this.landing = Math.max(this.landing, amount);
+    this.landed = amount;
+    return amount;
+  }
+
+  /**
    * @param {import('./InputManager.js').InputManager} input
    * @param {number} dt  already clamped by the caller
    */
   update(input, dt) {
     this.time += dt;
+    // A stagger bleeds off on its own. Nothing clears it early: riding it
+    // out is the cost of having been hit.
+    if (this.stagger > 0) {
+      this.stagger *= Math.exp(-dt / (STAGGER.seconds * 0.35));
+      if (this.stagger < 1e-3) this.stagger = 0;
+    }
+    // Being thrown is not on a clock: it lasts as long as the machine is in
+    // the air, and only starts wearing off once it has something to stand
+    // on again. You cannot shrug it off by waiting mid-flight.
+    //
+    // `launched` is NOT cleared here. It is a latch the effects layer takes
+    // and resets, the same way blows are: a throw resolved late in one step
+    // and read at the top of the next would otherwise be wiped by the very
+    // update that was supposed to hand it over.
+    // Settled, not merely "the smoothed contact figure says so". `grounded`
+    // takes about three steps to fall away, which is long enough for a
+    // machine to lose half of being thrown before its feet have left the
+    // floor — so the vertical speed has to have gone too.
+    const settled = this.env.grounded > 0.5 && Math.abs(this.inertia.velocity.y) < 1.5;
+    if (this.downed > 0 && settled) {
+      this.downed *= Math.exp(-dt / (STAGGER.riseSeconds * 0.4));
+      if (this.downed < 1e-3) this.downed = 0;
+    }
+    // The brace does the same, and the touchdown that caused it is an event
+    // rather than a state: it lasts exactly the step it happened on.
+    this.landed = 0;
+    if (this.landing > 0) {
+      this.landing *= Math.exp(-dt / (LANDING.seconds * 0.4));
+      if (this.landing < 1e-3) this.landing = 0;
+    }
     this.jumpCooldown = Math.max(0, this.jumpCooldown - dt);
     this.dashCooldown = Math.max(0, this.dashCooldown - dt);
     this.dashFlash = Math.max(0, this.dashFlash - dt * 4);
@@ -227,8 +375,17 @@ export class ZMFBody {
     }
 
     // ---------------------------------------------- 3. substep loop
+    // The touchdown is read out of the loop rather than from either side of
+    // it. `grounded` is smoothed over about three steps, so by the time it
+    // has climbed high enough to say "landed" the fall it landed from is
+    // long gone — the probe knows on the substep it happens, and only then.
     const sdt = dt / this.substeps;
-    for (let i = 0; i < this.substeps; i++) this._substep(input, sdt, boosting, wantsLift, wantsDown);
+    let fell = 0;
+    for (let i = 0; i < this.substeps; i++) {
+      this._substep(input, sdt, boosting, wantsLift, wantsDown);
+      fell = Math.max(fell, this.env.landingSpeed);
+    }
+    if (fell > 0) this._touchdown(fell);
 
     // ---------------------------------------------- attitude commit
     this.quaternion.copy(this.angular.quaternion);
@@ -318,6 +475,13 @@ export class ZMFBody {
     // Legs push against the floor: more of them means more traction, which
     // is where a walker's ground speed advantage over a hover build comes from.
     _thrust.multiplyScalar((1 + (boosting ? 1.05 : 0)) * (1 + grounded * this.grip * 0.55));
+    // Rocked machines do not drive. The thrust goes, not the velocity: a
+    // machine staggered at speed keeps sliding, which is what being knocked
+    // off your feet looks like from outside.
+    if (this.stagger > 0) _thrust.multiplyScalar(1 - this.stagger * STAGGER.authority);
+    // Thrown clean off its feet, the machine has nothing to push against
+    // and nothing to say about where it is going.
+    if (this.downed > 0) _thrust.multiplyScalar(1 - this.downed);
 
     // -------- external accelerations (bypass the mass term)
     _external.set(0, -this.world.gravity * this.gravityScale * (1 - grounded * 0.9), 0);
@@ -385,6 +549,9 @@ export class ZMFBody {
       canBoost: this.canBoost,
       relief: this.inertia.approachRelief ?? 0,
       impact: this.env.impactImpulse,
+      stagger: this.stagger,
+      downed: this.downed,
+      landing: this.landing,
     };
   }
 }

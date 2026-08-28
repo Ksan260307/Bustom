@@ -191,7 +191,7 @@ describe('PartLibrary', () => {
   });
 
   it('survives a corrupt store', () => {
-    store.setItem('brostom.parts.v1', '{not json');
+    store.setItem('blostom.parts.v1', '{not json');
     expect(() => new PartLibrary(store)).not.toThrow();
     expect(new PartLibrary(store).size).toBe(0);
   });

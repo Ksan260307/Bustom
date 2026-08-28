@@ -321,19 +321,6 @@ label.field span.val { font-family: var(--mono); color: var(--fg); }
   transition: width 0.2s;
 }
 
-.gaitbadge {
-  display: inline-block;
-  font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  padding: 3px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--line-strong);
-  color: var(--accent);
-  background: var(--accent-dim);
-}
-
 /* ---------------------------------------------------------- layout slots */
 
 #leftpanel  { top: 74px; left: 14px; width: 208px; max-height: calc(100% - 96px); }

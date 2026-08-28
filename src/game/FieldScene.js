@@ -3,6 +3,7 @@ import { World } from './World.js';
 import { Robot, SimpleAI } from './Robot.js';
 import { Projectiles } from './Weapons.js';
 import { Debris } from './Debris.js';
+import { Effects } from './Effects.js';
 import { Hud } from './Hud.js';
 import { PostFX } from './PostFX.js';
 import { Random, seedFromClock } from '../core/Random.js';
@@ -21,7 +22,15 @@ const ZOOM_PER_WHEEL_UNIT = 0.0013;
 const _v = new THREE.Vector3();
 const _corner = new THREE.Vector3();
 const _dir = new THREE.Vector3();
+const _cross = new THREE.Vector3();
 const _screenDir = new THREE.Vector2();
+/** Reused by `_machines`: this runs for every machine, every step. */
+const _machines = [];
+
+/** Below this, a machine is shuffling rather than running. */
+const DUST_MIN_SPEED = 3.5;
+/** One puff per this many metres of ground covered. */
+const DUST_EVERY_METRES = 1.6;
 
 /** Seconds between read-out redraws. Output only; never affects the fight. */
 const HUD_INTERVAL = 1 / 30;
@@ -102,6 +111,17 @@ export class FieldScene {
     this._buildTracerPool();
     this.projectiles = new Projectiles(this.scene, this.world);
     this.debris = new Debris(this.scene, this.world, { random: this.visualRandom });
+    /**
+     * Sparks, flashes, dust and the blots under the machines. Drawn from
+     * the same presentation stream as the wreckage, for the same reason.
+     */
+    this.effects = new Effects(this.scene, this.world, { random: this.visualRandom });
+    /**
+     * Metres run since each machine last kicked up dust (see `_groundDust`).
+     * Weak, because a machine that has been thrown away must not be kept
+     * alive by the dust it once raised.
+     */
+    this._dustBank = new WeakMap();
     /** Machines waiting to be put back together: { robot, at }. */
     this.pendingRespawns = [];
   }
@@ -114,6 +134,7 @@ export class FieldScene {
   load(assembly) {
     // The wreckage borrows the rig's geometry, so it cannot outlive the rig.
     this.debris.clear();
+    this.effects.clear();
     // Anything queued against the machine we are about to throw away is not
     // coming back; everything else is flushed by the respawn below.
     this.pendingRespawns = this.pendingRespawns.filter((j) => j.robot !== this.player);
@@ -266,6 +287,7 @@ export class FieldScene {
     const h = Math.max(0.35, -this.player.rig.restLowestY);
     this.projectiles.clear();
     this.debris.clear();
+    this.effects.clear();
     this._flushRespawns();
     this.player.wrecked = false;
     this.player.revive(new THREE.Vector3(0, h + 0.2, -18));
@@ -420,6 +442,7 @@ export class FieldScene {
       projectiles: this.projectiles,
       targets: this.enemies,
       lockTarget: this.lock?.robot ?? null,
+      effects: this.effects,
     }, dt);
 
     if (!p.weapons.hasWeapons) this._fireDefault(dt);
@@ -600,8 +623,132 @@ export class FieldScene {
     pos.needsUpdate = true;
 
     if (this.lock && this.lock.robot.alive) {
-      const miss = this.player.position.distanceTo(this.lock.robot.position) * 0.006;
-      if (this.random.unit() > miss) this.lock.robot.damage(1.6);
+      // The built-in gun is hitscan, so it cannot be dodged by moving out of
+      // the way of a round — there is no round. What it can be is HARDER to
+      // hit with while the target is crossing: distance, and how fast the
+      // target is moving across the line rather than along it. Standing
+      // still in front of it is still a mistake.
+      const t = this.lock.robot;
+      _dir.copy(t.position).sub(this.player.position);
+      const range = _dir.length();
+      if (range > 1e-4) _dir.multiplyScalar(1 / range);
+      _cross.copy(t.velocity).addScaledVector(_dir, -t.velocity.dot(_dir));
+      const miss = clamp01(range * 0.006 + _cross.length() * 0.045);
+      if (this.random.unit() > miss) t.damage(1.6, this.player.position);
+    }
+  }
+
+  /**
+   * Turn what everyone just took into something the player can read.
+   *
+   * Landing a hit and taking one are the two things a fight is made of, and
+   * both of them used to be invisible: a number moved on a bar somewhere.
+   * A mark on the machine that took it says the round connected; an arc
+   * round the reticle says which way the one that hit US came from —
+   * including from behind, which is exactly when it matters.
+   */
+  _readBlows() {
+    for (const robot of this._machines()) {
+      if (!robot.blows?.length) continue;
+      for (const blow of robot.blows) {
+        const weight = clamp01(blow.damage / (robot.maxHp * 0.14));
+        if (robot === this.player) {
+          if (blow.from) this.hud.markHurt(blow.from, weight);
+          // Being hit shakes the view, and harder for a heavier blow. Landing
+          // one already does; taking one used to do nothing at all.
+          this.hitPulse = Math.max(this.hitPulse, 0.25 + weight * 0.55);
+        } else {
+          this.hud.markHit(robot.position, weight, blow.fatal);
+        }
+      }
+      robot.blows.length = 0;
+    }
+  }
+
+  /** Everything with a body on the field right now, the player included. */
+  _machines() {
+    _machines.length = 0;
+    if (this.player) _machines.push(this.player);
+    for (const e of this.enemies) _machines.push(e);
+    return _machines;
+  }
+
+  /**
+   * Kick up dust from the feet of anything running on the floor.
+   *
+   * Billed per METRE travelled rather than per second, so the trail reads
+   * the same whether a machine is sprinting or trudging: a fixed rate puts
+   * the same number of puffs into a long stride as a short one, which makes
+   * a fast machine look like it is skating.
+   */
+  _groundDust(dt) {
+    for (const robot of this._machines()) {
+      if (!robot.alive) continue;
+      const body = robot.body;
+      _v.copy(robot.velocity); _v.y = 0;
+      const speed = _v.length();
+      if (body.env.grounded < 0.6 || speed < DUST_MIN_SPEED) {
+        this._dustBank.set(robot, 0);
+        continue;
+      }
+      let bank = (this._dustBank.get(robot) ?? 0) + speed * dt;
+      // A machine skating sideways is dragging its feet across the floor
+      // rather than picking them up: more dust, and more of it, which is
+      // most of what tells the player they are sliding rather than walking.
+      const skate = robot.animator?.slide ?? 0;
+      const step = DUST_EVERY_METRES * (1 - skate * 0.6);
+      while (bank >= step) {
+        bank -= step;
+        const groundY = this.world.groundHeight(robot.position.x, robot.position.z);
+        // Behind the machine, where the foot that just pushed off was.
+        _corner.copy(robot.position).addScaledVector(_v, -0.12 / Math.max(1, speed));
+        _corner.y = groundY;
+        this.effects.dust(_corner, _v, {
+          scale: Math.max(0.7, (robot.hitRadius ?? 1) * 1.5) * (1 + skate * 0.6),
+          life: 0.45 + skate * 0.25,
+        });
+      }
+      this._dustBank.set(robot, bank);
+    }
+  }
+
+  /**
+   * Throw the ring and the skirt of dust for anything that just planted —
+   * and for anything that has just been thrown off its feet.
+   */
+  _landings() {
+    for (const robot of this._machines()) {
+      if (!robot.alive) continue;
+      // Being blown away leaves the floor where the machine WAS: it is the
+      // last thing its feet did, and the only part of the throw the player
+      // can see from behind their own machine.
+      const thrown = robot.body.launched ?? 0;
+      if (thrown > 0) {
+        robot.body.launched = 0;          // taken
+        _v.copy(robot.position);
+        _v.y -= robot.body.rideHeight ?? 0;
+        this.effects.landing(_v, {
+          scale: Math.max(1.2, (robot.hitRadius ?? 1) * 2.4),
+          power: thrown,
+        });
+        this.effects.impact(robot.position, robot.body.knockback, {
+          scale: 0.7 + thrown * 0.9, color: 0xffd7a0, life: 0.3,
+        });
+        this.hitPulse = Math.max(this.hitPulse, 0.35 + thrown * 0.5);
+      }
+
+      const power = robot.body.landed ?? 0;
+      if (power <= 0) continue;
+      _v.copy(robot.position);
+      _v.y -= robot.body.rideHeight ?? 0;
+      this.effects.landing(_v, {
+        // Wide as the machine's stance, not as its body: the ring is the
+        // floor answering the feet, and the feet are not under the chest.
+        scale: Math.max(1.2, (robot.hitRadius ?? 1) * 2.2),
+        power,
+      });
+      // A landing you can feel is a landing that shook something.
+      if (robot === this.player) this.hitPulse = Math.max(this.hitPulse, power * 0.45);
     }
   }
 
@@ -652,8 +799,24 @@ export class FieldScene {
       if (hit.blast) {
         this.debris.blast?.(hit.position, hit.blast * 0.45);
         this.hitPulse = Math.max(this.hitPulse, 0.5);
+      } else {
+        // Everything else gets sparks, in the colour of the round that made
+        // them — including the ones that hit the floor. A shot that lands
+        // with no mark on it reads as a shot that missed, and then the
+        // player cannot tell the two apart.
+        this.effects.impact(hit.position, hit.dir, {
+          color: hit.color ?? 0xffffff,
+          scale: 0.55 + clamp01(hit.damage / 40) * 1.1,
+          life: hit.robot ? 0.26 : 0.18,
+        });
       }
     }
+
+    this._readBlows();
+    this._groundDust(dt);
+    this._landings();
+    this.effects.track(this._machines());
+    this.effects.update(dt);
 
     this._updateShields(dt);
   }
@@ -697,15 +860,21 @@ export class FieldScene {
       thrust: tel.thrust,
       grounded: tel.grounded,
       groundY: 0,
-      impact: tel.impact,
+      impact: Math.max(tel.impact, tel.stagger ?? 0),
       avoid,
       avoidUrgency: p.body.env.slideFactor,
     }, dt);
 
+    // ---- shadows and billboards
+    // Output only, and per FRAME rather than per step: neither one is read
+    // back by anything, and both are about where the camera is.
+    this.world.focusShadows(p.position);
+    this.effects.faceCamera(this.camera);
+
     // ---- feedback
     this.feedback.update({
       thrust: tel.thrust, jerk: tel.jerk, speed: tel.speed,
-      impact: Math.max(tel.impact, this.hitPulse), strain: tel.strain,
+      impact: Math.max(tel.impact, this.hitPulse, tel.stagger ?? 0), strain: tel.strain,
     }, dt);
 
     // ---- post uniforms: thrust direction projected to screen

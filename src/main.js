@@ -23,7 +23,7 @@ export const STEP = 1 / 60;
 export const MAX_CATCH_UP = 4;
 
 // ============================================================
-//  BroStom — application shell.
+//  BLOSTOM — application shell.
 //
 //  Four screens over one renderer:
 //    title  the front page, with your own machine turning on it
@@ -36,7 +36,9 @@ export const MAX_CATCH_UP = 4;
 //  placement, sculpting, colours, connections — works on a part too.
 // ============================================================
 
-const SAVE_KEY = 'brostom.assembly.v1';
+const SAVE_KEY = 'blostom.assembly.v1';
+/** What it was called before the rename. Read as a fallback, never written. */
+const SAVE_KEY_WAS = 'brostom.assembly.v1';
 
 const TOOL_KEYS = {
   KeyV: TOOL.SELECT,
@@ -64,12 +66,14 @@ const NUDGE = {
 };
 /** Alt gives a step finer than the placement grid, for the last millimetre. */
 const FINE_STEP = 0.05;
-const KEY_SAVE = 'brostom.keys.v1';
+const KEY_SAVE = 'blostom.keys.v1';
+/** What it was called before the rename. Read as a fallback, never written. */
+const KEY_SAVE_WAS = 'brostom.keys.v1';
 
 /** Only the rows the player changed are stored, so new defaults still land. */
 function loadBindings() {
   try {
-    const raw = localStorage.getItem(KEY_SAVE);
+    const raw = localStorage.getItem(KEY_SAVE) ?? localStorage.getItem(KEY_SAVE_WAS);
     if (raw) return { ...DEFAULT_BINDINGS, ...JSON.parse(raw) };
   } catch (e) {
     console.warn('key bindings could not be read, using the defaults', e);
@@ -248,7 +252,7 @@ export class App {
 
   _loadInitial() {
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
+      const raw = localStorage.getItem(SAVE_KEY) ?? localStorage.getItem(SAVE_KEY_WAS);
       if (raw) return Assembly.fromJSON(JSON.parse(raw));
     } catch (e) {
       console.warn('saved build could not be read, falling back to a preset', e);
@@ -265,7 +269,7 @@ export class App {
   }
 
   load() {
-    const raw = localStorage.getItem(SAVE_KEY);
+    const raw = localStorage.getItem(SAVE_KEY) ?? localStorage.getItem(SAVE_KEY_WAS);
     if (!raw) { this.ui.toastMsg('保存データがありません'); return; }
     this._adopt(Assembly.fromJSON(JSON.parse(raw)));
     this.ui.toastMsg('読み込みました');
@@ -275,7 +279,7 @@ export class App {
     const blob = new Blob([JSON.stringify(this.assembly.toJSON())], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `${this.assembly.name.replace(/\s+/g, '_') || 'robo'}.brostom.json`;
+    a.download = `${this.assembly.name.replace(/\s+/g, '_') || 'robo'}.blostom.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
@@ -861,8 +865,8 @@ export class App {
   }
 }
 
-if (typeof window !== 'undefined' && !window.__BROSTOM_NO_AUTOBOOT) {
+if (typeof window !== 'undefined' && !window.__BLOSTOM_NO_AUTOBOOT) {
   window.addEventListener('DOMContentLoaded', () => {
-    window.__brostom = new App();
+    window.__blostom = new App();
   });
 }

@@ -751,6 +751,75 @@ describe('CameraDynamics', () => {
     expect(c.gaze.x).toBeGreaterThan(gazeX);
   });
 
+  // ---------------------------------------------------------- fighting
+
+  /**
+   * Settle the camera on a machine at the origin with a target `range`
+   * metres down +Z, and report where it ended up.
+   */
+  const fightAt = (range, over = {}) => {
+    const c = new CameraDynamics(cam());
+    c.fitTo(STATS);
+    const shot = p({
+      aimPoint: range === null ? null : V(0, 0, range),
+      assistAuthority: 1,
+      ...over,
+    });
+    for (let i = 0; i < 400; i++) c.update(shot, 1 / 60);
+    return c;
+  };
+
+  it('gets off the firing line so the machine is not standing in the way', () => {
+    // Straight down the line the machine sits directly in front of what it
+    // is shooting at, and hides both it and every round crossing the gap.
+    const c = fightAt(30);
+    const off = Math.abs(c.position.x);
+    expect(off, 'a pace to the side').toBeGreaterThan(1.5);
+    expect(c.position.z, 'still behind the machine').toBeLessThan(0);
+    expect(c.position.y, 'and above it').toBeGreaterThan(1.5);
+  });
+
+  it('looks down the gap rather than at either end of it', () => {
+    const c = fightAt(30);
+    expect(c.gaze.z, 'past the machine').toBeGreaterThan(3);
+    expect(c.gaze.z, 'but short of the target').toBeLessThan(30 * 0.6);
+  });
+
+  it('lines the boom up behind the firing line, not behind the nose', () => {
+    // Strafing, the machine's nose and the direction it is shooting come
+    // apart — and it is the firing line the player needs to see down.
+    const c = fightAt(30, { forward: V(1, 0, 0), velocity: V(12, 0, 0) });
+    expect(c.position.z, 'behind the target line').toBeLessThan(-3);
+    expect(Math.abs(c.position.z), 'and not off to the side of it')
+      .toBeGreaterThan(Math.abs(c.position.x) * 0.8);
+  });
+
+  it('opens the boom out as the fight gets longer', () => {
+    const near = fightAt(8);
+    const far = fightAt(70);
+    const out = (c) => Math.hypot(c.position.x, c.position.z);
+    expect(out(far)).toBeGreaterThan(out(near) * 1.2);
+  });
+
+  it('goes back to being a chase cam when the lock drops', () => {
+    const c = fightAt(30);
+    expect(c.engage).toBeGreaterThan(0.9);
+    const fighting = Math.abs(c.position.x);
+    for (let i = 0; i < 400; i++) c.update(p(), 1 / 60);
+    expect(c.engage).toBeLessThan(0.05);
+    expect(Math.abs(c.position.x), 'back on the tail').toBeLessThan(fighting * 0.4);
+    expect(c.position.z).toBeLessThan(0);
+  });
+
+  it('the framing does not flicker when the assist lets go', () => {
+    // The assist backs off the moment the player looks away by hand. A
+    // camera that reframed every time they did would be unusable, so the
+    // framing keys off whether there IS a target, not off how hard the
+    // assist is pulling on it.
+    const c = fightAt(30, { assistAuthority: 0 });
+    expect(c.engage).toBeGreaterThan(0.9);
+  });
+
   it('swings the boom round the machine on demand', () => {
     const c = new CameraDynamics(cam());
     c.fitTo(STATS);

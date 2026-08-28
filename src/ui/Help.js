@@ -1,6 +1,6 @@
 import { h, resizable } from './dom.js';
 import {
-  BONE_META, EQUIP_META, WEAPON_TYPES, SYSTEM_TYPES, GAIT_LABEL, VOX_LEVELS,
+  BONE_META, EQUIP_META, WEAPON_TYPES, SYSTEM_TYPES, VOX_LEVELS,
   SIZE_MIN, SIZE_MAX, BONE_GAIN_MAX,
 } from '../core/constants.js';
 import { SHAPE_GROUPS, SHAPES } from '../core/Shapes.js';
@@ -42,7 +42,7 @@ export class Help {
 
     this.box = h('div', { class: 'keybox helpbox' },
       h('div', { class: 'keyhead' },
-        h('div', { class: 'brand' }, 'HELP', h('small', {}, 'BroStom')),
+        h('div', { class: 'brand' }, 'HELP', h('small', {}, 'BLOSTOM')),
         h('div', { class: 'spacer' }),
         h('button', { class: 'icon', title: '閉じる', onClick: () => this.close() }, '✕'),
       ),
@@ -209,9 +209,10 @@ export class Help {
     return [
       h('h4', {}, '4種類の属性が、動きを決める'),
       keyTable(Object.entries(BONE_META).map(([, m]) => [m.label, m.blurb ?? ''])),
-      para('脚の本数で歩き方が決まります：',
-        Object.entries(GAIT_LABEL).map(([, v]) => v).join(' / '), '。',
-        h('br'), '腿と脛のようにボーンを繋いだ場合も、脚は1本と数えます。'),
+      para('脚の本数で歩き方が変わります。',
+        h('br'), '腿と脛のようにボーンを繋いだ場合も、脚は1本と数えます。',
+        h('br'), '横にダッシュ以上の速さで流れているときは、',
+        h('b', {}, '歩かずに脚を寝かせて滑ります'), '。'),
 
       h('h4', {}, '肩・股関節・腰は「効き」と「ずらし」で作る'),
       para('ボーンの種類は増やさず、どのボーンにも2つの数値を持たせてあります。'),
