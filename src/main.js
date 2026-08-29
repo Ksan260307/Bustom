@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Assembly, PRESETS } from './core/Assembly.js';
+import { Assembly, PRESETS, starterParts } from './core/Assembly.js';
 import { EditorScene, TOOL, PART_TOOLS } from './editor/EditorScene.js';
 import { History } from './editor/History.js';
 import { PartLibrary } from './editor/PartLibrary.js';
@@ -39,6 +39,37 @@ export const MAX_CATCH_UP = 4;
 const SAVE_KEY = 'blostom.assembly.v1';
 /** What it was called before the rename. Read as a fallback, never written. */
 const SAVE_KEY_WAS = 'brostom.assembly.v1';
+
+/**
+ * Where the machine is kept between one session and the next, without
+ * anybody pressing anything.
+ *
+ * There was no autosave at all: an hour of work lived only in a tab, and a
+ * crash, a reload or a stray click on the preset list took all of it. This
+ * is a safety net, not the save button — it is written over constantly and
+ * is only ever offered back when the deliberate save is older than it.
+ */
+const DRAFT_KEY = 'blostom.draft.v1';
+/** How long the editor has to be quiet before the draft is written. */
+const DRAFT_AFTER = 1.5;
+/**
+ * How many times the last write's own cost to wait before writing again.
+ *
+ * Serialising a machine costs 55ms at the default sculpting resolution and
+ * nearly TWO SECONDS at the finest one — the voxel grids run-length encode
+ * to a few kilobytes, but the encoder still walks a million cells a block.
+ * A safety net that stops the editor dead for two seconds every time you
+ * pause is not a safety net, it is the thing you would turn off.
+ *
+ * So it pays for itself: the more the last write cost, the longer until the
+ * next one. Cheap documents keep the 1.5s promise; expensive ones back off
+ * to half a minute, which is still far better than the nothing there was.
+ */
+const DRAFT_BACKOFF = 20;
+
+/** Named slots, so more than one machine can be kept. */
+const SLOTS_KEY = 'blostom.slots.v1';
+export const SLOT_LIMIT = 8;
 
 const TOOL_KEYS = {
   KeyV: TOOL.SELECT,
@@ -100,6 +131,9 @@ export class App {
     this.input = new InputManager(this.canvas, { bindings: loadBindings() });
     this.feedback = new KineticFeedback();
     this.library = new PartLibrary();
+    // A shelf that starts empty is invisible to anyone who has not already
+    // built something worth saving, so it starts with a few limbs on it.
+    this.library.seed(1, starterParts());
     this.clipboard = [];
 
     this.mode = 'edit';
@@ -149,12 +183,36 @@ export class App {
     this._bindGlobalKeys();
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
+    /**
+     * Closing the tab with unsaved work says so.
+     *
+     * The browser decides the wording; all we get to say is that there is
+     * something to lose. Without this the tab simply went, and with no
+     * autosave either, so did the machine.
+     */
+    this._onLeave = (e) => {
+      if (!this.dirty) return undefined;
+      e.preventDefault();
+      e.returnValue = '';
+      return '';
+    };
+    window.addEventListener('beforeunload', this._onLeave);
     this.resize();
 
     this.clock = new THREE.Clock();
+    /** True while there are changes nobody has saved. */
+    this.dirty = false;
+    /** Seconds until the safety-net draft is written. */
+    this._draftIn = 0;
+    /** How long the next draft may make us wait, in seconds. */
+    this._draftDue = DRAFT_AFTER;
+    /** What the last one actually cost. */
+    this._draftCost = 0;
     /** Real time owed to the simulation but not yet stepped. */
     this.stepBank = 0;
     this.stepsThisFrame = 0;
+    // The safety net, offered once, on the way in.
+    this.ui.offerDraft?.();
     this.renderer.setAnimationLoop(() => this.frame());
   }
 
@@ -162,12 +220,24 @@ export class App {
     const ed = new EditorScene({ renderer: this.renderer, canvas: this.canvas, post: this.post });
     ed.onChange = (stats) => this.ui?.renderStats(stats);
     ed.onSelect = (parts) => this.ui?.renderInspector(parts);
-    ed.onBeforeChange = (label) => this.pushHistory(label);
+    ed.onBeforeChange = (label) => { this.pushHistory(label); this.touch(); };
     // A drag that lays a row of parts is ONE change, the way a slider drag is.
     ed.onGesture = (open) => (open ? this.beginGesture() : this.endGesture());
     ed.onHint = (hint) => this.ui?.showPlacementHint?.(hint);
     ed.onWorkPlane = (y) => this.ui?.showWorkPlane?.(y);
-    ed.onReject = (msg) => this.ui?.toastMsg(msg);
+    ed.onMarquee = (rect) => this.ui?.showMarquee?.(rect);
+    ed.onRecipes = (list) => this.ui?.renderRecipes?.(list);
+    ed.onConfirm = (_kind, req) => this.ui?.confirmAction?.(req);
+    ed.onColor = (i) => this.ui?.syncColor?.(i);
+    ed.onHidden = () => this.ui?.syncVisibility?.(ed.hidden.size, ed.locked.size);
+    ed.onSelectionSets = (names) => this.ui?.renderSelectionSets?.(names);
+    ed.onLocked = () => this.ui?.syncVisibility?.(ed.hidden.size, ed.locked.size);
+    ed.onReject = (msg, blame = null) => {
+      this.ui?.toastMsg(msg);
+      // And WHICH parts are in the way. "武器は4枚までです" is a rule; the
+      // four plates it is talking about are the answer.
+      if (blame?.length) ed.select(blame);
+    };
     return ed;
   }
 
@@ -266,8 +336,20 @@ export class App {
     return entries.length;
   }
 
-  pasteClipboard() {
+  /**
+   * @param {boolean} atCursor put it on the face under the pointer instead
+   *   of beside the part it was copied from
+   */
+  pasteClipboard(atCursor = false) {
     if (!this.clipboard.length) { this.ui.toastMsg('クリップボードが空です'); return 0; }
+    if (atCursor) {
+      const put = this.editor.pasteHere(this.clipboard);
+      if (put.length) {
+        this.ui.renderPalette();
+        this.ui.toastMsg(`${put.length} パーツをカーソルの面に貼り付けました`);
+      }
+      return put.length;
+    }
     this.pushHistory('貼り付け');
     const made = this.editor.paste(this.clipboard);
     if (!made.length) { this.ui.toastMsg('貼り付けできませんでした'); return 0; }
@@ -290,12 +372,154 @@ export class App {
     return PRESETS.biped.build();
   }
 
-  save() {
+  save(slot = null) {
     if (this.mode === 'part') { this.savePart(); return; }
     this.mainAssembly.prunePalette();
-    localStorage.setItem(SAVE_KEY, JSON.stringify(this.mainAssembly.toJSON()));
+    const doc = this.mainAssembly.toJSON();
+    localStorage.setItem(SAVE_KEY, JSON.stringify(doc));
+    if (slot !== null) this._writeSlot(slot, doc);
+    this.dirty = false;
     this.ui.renderPalette();
+    this.ui.syncDirty?.(false);
     this.ui.toastMsg(`「${this.mainAssembly.name}」を保存しました`);
+  }
+
+  /**
+   * Mark the document as changed, and start the clock on the draft.
+   *
+   * Called from the same place undo entries come from, so anything worth
+   * being able to take back is also worth not losing.
+   */
+  touch() {
+    this.dirty = true;
+    // Never sooner than the last write earned. Restarting the clock on every
+    // keystroke is right; restarting it to 1.5s on a document that takes two
+    // seconds to write is not.
+    if (this._draftIn <= 0) this._draftIn = this._draftDue;
+    this.ui?.syncDirty?.(true);
+    return this;
+  }
+
+  /** Write the safety net, if it is owed. Driven from the frame clock. */
+  tickDraft(dt) {
+    if (this._draftIn <= 0) return this;
+    this._draftIn -= dt;
+    if (this._draftIn > 0) return this;
+    this._draftIn = 0;
+    // Nothing has changed since the last one, so there is nothing to keep.
+    if (!this.dirty) return this;
+    // Never in the middle of a stroke: the one thing worse than a pause is
+    // a pause while the brush is down.
+    if (this.editor?.painting) { this._draftIn = DRAFT_AFTER; return this; }
+
+    const began = performance.now();
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({
+        at: Date.now(), json: this.mainAssembly.toJSON(),
+      }));
+    } catch (e) {
+      // A full or private store is not a reason to interrupt anybody.
+    }
+    // What it cost decides when it may happen again.
+    this._draftCost = (performance.now() - began) / 1000;
+    this._draftDue = Math.max(DRAFT_AFTER, this._draftCost * DRAFT_BACKOFF);
+    return this;
+  }
+
+  /** The unsaved draft, if there is one newer than the last real save. */
+  draft() {
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY);
+      if (!raw) return null;
+      const d = JSON.parse(raw);
+      return d?.json ? d : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Take the draft back up where it was left. */
+  restoreDraft() {
+    const d = this.draft();
+    if (!d) { this.ui.toastMsg('復元できる作業がありません'); return false; }
+    this._adopt(Assembly.fromJSON(d.json));
+    this.ui.toastMsg('前回の続きから復元しました');
+    return true;
+  }
+
+  /** Throw the draft away, once its offer has been declined. */
+  forgetDraft() {
+    try { localStorage.removeItem(DRAFT_KEY); } catch (e) { /* nothing to do */ }
+    return this;
+  }
+
+  // ---------------------------------------------------------- named slots
+
+  /** Every named save, newest first. */
+  slots() {
+    try {
+      const raw = localStorage.getItem(SLOTS_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      return Array.isArray(list) ? list : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  _writeSlot(slot, doc) {
+    const list = this.slots().filter((x) => x.id !== slot);
+    list.unshift({ id: slot, name: this.mainAssembly.name, at: Date.now(), json: doc });
+    // A lid on it: this is browser storage, and a machine at the finest
+    // sculpting resolution is not small.
+    try {
+      localStorage.setItem(SLOTS_KEY, JSON.stringify(list.slice(0, SLOT_LIMIT)));
+    } catch (e) {
+      this.ui.toastMsg('保存できませんでした（容量不足）');
+    }
+    return this;
+  }
+
+  /** Keep the current machine under a name of its own. */
+  saveAs(name) {
+    const clean = String(name ?? '').trim() || this.mainAssembly.name;
+    this.mainAssembly.name = clean.toUpperCase();
+    this.ui.syncName(this.mainAssembly.name);
+    this.save(`s${Date.now().toString(36)}`);
+    this.ui.renderSlots?.();
+    return this;
+  }
+
+  /** Open one of the named saves. */
+  openSlot(id) {
+    const entry = this.slots().find((x) => x.id === id);
+    if (!entry) { this.ui.toastMsg('見つかりません'); return false; }
+    if (!this.confirmDiscard(`「${entry.name}」を開きます`)) return false;
+    this.pushHistory(`「${entry.name}」を開く`);
+    this._adopt(Assembly.fromJSON(entry.json), { keepHistory: true });
+    this.ui.toastMsg(`「${entry.name}」を開きました`);
+    return true;
+  }
+
+  /** Forget one of the named saves. */
+  deleteSlot(id) {
+    const list = this.slots().filter((x) => x.id !== id);
+    try { localStorage.setItem(SLOTS_KEY, JSON.stringify(list)); } catch (e) { /* full */ }
+    this.ui.renderSlots?.();
+    return this;
+  }
+
+  /**
+   * Ask before throwing the current machine away.
+   *
+   * Loading a preset used to replace an hour of work with no question asked
+   * AND clear the history, so undo could not bring it back either.
+   */
+  confirmDiscard(what = '') {
+    if (!this.dirty) return true;
+    const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
+      ? window.confirm(`保存していない変更があります。${what ? `${what}。` : ''}破棄しますか？`)
+      : true;
+    return ok;
   }
 
   load() {
@@ -332,10 +556,15 @@ export class App {
     inp.click();
   }
 
-  loadPreset(key) {
+  loadPreset(key, { ask = true } = {}) {
     const p = PRESETS[key];
     if (!p) return;
-    this._adopt(p.build());
+    if (ask && !this.confirmDiscard(`${p.label} を読み込みます`)) return;
+    // Recorded first, and the history KEPT. A preset arriving over an hour
+    // of work has to be recoverable, and "a deliberate fresh start" is not
+    // a good enough reason to make one keystroke unrecoverable.
+    this.pushHistory(`${p.label} を読み込む`);
+    this._adopt(p.build(), { keepHistory: true });
     this.ui.toastMsg(`${p.label} を読み込みました`);
   }
 
@@ -395,17 +624,38 @@ export class App {
     return entry;
   }
 
-  /** Push the current machine selection into the library as a reusable part. */
+  /**
+   * Push the current machine selection into the library as a reusable part.
+   *
+   * A selection of several parts saves the topmost one, which takes its
+   * children with it — that is what a "part" is here. Saving several
+   * unrelated parts as one thing is not possible and used to fail silently
+   * by saving whichever happened to be last clicked.
+   */
   saveSelectionAsPart() {
-    const id = this.mainEditor.selected;
-    if (!id) { this.ui.toastMsg('保存するパーツを選んでください'); return null; }
+    const ids = [...this.mainEditor.selection];
+    if (!ids.length) { this.ui.toastMsg('保存するパーツを選んでください'); return null; }
+
+    // The one nearest the core, so a whole limb saves as a whole limb rather
+    // than as the fingertip somebody happened to click last.
+    const depth = (id) => {
+      let d = 0;
+      for (let p = this.mainAssembly.get(id); p?.parent; p = this.mainAssembly.get(p.parent)) d++;
+      return d;
+    };
+    const id = ids.slice().sort((a, b) => depth(a) - depth(b))[0];
     const doc = this.mainAssembly.extract(id);
     if (!doc) return null;
     const part = this.mainAssembly.get(id);
-    doc.name = `${this.mainAssembly.name}-${part.kind === 'bone' ? 'BONE' : 'PART'}`.toUpperCase();
+    const label = part.label && part.label !== 'BLOCK' ? part.label
+      : part.kind === 'bone' ? 'BONE' : 'PART';
+    doc.name = `${this.mainAssembly.name}-${label}`.toUpperCase();
     const entry = this.library.put(doc.name, doc);
     this.ui.renderLibrary();
-    this.ui.toastMsg(`パーツ庫に「${entry.name}」を保存しました`);
+    // How much of the selection actually went, because "save these six" and
+    // "save this one and its five children" look identical on screen.
+    const took = doc.size;
+    this.ui.toastMsg(`パーツ庫に「${entry.name}」を保存しました（${took} パーツ）`);
     return entry;
   }
 
@@ -558,6 +808,7 @@ export class App {
     this.editor.colorIndex = i;
     this.paintSelected(i);
     this.ui.syncColor(i);
+    this.ui.noteColor(i);
   }
 
   /** Called continuously while the colour wheel is dragged. */
@@ -569,11 +820,23 @@ export class App {
     // palette, and has to do the same thing. Two ways to pick a colour that
     // behave differently is one of them being wrong.
     this.paintSelected(idx);
-    this.ui.renderPalette();
+    this.ui.noteColor(idx);
   }
 
-  setVoxResolution(n) {
+  setVoxResolution(n, { force = false } = {}) {
     if (this.assembly.voxRes === n) return;
+    // Coarser means every grid is resampled DOWN, and detail that goes does
+    // not come back by setting it fine again.
+    const carved = [...this.assembly.parts.values()]
+      .filter((p) => p.vox?.isCarved(p.shape)).length;
+    if (carved && n < this.assembly.voxRes && !force) {
+      this.ui.confirmAction({
+        message: `加工したブロックが${carved}個あります。粗くすると細部が失われます。`,
+        accept: () => this.setVoxResolution(n, { force: true }),
+        cancel: () => this.ui.syncResolution(this.assembly.voxRes),
+      });
+      return;
+    }
     this.pushHistory('加工の細かさ');
     this.assembly.setVoxResolution(n);
     this.editor.rebuild();
@@ -659,7 +922,9 @@ export class App {
     this.mode = mode;
 
     if (FIELD_MODES.has(previous)) this.field.exit();
-    if (previous === 'edit') this.mainEditor.exit();
+    // Leaving the editor keeps the view and the selection, so a trip to the
+    // field to try something does not cost the framing you set up to work in.
+    if (previous === 'edit') { this._keepEditorView(); this.mainEditor.exit(); }
     if (previous === 'part') this.partEditor.exit();
     if (previous === 'title') this.titleScene.exit();
 
@@ -683,6 +948,8 @@ export class App {
     } else {
       this.hudCanvas.classList.add('hidden');
       this.editor.enter();
+      // Back where you were looking, with what you had picked still picked.
+      if (mode === 'edit') this._restoreEditorView();
       this.ui.syncName(this.assembly.name);
       this.ui.syncResolution(this.assembly.voxRes);
       this.ui.syncTool(this.editor.tool);
@@ -737,8 +1004,39 @@ export class App {
   }
 
   /** Back to the front page from wherever you are. */
+  /**
+   * Remember where the editor was looking, and what was picked.
+   *
+   * A trip to the field to try something and back rebuilt the view from
+   * nothing, so every test cost the framing you had set up to work in.
+   */
+  _keepEditorView() {
+    const ed = this.editor;
+    this._editorView = {
+      pos: ed.camera.position.toArray(),
+      target: ed.controls.target.toArray(),
+      selection: [...ed.selection],
+    };
+    return this;
+  }
+
+  _restoreEditorView() {
+    const v = this._editorView;
+    const ed = this.editor;
+    if (!v) return this;
+    ed.camera.position.fromArray(v.pos);
+    ed.controls.target.fromArray(v.target);
+    ed.controls.update();
+    const alive = v.selection.filter((id) => this.assembly.get(id));
+    if (alive.length) ed.select(alive);
+    return this;
+  }
+
   goTitle() {
     this.ui.result.close();
+    // Whatever the fight was doing, it is not doing it any more.
+    this.field.setPaused(false);
+    this.feedback.suspend();
     this.setMode('title');
     return this;
   }
@@ -813,7 +1111,9 @@ export class App {
           case 'KeyY': e.preventDefault(); this.redo(); break;
           case 'KeyC': e.preventDefault(); this.copySelected(); break;
           case 'KeyX': e.preventDefault(); this.copySelected({ cut: true }); break;
-          case 'KeyV': e.preventDefault(); this.pasteClipboard(); break;
+          // Shift aims the paste at the cursor: moving a detail to the
+          // other end of the machine was paste, drag, then re-hang.
+          case 'KeyV': e.preventDefault(); this.pasteClipboard(e.shiftKey); break;
           case 'KeyA': e.preventDefault(); this.editor.selectAll(); break;
           case 'KeyS': e.preventDefault(); this.save(); break;
           case 'KeyD': e.preventDefault(); this.editor.duplicateSelected(); break;
@@ -840,11 +1140,23 @@ export class App {
         if (e.code === 'Period') { e.preventDefault(); this.editor.frameSelection(); return; }
         if (e.code === 'Home') { e.preventDefault(); this.editor.frameAll(); return; }
 
+        // Turn a part round where it stands, rather than making a mirrored
+        // copy of it on the other side. Taken BEFORE the tool keys, because
+        // F is one of them and switching tools is not what Shift+F means.
+        if (e.code === 'KeyF' && e.shiftKey) {
+          e.preventDefault();
+          this.editor.flipSelected('x');
+          return;
+        }
+
         const tool = TOOL_KEYS[e.code];
         if (tool) { e.preventDefault(); this.setTool(tool); }
         if (e.code === 'KeyT') { e.preventDefault(); this.setGizmoMode('translate'); }
         if (e.code === 'KeyR') {
           e.preventDefault();
+          // Ctrl+R does the last thing again: placing eight of something was
+          // eight trips to the panel for a decision already made once.
+          if (e.ctrlKey || e.metaKey) { this.editor.repeatLast(); return; }
           // With a part in hand, R turns the part rather than the gizmo:
           // most of the shapes have a front and a top, and until now the
           // only way to point one was to place it and then type an angle
@@ -925,6 +1237,7 @@ export class App {
    */
   frame({ paint = true } = {}) {
     const elapsed = Math.min(this.clock.getDelta(), 0.25);
+    this.tickDraft(elapsed);
 
     if (this.mode === 'title') {
       // A turntable and a menu. Nothing here is a fight, so it simply
@@ -973,6 +1286,7 @@ export class App {
   dispose() {
     this.renderer.setAnimationLoop(null);
     window.removeEventListener('resize', this._onResize);
+    window.removeEventListener('beforeunload', this._onLeave);
     window.removeEventListener('keydown', this._onKey);
     document.removeEventListener('pointerlockchange', this._onLock);
     this.mainEditor.dispose();
@@ -985,7 +1299,7 @@ export class App {
   }
 }
 
-if (typeof window !== 'undefined' && !window.__BLOSTOM_NO_AUTOBOOT) {
+if (typeof window !== 'undefined') {
   window.addEventListener('DOMContentLoaded', () => {
     window.__blostom = new App();
   });

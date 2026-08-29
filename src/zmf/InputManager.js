@@ -25,8 +25,12 @@ const PX_TO_ORBIT = 0.0034;
 export const DEFAULT_BINDINGS = {
   forward: ['KeyW', 'ArrowUp'],
   back: ['KeyS', 'ArrowDown'],
-  left: ['KeyA', 'ArrowLeft'],
-  right: ['KeyD', 'ArrowRight'],
+  // The horizontal arrows moved the machine sideways, which WASD already
+  // does. They move the LOCK now: with several opponents on the field,
+  // choosing between them was a key that took whichever one the camera
+  // happened to favour.
+  left: ['KeyA'],
+  right: ['KeyD'],
   up: ['Space'],
   down: ['ShiftLeft', 'ShiftRight'],
   boost: ['KeyE'],
@@ -36,6 +40,8 @@ export const DEFAULT_BINDINGS = {
   lock: ['KeyF'],
   scope: ['KeyQ'],
   cycleTarget: ['Tab'],
+  lockLeft: ['ArrowLeft'],
+  lockRight: ['ArrowRight'],
   layerA: ['Digit1'],
   layerB: ['Digit2'],
   layerC: ['Digit3'],
@@ -47,7 +53,11 @@ export const DEFAULT_BINDINGS = {
 /** How the key-config screen groups and names them. */
 export const ACTION_GROUPS = [
   { label: '移動', actions: ['forward', 'back', 'left', 'right', 'up', 'down', 'boost'] },
-  { label: '戦闘', actions: ['fire', 'weaponNext', 'weaponPrev', 'scope', 'lock', 'cycleTarget'] },
+  {
+    label: '戦闘',
+    actions: ['fire', 'weaponNext', 'weaponPrev', 'scope', 'lock', 'cycleTarget',
+      'lockLeft', 'lockRight'],
+  },
   { label: 'カメラ', actions: ['camera'] },
   { label: 'システム', actions: ['layerA', 'layerB', 'layerC', 'reset'] },
 ];
@@ -66,6 +76,8 @@ export const ACTION_LABEL = {
   scope: 'スコープ (押しながら)',
   lock: 'ロックオン',
   cycleTarget: 'ターゲット切替',
+  lockLeft: 'ロックを左の敵へ',
+  lockRight: 'ロックを右の敵へ',
   camera: 'カメラを回す (押しながら)',
   layerA: 'レイヤー A',
   layerB: 'レイヤー B',

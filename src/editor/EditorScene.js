@@ -10,7 +10,7 @@ import { PostFX } from '../game/PostFX.js';
 import { VoxelBlock } from '../core/VoxelBlock.js';
 import {
   SIZE_STEP, SIZE_MAX, EQUIP, EQUIP_META, EQUIP_THICKNESS, EQUIP_SIZE_DEFAULT,
-  FACE_NORMAL, FACE_AXIS, WEAPON_SLOTS,
+  FACE_NORMAL, FACE_AXIS, WEAPON_SLOTS, BONE,
 } from '../core/constants.js';
 
 // ============================================================
@@ -112,14 +112,48 @@ export class EditorScene {
     this.brushPercent = 6;
     this.newBlockSize = [1, 1, 1];
     this.newBlockShape = SHAPE_DEFAULT;
-    this.boneOpts = { length: 3, radius: 0.22, limit: 70, invert: false };
+    // Measured off the machines people actually build: legs run 1.0–1.6,
+    // arms 0.9–1.1, and the old default of 3.0 was longer than any of them
+    // — so every bone anybody placed had to be shortened before it was
+    // useful, which is a default that is wrong by construction.
+    this.boneOpts = { length: 1.2, radius: 0.22, limit: 45, invert: false };
 
     /** @type {Set<string>} every selected part id. */
     this.selection = new Set();
     this.gizmoMode = 'translate';
+    /** Whether the gizmo's arrows follow the world or the part. */
+    this.gizmoSpace = 'world';
     this.snap = true;
     /** How coarse the placement grid is, in metres. */
     this.snapStep = SIZE_STEP;
+    /** And how coarse the rotation gizmo is, in degrees. */
+    this.turnStep = 15;
+    /**
+     * A plane that cuts the machine open, and the axis it cuts along.
+     *
+     * Everything past the first layer of armour was unreachable and, worse,
+     * invisible: a block buried in the chest could not be seen at all, so
+     * nobody could tell whether it was still in there carrying weight.
+     */
+    this.section = null;
+    this.sectionAxis = 'z';
+    /** The whole machine turned to glass, for the same reason. */
+    this.seeThrough = false;
+    /**
+     * How far off the face a new part sits.
+     *
+     * Everything landed flush, which is right for a hull and wrong for a
+     * row of fins or a gap somebody wants to see through — and there was no
+     * way to ask for one short of placing it and nudging.
+     */
+    this.placeGap = 0;
+    /**
+     * A round brush rather than the square one.
+     *
+     * The ordinary brush measures the longest side, so every cut has hard
+     * corners in it — a drilled hole or a curved recess was not available.
+     */
+    this.brushRound = false;
     this.hoverVoxel = null;
     this.previewMotion = false;
     /** Circle lines are a building aid, so they are on while building. */
@@ -199,6 +233,29 @@ export class EditorScene {
     this._laid = new Set();
     /** Mirror partners, worked out once per rig rather than once per hover. */
     this._mirrorHostCache = new Map();
+    /** Parts taken out of sight so what is behind them can be worked on. */
+    this.hidden = new Set();
+    /** Parts that refuse to be picked or dragged. */
+    this.locked = new Set();
+    this.onHidden = () => {};
+    this.onLocked = () => {};
+    /** What was selected before the current lot. */
+    this._selectionWas = [];
+    /** Named selections, so a hard-won pick survives the next click. */
+    this.selectionSets = new Map();
+    this.onSelectionSets = () => {};
+    /** The last part actually put down, for getting back to it. */
+    this._lastPlaced = null;
+    /** The last repeatable thing, for `repeatLast`. */
+    this._lastAction = null;
+    /** Mixes worth keeping: shape, size and colour together. */
+    this.recipes = [];
+    this.onRecipes = () => {};
+    this.onColor = () => {};
+    /** Asked before something irreversible-looking happens. */
+    this.onConfirm = (_kind, req) => req.accept?.();
+    /** Told the rectangle being dragged, or null when it ends. */
+    this.onMarquee = () => {};
     this.time = 0;
     this.active = false;
   }
@@ -252,7 +309,12 @@ export class EditorScene {
     floor.receiveShadow = true;
     this.scene.add(floor);
 
-    const grid = new THREE.GridHelper(24, 24, 0x4f9fd0, 0x232f3d);
+    // Twenty-four metres across, one metre a square — which is a fact the
+    // grid never stated, so nothing on screen said how big anything was.
+    const GRID_M = 24;
+    const grid = new THREE.GridHelper(GRID_M, GRID_M, 0x4f9fd0, 0x232f3d);
+    /** Metres per square, for anything that wants to say so. */
+    this.gridStep = 1;
     grid.material.transparent = true;
     grid.material.opacity = 0.6;
     this.scene.add(grid);
@@ -359,6 +421,26 @@ export class EditorScene {
     this.ghostTwin.visible = false;
     this.ghostTwin.renderOrder = 9;
     this.scene.add(this.ghostTwin);
+
+    /**
+     * The line symmetry folds through.
+     *
+     * Mirrored placement is on by default and the plane it reflects in was
+     * invisible — so people build symmetrically against something they
+     * cannot see, and only find out where it was by placing a part.
+     */
+    this.centreLine = new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, -14), new THREE.Vector3(0, 0, 14),
+        new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 12, 0),
+      ]),
+      new THREE.LineDashedMaterial({
+        color: 0x4fd2ff, transparent: true, opacity: 0.3, dashSize: 0.4, gapSize: 0.3,
+      }),
+    );
+    this.centreLine.computeLineDistances();
+    this.centreLine.visible = false;
+    this.scene.add(this.centreLine);
 
     /** Which part the next click would attach to. */
     this.hostOutline = new THREE.LineSegments(this.outlineGeo, new THREE.LineBasicMaterial({
@@ -513,12 +595,90 @@ export class EditorScene {
     this._applySnap();
   }
 
+  /**
+   * How coarse the rotation gizmo is, in degrees.
+   *
+   * Fifteen was hard-wired while the placement grid became adjustable, so a
+   * quarter turn was six drags and five degrees was impossible.
+   */
+  setTurnStep(deg) {
+    this.turnStep = Math.max(1, Number(deg) || 15);
+    this._applySnap();
+    return this.turnStep;
+  }
+
   _applySnap() {
     this.gizmo.setTranslationSnap(this.snap ? SIZE_STEP : null);
-    this.gizmo.setRotationSnap(this.snap ? THREE.MathUtils.degToRad(15) : null);
+    this.gizmo.setRotationSnap(
+      this.snap ? THREE.MathUtils.degToRad(this.turnStep ?? 15) : null,
+    );
   }
 
   setSnap(on) { this.snap = !!on; this._applySnap(); }
+
+  /** Show or hide the line mirrored placement folds through. */
+  setSymmetry(on) {
+    this.symmetry = !!on;
+    this.centreLine.visible = this.symmetry;
+    return this;
+  }
+
+  /**
+   * How big the machine is, in metres, and how big the selection is.
+   *
+   * A builder of robots never said how big the robot was: the spec strip
+   * carried mass, mobility, durability and legs, and a machine seven metres
+   * tall was never described as seven metres tall.
+   */
+  measure() {
+    const box = new THREE.Box3();
+    const whole = new THREE.Vector3();
+    this.rig.root.updateMatrixWorld(true);
+    this.rig.bounds.getSize(whole);
+
+    const ids = [...this.selection];
+    if (!ids.length) return { whole, selection: null, count: 0 };
+    box.makeEmpty();
+    for (const id of ids) {
+      const node = this.rig.nodes.get(id);
+      if (node && this._worldAabb(node, _box2)) box.union(_box2);
+    }
+    const sel = box.isEmpty() ? null : box.getSize(new THREE.Vector3());
+    return { whole, selection: sel, count: ids.length };
+  }
+
+  /**
+   * Which axes the gizmo offers: the world's, or the part's own.
+   *
+   * A part on a raked shoulder inherits the rake, so sliding it "outward"
+   * along its own thickness was a diagonal drag in world space that nobody
+   * could do accurately — and the arrows pointed the wrong way while you
+   * tried.
+   */
+  setGizmoSpace(space) {
+    this.gizmoSpace = space === 'local' ? 'local' : 'world';
+    this.gizmo.setSpace(this.gizmoSpace);
+    // The pivot has to carry the part's rotation for local axes to mean the
+    // part's axes; on world axes it stays square.
+    this._syncSelectionVisuals();
+    return this;
+  }
+
+  /**
+   * Where a part sits in the MACHINE's frame, not its parent's.
+   *
+   * The inspector's numbers are measured against whatever the part happens
+   * to hang off, so the same height on two different limbs reads as two
+   * different numbers — and "are these level?" had no answer anywhere.
+   */
+  machinePosition(id = this.selected) {
+    const node = this.rig.nodes.get(id);
+    if (!node) return null;
+    this.rig.root.updateMatrixWorld(true);
+    node.group.getWorldPosition(_v);
+    this.rig.root.worldToLocal(_v);
+    return [_v.x, _v.y, _v.z];
+  }
 
   setGizmoMode(mode) {
     this.gizmoMode = mode === 'rotate' ? 'rotate' : 'translate';
@@ -608,6 +768,14 @@ export class EditorScene {
     this.rig.dispose();
     this._makeRig();
     this.selection = new Set(keep);
+    // Anything hidden or locked that no longer exists stops being either.
+    for (const set of [this.hidden, this.locked]) {
+      for (const id of [...set]) if (!this.assembly.get(id)) set.delete(id);
+    }
+    this._applyHidden();
+    // A rebuild makes new materials, so the cut and the glass have to be
+    // put back onto them or the view silently reverts mid-edit.
+    this._applyViewMode();
     this._syncSelectionVisuals();
     this.onChange(this.stats);
     this.onSelect(this.selectedParts());
@@ -619,6 +787,67 @@ export class EditorScene {
    * reset", and every measurement the editor makes (bounds, ground offset,
    * the framing) assumes the machine is standing still.
    */
+  /**
+   * Cut the machine open along an axis.
+   *
+   * @param {'x'|'y'|'z'|null} axis null puts it back together
+   * @param {number} at where the cut sits, in metres from the middle
+   */
+  setSection(axis, at = 0) {
+    if (!axis) {
+      this.section = null;
+    } else {
+      const n = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }[axis] ?? [0, 0, 1];
+      this.sectionAxis = axis;
+      // The plane keeps the near half: the point is to look in from where
+      // the camera already is, not to be shown the far wall.
+      this.section = new THREE.Plane(new THREE.Vector3(...n).negate(), at);
+    }
+    this._applyViewMode();
+    return this;
+  }
+
+  /** Turn the whole machine to glass, so the parts inside are visible. */
+  setSeeThrough(on) {
+    this.seeThrough = !!on;
+    this._applyViewMode();
+    return this;
+  }
+
+  /**
+   * Push the section plane and the glass onto the machine's own materials.
+   *
+   * Clipping is set on the rig's materials rather than on the renderer so
+   * the floor, the guides and the gizmo stay whole — a gizmo cut in half is
+   * not a tool anybody can aim.
+   */
+  _applyViewMode() {
+    const planes = this.section ? [this.section] : null;
+    this.renderer.localClippingEnabled = !!planes;
+    for (const m of this.rig._ownedMaterials ?? []) {
+      m.clippingPlanes = planes;
+      m.clipShadows = true;
+      // Remember what the material looked like before, so turning the glass
+      // off does not leave a hull that was already meant to be translucent
+      // looking solid.
+      if (m.userData.solidOpacity === undefined) {
+        m.userData.solidOpacity = m.opacity;
+        m.userData.wasTransparent = m.transparent;
+      }
+      if (this.seeThrough) {
+        m.transparent = true;
+        m.opacity = Math.min(m.userData.solidOpacity, 0.34);
+        m.depthWrite = false;
+      } else {
+        m.transparent = m.userData.wasTransparent;
+        m.opacity = m.userData.solidOpacity;
+        m.depthWrite = true;
+      }
+      m.needsUpdate = true;
+    }
+    return this;
+  }
+
   setPreviewMotion(on) {
     this.previewMotion = !!on;
     if (!this.previewMotion) this.resetPose();
@@ -674,10 +903,26 @@ export class EditorScene {
     return last;
   }
 
+  /**
+   * Back to what was selected before this.
+   *
+   * Picking a part out of a crowd is work, and one stray click threw it
+   * away with nothing to get it back.
+   */
+  selectBack() {
+    const prev = this._selectionWas;
+    if (!prev?.length) { this.onReject?.('戻れる選択がありません'); return false; }
+    this._selectionWas = [...this.selection];
+    this.select(prev);
+    return true;
+  }
+
   select(idOrIds, additive = false) {
     const ids = idOrIds === null || idOrIds === undefined
       ? []
       : (Array.isArray(idOrIds) ? idOrIds : [idOrIds]);
+    // Kept so one stray click is not the end of a hard-won selection.
+    if (!additive && this.selection.size) this._selectionWas = [...this.selection];
     if (!additive) this.selection.clear();
     for (const id of ids) {
       if (!this.assembly.get(id)) continue;
@@ -686,6 +931,278 @@ export class EditorScene {
     }
     this._syncSelectionVisuals();
     this.onSelect(this.selectedParts());
+  }
+
+  /**
+   * Add everything below the selection to it.
+   *
+   * Deleting a part already takes its whole subtree; SELECTING one never
+   * did, so "this arm and everything on it" was a job for twenty
+   * ctrl-clicks — and the thing you were about to delete could not be
+   * looked at first.
+   */
+  selectSubtree() {
+    const out = new Set(this.selection);
+    for (const id of this.selection) for (const d of this.assembly.subtree(id)) out.add(d);
+    this.select([...out]);
+    return this;
+  }
+
+  /**
+   * Add every part that is the same KIND of thing as what is selected.
+   *
+   * Same shape for a block, same type for a plate, same bone. "Every wedge"
+   * and "every gatling" are the two questions somebody re-colouring or
+   * re-sizing a machine actually asks.
+   */
+  /**
+   * Every block wearing the same colour.
+   *
+   * Recolouring a scheme meant finding all thirty of them by eye, and the
+   * ones you missed are the ones on the side you were not looking at.
+   */
+  selectByColor(index = null) {
+    const want = index ?? this.assembly.get(this.selected)?.vox?.dominantColor?.();
+    if (typeof want !== 'number' || want < 0) {
+      this.onReject?.('色を持つブロックを選んでください');
+      return false;
+    }
+    const out = [];
+    for (const p of this.assembly.parts.values()) {
+      if (p.kind !== 'block' && p.kind !== 'core') continue;
+      if (p.vox?.dominantColor?.() === want) out.push(p.id);
+    }
+    if (!out.length) return false;
+    this.select(out);
+    return true;
+  }
+
+  /**
+   * Jump to the part on the other side.
+   *
+   * Symmetry places twins and then forgets them; checking that a change made
+   * on the left also happened on the right meant hunting for its opposite
+   * number in a list where both are called the same thing.
+   */
+  selectTwin() {
+    const ids = [...this.selection].map((id) => this._twinOf(id)).filter(Boolean);
+    if (!ids.length) { this.onReject?.('反対側のパーツが見つかりません'); return false; }
+    this.select(ids);
+    return true;
+  }
+
+  /** Back to whatever was put down last, wherever the view has wandered to. */
+  selectLastPlaced() {
+    if (!this._lastPlaced || !this.assembly.get(this._lastPlaced)) {
+      this.onReject?.('最後に置いたパーツがありません');
+      return false;
+    }
+    this.select(this._lastPlaced);
+    this.frameSelection();
+    return true;
+  }
+
+  /**
+   * Save what is selected under a name, and get it back later.
+   *
+   * Picking out "the eight thruster housings" is a minute of careful
+   * clicking, and it was thrown away by the next click. These survive
+   * until the machine is reloaded.
+   */
+  keepSelection(name) {
+    const clean = String(name ?? '').trim();
+    if (!clean) return false;
+    if (!this.selection.size) { this.onReject?.('保存する選択がありません'); return false; }
+    this.selectionSets.set(clean, [...this.selection]);
+    this.onSelectionSets([...this.selectionSets.keys()]);
+    return true;
+  }
+
+  useSelection(name) {
+    const ids = (this.selectionSets.get(name) ?? []).filter((id) => this.assembly.get(id));
+    if (!ids.length) { this.onReject?.('そのまとまりのパーツはもうありません'); return false; }
+    this.select(ids);
+    return true;
+  }
+
+  dropSelection(name) {
+    if (!this.selectionSets.delete(name)) return false;
+    this.onSelectionSets([...this.selectionSets.keys()]);
+    return true;
+  }
+
+  /**
+   * Find blocks that are entirely inside another block.
+   *
+   * A part swallowed by the armour that grew over it still costs its full
+   * weight and can still be shot, and nothing anywhere said it was there —
+   * it is the one build mistake that is literally invisible.
+   *
+   * @returns {string[]} the buried ones, now selected
+   */
+  findBuried() {
+    const boxes = [];
+    for (const [id, node] of this.rig.nodes) {
+      const box = new THREE.Box3();
+      if (!this._worldAabb(node, box)) continue;
+      boxes.push({ id, box, volume: box.getSize(_v).x * _v.y * _v.z });
+    }
+    const buried = [];
+    for (const a of boxes) {
+      for (const b of boxes) {
+        if (a.id === b.id || b.volume <= a.volume) continue;
+        if (b.box.containsBox(a.box)) { buried.push(a.id); break; }
+      }
+    }
+    if (!buried.length) { this.onReject?.('埋まっているブロックはありません'); return []; }
+    this.select(buried);
+    this.onReject?.(`${buried.length} 個が他のブロックの中に完全に埋まっています`);
+    return buried;
+  }
+
+  /**
+   * Move a part to a different face of the same host.
+   *
+   * Putting a part on the wrong face meant deleting it and placing it again,
+   * which loses everything carved into it.
+   *
+   * @param {number} face 0..5
+   */
+  moveToFace(face) {
+    const ids = this._withTwins(this.selection).filter((id) => {
+      const p = this.assembly.get(id);
+      return p?.mount?.face !== undefined && this.assembly.get(p.parent);
+    });
+    if (!ids.length) { this.onReject?.('面につけたパーツを選んでください'); return false; }
+    this._restPose();
+    this.onBeforeChange('別の面へ');
+    for (const id of ids) {
+      const part = this.assembly.get(id);
+      const host = this.assembly.get(part.parent);
+      // A twin on the mirrored side has to go to the mirrored face, or a
+      // symmetrical pair comes apart the moment either one is moved.
+      const want = this._twinOf(id) && part.mount.pos[0] < 0 && FACE_AXIS[face] === 0
+        ? face ^ 1
+        : face;
+      part.mount.face = want;
+      part.mount.rot = alignYToFace(want, part.mount.roll ?? 0);
+      part.mount.pos = faceAnchor(host, want, part.size ?? [0, 0, 0], null, this.placeGap);
+    }
+    this.rebuild();
+    return true;
+  }
+
+  selectSimilar() {
+    const seeds = this.selectedParts();
+    if (!seeds.length) return this;
+    const shapes = new Set();
+    const equips = new Set();
+    const bones = new Set();
+    for (const p of seeds) {
+      if (p.kind === 'block') shapes.add(p.shape ?? SHAPE_DEFAULT);
+      else if (p.kind === 'equip') equips.add(p.equipType);
+      else if (p.kind === 'bone') bones.add(p.boneType);
+    }
+    const out = new Set(this.selection);
+    for (const p of this.assembly.parts.values()) {
+      if (p.kind === 'block' && shapes.has(p.shape ?? SHAPE_DEFAULT)) out.add(p.id);
+      if (p.kind === 'equip' && equips.has(p.equipType)) out.add(p.id);
+      if (p.kind === 'bone' && bones.has(p.boneType)) out.add(p.id);
+    }
+    this.select([...out]);
+    return this;
+  }
+
+  /**
+   * Everything inside a rectangle on screen.
+   *
+   * Twenty parts laid in a row took twenty ctrl-clicks to pick up again —
+   * and laying rows is the thing the drag tool now does well.
+   */
+  boxSelect(x0, y0, x1, y1, additive = false) {
+    const r = this.canvas.getBoundingClientRect();
+    const lo = { x: Math.min(x0, x1), y: Math.min(y0, y1) };
+    const hi = { x: Math.max(x0, x1), y: Math.max(y0, y1) };
+    this.rig.root.updateMatrixWorld(true);
+    this.camera.updateMatrixWorld(true);
+
+    const hit = [];
+    for (const [id, node] of this.rig.nodes) {
+      if (this.hidden.has(id) || this.locked.has(id)) continue;
+      node.group.getWorldPosition(_v).project(this.camera);
+      if (_v.z > 1) continue;                       // behind the camera
+      const px = (_v.x * 0.5 + 0.5) * r.width;
+      const py = (-_v.y * 0.5 + 0.5) * r.height;
+      if (px >= lo.x && px <= hi.x && py >= lo.y && py <= hi.y) hit.push(id);
+    }
+    this.select(additive ? [...this.selection, ...hit] : hit);
+    return this;
+  }
+
+  /**
+   * Take the selection out of sight, so what is behind it can be worked on.
+   *
+   * A machine is mostly hull, and the parts worth editing are usually
+   * inside it. Cycling the click through what is under the cursor helped
+   * pick them; it never helped SEE them.
+   */
+  hideSelected() {
+    for (const id of this.selection) if (id !== this.assembly.rootId) this.hidden.add(id);
+    this.select(null);
+    this._applyHidden();
+    return this;
+  }
+
+  /** Hide everything the selection is NOT. */
+  isolateSelected() {
+    const keep = new Set();
+    for (const id of this.selection) {
+      for (const d of this.assembly.subtree(id)) keep.add(d);
+      let cur = this.assembly.get(id);
+      while (cur?.parent) { keep.add(cur.parent); cur = this.assembly.get(cur.parent); }
+    }
+    if (!keep.size) return this;
+    this.hidden.clear();
+    for (const id of this.rig.nodes.keys()) if (!keep.has(id)) this.hidden.add(id);
+    this._applyHidden();
+    return this;
+  }
+
+  /** Everything back. */
+  showAll() {
+    this.hidden.clear();
+    this._applyHidden();
+    return this;
+  }
+
+  _applyHidden() {
+    for (const [id, node] of this.rig.nodes) {
+      node.group.visible = !this.hidden.has(id);
+    }
+    this.onHidden(this.hidden.size);
+    return this;
+  }
+
+  /**
+   * Stop a part being picked or dragged.
+   *
+   * A finished leg is something you want to stop touching by accident, and
+   * there was no way to say so.
+   */
+  lockSelected(on = true) {
+    for (const id of this.selection) {
+      if (on) this.locked.add(id); else this.locked.delete(id);
+    }
+    if (on) this.select(null);
+    this.onLocked(this.locked.size);
+    return this;
+  }
+
+  /** Everything unlocked. */
+  unlockAll() {
+    this.locked.clear();
+    this.onLocked(0);
+    return this;
   }
 
   selectAll() {
@@ -778,7 +1295,12 @@ export class EditorScene {
     _v2.divideScalar(ids.length);
 
     this.pivot.position.copy(_v2);
-    this.pivot.quaternion.identity();
+    if (this.gizmoSpace === 'local') {
+      const node = this.rig.nodes.get(anchor);
+      this.pivot.quaternion.copy(node ? node.group.getWorldQuaternion(_q) : _q.identity());
+    } else {
+      this.pivot.quaternion.identity();
+    }
     this.pivot.updateMatrixWorld(true);
 
     // The gizmo follows the SELECTION, not the tool.
@@ -887,6 +1409,47 @@ export class EditorScene {
   }
 
   /** Arm the stamp tool with a part document from the library. */
+  /**
+   * Paste onto whatever the cursor is over, rather than beside the original.
+   *
+   * A paste always landed next to where the copy came from, so moving a
+   * detail to the other end of the machine was paste-then-drag-then-reparent
+   * — three operations for one intention that the cursor had already
+   * expressed by being where it was.
+   */
+  pasteHere(entries) {
+    if (!entries?.length) { this.onReject?.('コピーしたパーツがありません'); return []; }
+    const hits = _ray.intersectObjects(this.rig.pickables, false);
+    const host = hits.length ? this.assembly.get(hits[0].object.userData.partId) : null;
+    if (!host) { this.onReject?.('貼り付ける面にカーソルを合わせてください'); return []; }
+    this._restPose();
+    this.onBeforeChange('カーソルの面に貼り付け');
+    const made = [];
+    for (const entry of entries) {
+      const size = Array.isArray(entry.size) ? entry.size : [entry.size ?? 0.4, 0.1, entry.size ?? 0.4];
+      const doc = Assembly.fromJSON(JSON.parse(JSON.stringify(entry.json)));
+      // The face the cursor actually hit, and the point on it, so a paste
+      // lands where it was aimed rather than in the middle of the panel.
+      const hit = hits[0];
+      const node = this.rig.nodes.get(host.id);
+      _v.copy(hit.face.normal).transformDirection(hit.object.matrixWorld).normalize();
+      node.group.getWorldQuaternion(_q).invert();
+      _v.applyQuaternion(_q).normalize();
+      const face = dominantFace(_v);
+      _v2.copy(hit.point);
+      node.group.worldToLocal(_v2);
+      const root = this.assembly.graft(doc, host.id, {
+        pos: faceAnchor(host, face, size, [_v2.x, _v2.y, _v2.z], this.placeGap),
+        rot: alignYToFace(face),
+        face,
+      });
+      if (root) made.push(root.id);
+    }
+    this.rebuild();
+    if (made.length) this.select(made);
+    return made;
+  }
+
   armStamp(assembly) {
     this.stampSource = assembly;
     if (assembly) {
@@ -1027,6 +1590,8 @@ export class EditorScene {
     this.rig.root.updateMatrixWorld(true);
     this._dragStart = {
       pivotInverse: this.pivot.matrixWorld.clone().invert(),
+      // Where it started, so the read-out can say how far it has come.
+      pivotAt: new THREE.Vector3().setFromMatrixPosition(this.pivot.matrixWorld),
       parts: this._dragRoots().map((id) => {
         const node = this.rig.nodes.get(id);
         return node ? { id, world: node.group.matrixWorld.clone() } : null;
@@ -1049,6 +1614,28 @@ export class EditorScene {
       this._pendingRebuild = true;
     }
     this._syncSelectionVisualsDuringDrag();
+    this._sayDrag();
+  }
+
+  /**
+   * Say how far the drag has gone, while it is going.
+   *
+   * The gizmo moved things smoothly and silently: "two centimetres to the
+   * left" was a thing you could only find out by letting go and reading the
+   * inspector, and if it was wrong you dragged again by feel.
+   */
+  _sayDrag() {
+    if (!this._dragStart) return;
+    _v.setFromMatrixPosition(this.pivot.matrixWorld).sub(this._dragStart.pivotAt);
+    const moved = _v.length();
+    if (this.gizmoMode === 'rotate') {
+      _q.setFromRotationMatrix(_delta);
+      const deg = THREE.MathUtils.radToDeg(2 * Math.acos(Math.min(1, Math.abs(_q.w))));
+      this._sayHint(`回転 ${deg.toFixed(1)}°`);
+      return;
+    }
+    const f = (n) => (Math.abs(n) < 0.005 ? '0' : n.toFixed(2));
+    this._sayHint(`移動 ${f(_v.x)}, ${f(_v.y)}, ${f(_v.z)} ・ 計 ${moved.toFixed(2)}m`);
   }
 
   /** Outlines follow, but the gizmo must not be re-attached mid-drag. */
@@ -1062,6 +1649,7 @@ export class EditorScene {
 
   _endDrag() {
     this._dragStart = null;
+    this._sayHint('');
     if (this._pendingRebuild || this._ringsStale) {
       this._pendingRebuild = false;
       this.rebuild();
@@ -1136,8 +1724,179 @@ export class EditorScene {
    * exists, and it used to change exactly one of them with nothing on screen
    * to say so.
    */
+  /**
+   * Scale everything selected by a factor, each about its own size.
+   *
+   * `resizeSelected` sets one size on ALL of them, which is right for four
+   * identical legs and destructive for anything else: dragging the width
+   * slider with an arm selected used to flatten every block in it to the
+   * same cuboid. "A tenth bigger" is the thing people actually mean, and it
+   * could not be asked for at all.
+   */
+  /**
+   * The selection, plus each part's opposite number, when symmetry is on.
+   *
+   * Mirrored placement builds both sides at once and then leaves you to
+   * maintain them by hand: re-colour the left shoulder and the right one
+   * stays as it was. If the switch says the machine is symmetrical, editing
+   * it should keep it that way.
+   */
+  _withTwins(ids) {
+    if (!this.symmetry) return [...ids];
+    const out = new Set(ids);
+    for (const id of ids) {
+      const twin = this._twinOf(id);
+      if (twin) out.add(twin);
+    }
+    return [...out];
+  }
+
+  /**
+   * The part on the other side of the machine that matches this one: same
+   * kind, same size, mirrored position. Null when there is no such part.
+   */
+  _twinOf(id) {
+    const part = this.assembly.get(id);
+    const node = this.rig.nodes.get(id);
+    if (!part || !node) return null;
+    this.rig.root.updateMatrixWorld(true);
+    node.group.getWorldPosition(_v);
+    this.rig.root.worldToLocal(_v);
+    if (Math.abs(_v.x) < 1e-3) return null;          // on the centre line
+    const want = -_v.x;
+    const y = _v.y;
+    const z = _v.z;
+    for (const [otherId, other] of this.rig.nodes) {
+      if (otherId === id) continue;
+      const p = this.assembly.get(otherId);
+      if (!p || p.kind !== part.kind) continue;
+      if (Array.isArray(p.size) && Array.isArray(part.size)
+        && p.size.join() !== part.size.join()) continue;
+      other.group.getWorldPosition(_v2);
+      this.rig.root.worldToLocal(_v2);
+      if (Math.hypot(_v2.x - want, _v2.y - y, _v2.z - z) < 0.12) return otherId;
+    }
+    return null;
+  }
+
+  scaleSelected(factor) {
+    const ids = this._withTwins(this.selection).filter((id) => {
+      const p = this.assembly.get(id);
+      return p && p.kind !== 'bone' && Array.isArray(p.size);
+    });
+    if (!ids.length || !(factor > 0)) return false;
+    this.onBeforeChange(`寸法 x${factor.toFixed(2)}`);
+    let moved = false;
+    for (const id of ids) {
+      const part = this.assembly.get(id);
+      const before = [...part.size];
+      this.assembly.setSize(id, part.size.map((v) => v * factor));
+      this.rig.refreshSize(id);
+      if (this._reseatAfterResize(part, before)) moved = true;
+    }
+    if (moved) { this.rebuild(); return true; }
+    this.refreshStats();
+    this._syncSelectionVisuals();
+    return true;
+  }
+
+  /**
+   * Give everything selected the size of the anchor — the one picked last.
+   *
+   * Matching one block to another was a job of reading three sliders off one
+   * part and setting three on the next, at a quarter of a metre a notch.
+   */
+  /**
+   * Resize keeping the proportions the part already has.
+   *
+   * The size fields are three independent numbers, so making a part "a bit
+   * bigger" without squashing it meant working out two more numbers by hand
+   * every time — and getting one of them slightly wrong is exactly the kind
+   * of error nobody spots until the machine walks.
+   *
+   * @param {number} axis which field was typed into
+   * @param {number} value what it was set to
+   */
+  resizeKeepingShape(axis, value) {
+    const part = this.assembly.get(this.selected);
+    if (!part || !Array.isArray(part.size)) return false;
+    const was = part.size[axis];
+    if (!(was > 0) || !(value > 0)) return false;
+    const k = value / was;
+    return this.resizeSelected(part.size.map((n) => Math.max(SIZE_STEP, n * k)));
+  }
+
+  /**
+   * Make the selection exactly as big as the face it stands on.
+   *
+   * Armour that is meant to cover a panel was sized by eye, and a plate a
+   * centimetre short leaves a bright seam that is only visible in the field.
+   */
+  fitToHost() {
+    const ids = this._withTwins(this.selection).filter((id) => {
+      const p = this.assembly.get(id);
+      return p && p.kind === 'block' && Array.isArray(p.size) && p.mount?.face !== undefined;
+    });
+    if (!ids.length) { this.onReject?.('面につけたブロックを選んでください'); return false; }
+    this.onBeforeChange('面に合わせる');
+    let done = 0;
+    for (const id of ids) {
+      const part = this.assembly.get(id);
+      const host = this.assembly.get(part.parent);
+      if (!Array.isArray(host?.size)) continue;
+      // The two axes that lie IN the face; the third is the part's own
+      // thickness and is nobody's business but the builder's.
+      const normal = FACE_AXIS[part.mount.face];
+      if (normal === undefined) continue;
+      const size = [...part.size];
+      for (let a = 0; a < 3; a++) if (a !== normal) size[a] = host.size[a];
+      const before = [...part.size];
+      this.assembly.setSize(id, size);
+      this.rig.refreshSize(id);
+      this._reseatAfterResize(part, before);
+      done++;
+    }
+    if (!done) { this.onReject?.('合わせられる面がありません'); return false; }
+    this.rebuild();
+    return true;
+  }
+
+  /** Give every selected bone the anchor bone's length and thickness. */
+  matchBoneSelected() {
+    const anchor = this.assembly.get(this.anchorId);
+    if (anchor?.kind !== 'bone') { this.onReject?.('基準にするボーンを最後に選んでください'); return false; }
+    const ids = this._withTwins(this.selection)
+      .filter((id) => this.assembly.get(id)?.kind === 'bone' && id !== anchor.id);
+    if (!ids.length) { this.onReject?.('揃えるボーンを選んでください'); return false; }
+    this.onBeforeChange('ボーンを揃える');
+    for (const id of ids) {
+      const bone = this.assembly.get(id);
+      bone.length = anchor.length;
+      bone.radius = anchor.radius;
+    }
+    this.rebuild();
+    return true;
+  }
+
+  matchSizeSelected() {
+    const anchor = this.assembly.get(this.anchorId);
+    if (!anchor || !Array.isArray(anchor.size)) return false;
+    return this.resizeSelected([...anchor.size]);
+  }
+
+  /** Keep a flush part flush after its size changed. Shared by both paths. */
+  _reseatAfterResize(part, before) {
+    const face = part.mount?.face;
+    if (!before || face === undefined || FACE_AXIS[face] === undefined) return false;
+    const axis = FACE_AXIS[face];
+    const grew = ((part.size[axis] ?? 0) - (before[axis] ?? 0)) / 2;
+    if (!grew) return false;
+    part.mount.pos[axis] += FACE_NORMAL[face][axis] * grew;
+    return !this.rig.refreshMount(part.id);
+  }
+
   resizeSelected(size) {
-    const ids = [...this.selection].filter((id) => {
+    const ids = this._withTwins(this.selection).filter((id) => {
       const p = this.assembly.get(id);
       return p && p.kind !== 'bone';
     });
@@ -1152,15 +1911,7 @@ export class EditorScene {
       // A part put down flush against a face STAYS flush. A block grows about
       // its own middle, so half of every millimetre added used to disappear
       // into whatever it was standing on — quietly, from the inside.
-      const face = part.mount?.face;
-      if (before && face !== undefined && FACE_AXIS[face] !== undefined) {
-        const axis = FACE_AXIS[face];
-        const grew = ((part.size[axis] ?? 0) - (before[axis] ?? 0)) / 2;
-        if (grew) {
-          part.mount.pos[axis] += FACE_NORMAL[face][axis] * grew;
-          if (!this.rig.refreshMount(id)) moved = true;
-        }
-      }
+      if (this._reseatAfterResize(part, before)) moved = true;
     }
     if (moved) { this.rebuild(); return true; }
     this.refreshStats();
@@ -1269,6 +2020,45 @@ export class EditorScene {
     return true;
   }
 
+  /**
+   * Change one colour into another, everywhere on the machine.
+   *
+   * Re-colouring meant selecting every block that used a shade and painting
+   * them — and the ones inside the hull had to be found first. A palette
+   * entry is a thing the whole machine refers to, so it can be changed in
+   * one place.
+   */
+  replaceColor(from, to) {
+    if (from === to) return 0;
+    let n = 0;
+    for (const part of this.assembly.parts.values()) {
+      if (!part.vox) continue;
+      if (part.vox.recolor?.(from, to)) n++;
+    }
+    if (!n) { this.onReject?.('その色は使われていません'); return 0; }
+    this.onBeforeChange('色の置き換え');
+    this.rebuild();
+    return n;
+  }
+
+  /**
+   * Take just the colour of the part under the cursor.
+   *
+   * The block eyedropper brings the shape and the size across as well, which
+   * is right when copying a block and wrong when all you wanted was to match
+   * a shade.
+   */
+  pickColorUnderCursor() {
+    const hits = _ray.intersectObjects(this.rig.pickables, false);
+    const part = hits.length ? this.assembly.get(hits[0].object.userData.partId) : null;
+    const c = part?.vox?.dominantColor?.();
+    if (typeof c !== 'number' || c < 0) return null;
+    this.colorIndex = c;
+    this.onColor?.(c);
+    this._hover();
+    return c;
+  }
+
   /** Bullet colour, for the plates whose meta allows it. */
   setBulletColorSelected(hex) {
     let changed = false;
@@ -1332,9 +2122,27 @@ export class EditorScene {
    * Re-cut every selected block to a shape. Bones and plates in the
    * selection are simply skipped rather than refusing the whole action.
    */
-  setBlockShapeSelected(shape) {
+  setBlockShapeSelected(shape, { force = false } = {}) {
+    // Both sides, when the machine says it is symmetrical.
+    if (this.symmetry) this.select(this._withTwins(this.selection));
     const ids = [...this.selection].filter((id) => this.assembly.get(id)?.vox);
     if (!ids.length) return false;
+
+    // Re-cutting a block fills its whole grid from the new shape's mask, so
+    // anything carved into it goes. That is undoable but it was also
+    // SILENT, and carving is the slowest work anybody does here.
+    const carved = ids.filter((id) => {
+      const part = this.assembly.get(id);
+      return part.shape !== shape && part.vox.isCarved(part.shape);
+    });
+    if (carved.length && !force) {
+      this.onConfirm('reshape', {
+        count: carved.length,
+        message: `${carved.length}個のブロックの加工が消えます。形を変えますか？`,
+        accept: () => this.setBlockShapeSelected(shape, { force: true }),
+      });
+      return false;
+    }
     this.onBeforeChange('形状');
     let changed = false;
     for (const id of ids) if (this.assembly.setBlockShape(id, shape)) changed = true;
@@ -1412,6 +2220,44 @@ export class EditorScene {
     return true;
   }
 
+  /**
+   * Arm a click that names the new parent.
+   *
+   * Re-hanging a part meant knowing the id of the thing to hang it on and
+   * finding that row in a list — which is the one piece of information the
+   * builder can see perfectly well by looking at the machine.
+   */
+  beginReparent() {
+    if (!this.selected) { this.onReject?.('つなぎ替えるパーツを選んでください'); return false; }
+    this._awaitParent = this.selected;
+    // A toast, not the placement hint: the hint is rewritten on every
+    // pointer move, so a prompt left there would last a single frame.
+    this.onReject?.('新しい連結先をクリック（Escで中止）');
+    return true;
+  }
+
+  cancelReparent() {
+    if (!this._awaitParent) return false;
+    this._awaitParent = null;
+    this.onReject?.('つなぎ替えを中止しました');
+    return true;
+  }
+
+  /** The armed click landed: whatever is under it becomes the parent. */
+  _finishReparent() {
+    const child = this._awaitParent;
+    this._awaitParent = null;
+    const hits = _ray.intersectObjects(this.rig.pickables, false);
+    const host = hits.length ? hits[0].object.userData.partId : null;
+    if (!host || host === child) { this.onReject?.('つなぎ替えを中止しました'); return false; }
+    this.select(child);
+    if (!this.reparentSelected(host)) {
+      this.onReject?.('そこにはつなげられません');
+      return false;
+    }
+    return true;
+  }
+
   reparentSelected(parentId) {
     const id = this.selected;
     if (!id) return false;
@@ -1433,7 +2279,36 @@ export class EditorScene {
    *
    * @returns {string[]} the ids of the parts made
    */
+  /**
+   * Turn the selection round where it stands.
+   *
+   * Mirroring made a COPY on the other side, which is right for building a
+   * second arm and wrong for a part that was simply put on backwards — and
+   * the only way to fix that was to work out the angles by hand.
+   */
+  flipSelected(axis = 'x') {
+    const ids = this._dragRoots();
+    if (!ids.length) { this.onReject?.('反転するパーツを選んでください'); return false; }
+    this._restPose();
+    this.onBeforeChange('その場で反転');
+    const at = { x: 0, y: 1, z: 2 }[axis] ?? 0;
+    // A half turn about the axis at right angles to the one being flipped
+    // gives the same result as a reflection for anything with a plane of
+    // symmetry, and unlike a reflection it stays a rotation — a negative
+    // scale would turn the part inside out.
+    const about = new THREE.Vector3(...(at === 0 ? [0, 1, 0] : at === 1 ? [1, 0, 0] : [0, 1, 0]));
+    for (const id of ids) {
+      const part = this.assembly.get(id);
+      if (!part?.mount) continue;
+      _q.setFromAxisAngle(about, Math.PI);
+      part.mount.rot = _q2.fromArray(part.mount.rot).premultiply(_q).toArray();
+    }
+    this.rebuild();
+    return true;
+  }
+
   mirrorSelected() {
+    this._remember(() => this.mirrorSelected());
     const roots = this._dragRoots().filter((id) => id !== this.assembly.rootId);
     if (!roots.length) return [];
     this._restPose();
@@ -1482,6 +2357,7 @@ export class EditorScene {
    * @param {'align'|'spread'} how
    */
   arrangeSelected(axis = 'x', how = 'align') {
+    this._remember(() => this.arrangeSelected(axis, how));
     const at = { x: 0, y: 1, z: 2 }[axis] ?? 0;
     const parts = this._dragRoots()
       .map((id) => this.assembly.get(id))
@@ -1499,15 +2375,22 @@ export class EditorScene {
       family.get(p.parent).push(p);
     }
 
-    this.onBeforeChange(how === 'align' ? `${axis.toUpperCase()} で揃える` : `${axis.toUpperCase()} に均等`);
+    const TITLES = {
+      align: 'で揃える', spread: 'に均等', min: 'の手前で揃える', max: 'の奥で揃える',
+    };
+    this.onBeforeChange(`${axis.toUpperCase()} ${TITLES[how] ?? TITLES.align}`);
     let touched = 0;
     for (const group of family.values()) {
       if (group.length < 2) continue;
       group.sort((a, b) => a.mount.pos[at] - b.mount.pos[at]);
-      if (how === 'align') {
-        // Onto the average, so nothing is dragged further than it has to be.
-        const mid = group.reduce((t, p) => t + p.mount.pos[at], 0) / group.length;
-        for (const p of group) { p.mount.pos[at] = mid; touched++; }
+      if (how === 'align' || how === 'min' || how === 'max') {
+        // The average drags nothing further than it has to, which is right
+        // for tidying a row and wrong for building a flush edge — for that
+        // the outermost one is the one everything else has to meet.
+        const to = how === 'align'
+          ? group.reduce((t, p) => t + p.mount.pos[at], 0) / group.length
+          : how === 'min' ? group[0].mount.pos[at] : group[group.length - 1].mount.pos[at];
+        for (const p of group) { p.mount.pos[at] = to; touched++; }
       } else {
         const lo = group[0].mount.pos[at];
         const hi = group[group.length - 1].mount.pos[at];
@@ -1530,6 +2413,7 @@ export class EditorScene {
    * and nobody could ask for — every one of them placed and nudged by hand.
    */
   repeatSelected(axis = 'x', n = 3, gap = null) {
+    this._remember(() => this.repeatSelected(axis, n, gap));
     const roots = this._dragRoots().filter((id) => id !== this.assembly.rootId);
     if (!roots.length || n < 1) return [];
     const at = { x: 0, y: 1, z: 2 }[axis] ?? 0;
@@ -1562,15 +2446,394 @@ export class EditorScene {
     return made;
   }
 
+  /**
+   * Build a limb: a chain of bones with a block on the end.
+   *
+   * Making one leg was: place a bone, set its length, its thickness and its
+   * range, place the next, set three more, place a foot, size it — and then
+   * do the whole thing again for the other side. There was no scaffold for
+   * the commonest thing anybody builds, so everybody built it a joint at a
+   * time.
+   *
+   * @param {number} segments how many bones in the chain
+   * @returns {string[]} everything made
+   */
+  /**
+   * Put the selection halfway between the first two things chosen.
+   *
+   * Centring a cockpit between two shoulders, or a strut between two struts,
+   * was arithmetic done by hand on numbers read off two separate panels.
+   */
+  centreBetween() {
+    const ids = this._dragRoots();
+    if (ids.length < 3) {
+      this.onReject?.('端の2つと、間に置くものを選んでください');
+      return false;
+    }
+    // The first two picked are the ends; everything else goes between them.
+    const [aId, bId, ...rest] = ids;
+    const a = this.assembly.get(aId);
+    const b = this.assembly.get(bId);
+    if (!a?.mount || !b?.mount || a.parent !== b.parent) {
+      this.onReject?.('端の2つは同じパーツにつながっている必要があります');
+      return false;
+    }
+    this._restPose();
+    this.onBeforeChange('あいだに置く');
+    let moved = 0;
+    for (const id of rest) {
+      const p = this.assembly.get(id);
+      if (!p?.mount || p.parent !== a.parent) continue;
+      for (let i = 0; i < 3; i++) p.mount.pos[i] = (a.mount.pos[i] + b.mount.pos[i]) / 2;
+      moved++;
+    }
+    if (!moved) {
+      this.onReject?.('間に置くものが端と同じパーツにつながっていません');
+      return false;
+    }
+    this.rebuild();
+    return true;
+  }
+
+  addLimb(boneType = BONE.LEG, { segments = 2, foot = true } = {}) {
+    this._remember(() => this.addLimb(boneType, { segments, foot }));
+    const parentId = this.selected ?? this.assembly.rootId;
+    const parent = this.assembly.get(parentId);
+    if (!parent) return [];
+    this._restPose();
+    this.onBeforeChange('肢を作る');
+
+    const made = [];
+    const opts = { ...this.boneOpts };
+    // Down from the underside for a leg, out to the side for an arm.
+    const face = boneType === BONE.LEG ? 3 : 0;
+    let host = parentId;
+    let mount = { pos: faceAnchor(parent, face), rot: alignYToFace(face) };
+    for (let i = 0; i < Math.max(1, segments); i++) {
+      const bone = this.assembly.addBone(host, mount, boneType, opts);
+      if (!bone) break;
+      made.push(bone.id);
+      host = bone.id;
+      // The next one starts at the tip of the last.
+      mount = { pos: [0, bone.length, 0], rot: [0, 0, 0, 1] };
+    }
+    if (foot && host !== parentId) {
+      const tip = this.assembly.get(host);
+      const block = this.assembly.addBlock(host, {
+        pos: [0, tip.length, 0], rot: [0, 0, 0, 1],
+      }, this.colorIndex, {
+        size: [0.5, 0.25, 0.75], shape: SHAPE_DEFAULT,
+        label: this._blockName(SHAPE_DEFAULT),
+      });
+      if (block) made.push(block.id);
+    }
+
+    // The other side comes free, the way a placed part does.
+    if (this.symmetry && made.length) {
+      const root = this.assembly.get(made[0]);
+      const twin = this._mirror(root);
+      if (twin) made.push(twin.id);
+    }
+    this.rebuild();
+    this.select(made);
+    return made;
+  }
+
+  /**
+   * Which parts have no opposite number.
+   *
+   * The centre line is drawn now, but a line does not tell you WHERE the two
+   * sides stopped agreeing — and on a forty-part machine that is not a thing
+   * anybody can see by looking.
+   *
+   * @returns {string[]} the odd ones out, selected as a side effect
+   */
+  findAsymmetry() {
+    const odd = [];
+    for (const id of this.rig.nodes.keys()) {
+      if (id === this.assembly.rootId) continue;
+      const part = this.assembly.get(id);
+      if (!part) continue;
+      const node = this.rig.nodes.get(id);
+      node.group.getWorldPosition(_v);
+      this.rig.root.worldToLocal(_v);
+      // Anything on the centre line is its own reflection.
+      if (Math.abs(_v.x) < 0.12) continue;
+      if (!this._twinOf(id)) odd.push(id);
+    }
+    this.select(odd);
+    if (!odd.length) this.onReject?.('左右で食い違っているパーツはありません');
+    return odd;
+  }
+
+  /**
+   * Repeat the selection round a circle instead of along a line.
+   *
+   * The array tool went one way in a straight line. A ring of thrusters, a
+   * crown of spikes, six legs round a body — all of those were placed and
+   * nudged one at a time, and getting them even was luck.
+   */
+  repeatAround(count = 6, axis = 'y') {
+    const roots = this._dragRoots().filter((id) => id !== this.assembly.rootId);
+    if (!roots.length || count < 2) return [];
+    const at = { x: 0, y: 1, z: 2 }[axis] ?? 1;
+    const spin = new THREE.Vector3(at === 0 ? 1 : 0, at === 1 ? 1 : 0, at === 2 ? 1 : 0);
+    this._restPose();
+    this.onBeforeChange(`円周に${count}個`);
+
+    const made = [];
+    for (const id of roots) {
+      const part = this.assembly.get(id);
+      if (!part?.mount) continue;
+      const doc = this.assembly.extract(id);
+      if (!doc) continue;
+      for (let i = 1; i < count; i++) {
+        const turn = (i / count) * Math.PI * 2;
+        _q.setFromAxisAngle(spin, turn);
+        _v.fromArray(part.mount.pos).applyQuaternion(_q);
+        _q2.fromArray(part.mount.rot).premultiply(_q);
+        const copy = this.assembly.graft(
+          Assembly.fromJSON(JSON.parse(JSON.stringify(doc.toJSON()))),
+          part.parent,
+          { ...part.mount, pos: _v.toArray(), rot: _q2.toArray() },
+        );
+        if (copy) made.push(copy.id);
+      }
+    }
+    this.rebuild();
+    this._fitNewRings(made);
+    if (made.length) this.select([...roots, ...made]);
+    return made;
+  }
+
+  /**
+   * Copy the selection to an exact offset, rather than to wherever the
+   * duplicate happens to land.
+   */
+  duplicateAt(offset = [0, 0, 0]) {
+    const roots = this._dragRoots().filter((id) => id !== this.assembly.rootId);
+    if (!roots.length) return [];
+    this._restPose();
+    this.onBeforeChange('複製（数値）');
+    const made = [];
+    for (const id of roots) {
+      const part = this.assembly.get(id);
+      if (!part?.mount) continue;
+      const doc = this.assembly.extract(id);
+      if (!doc) continue;
+      const pos = part.mount.pos.map((v, i) => v + (offset[i] ?? 0));
+      const copy = this.assembly.graft(
+        Assembly.fromJSON(JSON.parse(JSON.stringify(doc.toJSON()))),
+        part.parent, { ...part.mount, pos, rot: [...part.mount.rot] },
+      );
+      if (copy) made.push(copy.id);
+    }
+    this.rebuild();
+    if (made.length) this.select(made);
+    return made;
+  }
+
+  /**
+   * Remember the shape, size and colour in hand, so a mix that took a minute
+   * to dial in can be got back in one click.
+   */
+  /**
+   * Take the anchor's angle for everything else selected.
+   *
+   * Two fins that should rake at the same angle were two sets of three
+   * numbers typed twice, and the second set was usually a degree out.
+   */
+  matchRotationSelected() {
+    const anchor = this.assembly.get(this.anchorId);
+    if (!anchor?.mount) { this.onReject?.('基準にするパーツを最後に選んでください'); return false; }
+    const ids = this._dragRoots().filter((id) => id !== anchor.id);
+    if (!ids.length) { this.onReject?.('揃えるパーツを選んでください'); return false; }
+    this._restPose();
+    this.onBeforeChange('傾きを揃える');
+    for (const id of ids) {
+      const part = this.assembly.get(id);
+      if (part?.mount) part.mount.rot = [...anchor.mount.rot];
+    }
+    this.rebuild();
+    return true;
+  }
+
+  /**
+   * Give everything selected the anchor's shape and colour.
+   *
+   * Deciding what a machine's greebles look like happens once; applying that
+   * decision to the twenty already on it was twenty trips through two
+   * separate panels.
+   */
+  matchLookSelected() {
+    const anchor = this.assembly.get(this.anchorId);
+    if (anchor?.kind !== 'block') { this.onReject?.('基準にするブロックを最後に選んでください'); return false; }
+    const ids = this._withTwins(this.selection)
+      .filter((id) => this.assembly.get(id)?.kind === 'block' && id !== anchor.id);
+    if (!ids.length) { this.onReject?.('揃えるブロックを選んでください'); return false; }
+    const colour = anchor.vox?.dominantColor?.();
+    this.onBeforeChange('見た目を揃える');
+    for (const id of ids) {
+      const part = this.assembly.get(id);
+      this.assembly.setBlockShape(id, anchor.shape ?? SHAPE_DEFAULT);
+      // Recoloured, not refilled: filling would make a carved block solid
+      // again, which is not what "the same colour as that one" means.
+      if (typeof colour === 'number' && colour >= 0) part.vox.repaintAll(colour);
+    }
+    this.rebuild();
+    return true;
+  }
+
+  keepRecipe() {
+    const recipe = {
+      shape: this.newBlockShape,
+      size: [...this.newBlockSize],
+      color: this.colorIndex,
+    };
+    this.recipes = [recipe, ...this.recipes.filter(
+      (r) => r.shape !== recipe.shape || r.size.join() !== recipe.size.join()
+        || r.color !== recipe.color,
+    )].slice(0, 8);
+    this.onRecipes(this.recipes);
+    return recipe;
+  }
+
+  /** Put one back in hand. */
+  useRecipe(i) {
+    const r = this.recipes[i];
+    if (!r) return null;
+    this.newBlockShape = r.shape;
+    this.newBlockSize = [...r.size];
+    this.colorIndex = r.color;
+    this.onColor?.(r.color);
+    this._hover();
+    return r;
+  }
+
+  /**
+   * Put the selection back on the machine's centre line.
+   *
+   * A part meant to be central that ended up a notch off is invisible until
+   * the machine walks, and there was no way to say "dead centre" — only to
+   * type zero into a field, in a frame that is not the machine's.
+   */
+  centreSelected() {
+    const ids = this._dragRoots().filter((id) => id !== this.assembly.rootId);
+    if (!ids.length) return false;
+    this._restPose();
+    this.onBeforeChange('中心へ');
+    this.rig.root.updateMatrixWorld(true);
+    for (const id of ids) {
+      const part = this.assembly.get(id);
+      const node = this.rig.nodes.get(id);
+      if (!part?.mount || !node) continue;
+      // How far off the centre line it is, in the MACHINE's frame, moved
+      // back through the parent's so the stored mount still means it.
+      node.group.getWorldPosition(_v);
+      this.rig.root.worldToLocal(_v);
+      const off = _v.x;
+      if (Math.abs(off) < 1e-6) continue;
+      _v.set(-off, 0, 0);
+      this.rig.root.localToWorld(_v);
+      this.rig.root.getWorldPosition(_v2);
+      _v.sub(_v2);                                  // a world-space delta
+      const host = this.rig.nodes.get(part.parent);
+      if (host) {
+        host.group.getWorldQuaternion(_q).invert();
+        _v.applyQuaternion(_q);
+      }
+      part.mount.pos[0] += _v.x;
+      part.mount.pos[1] += _v.y;
+      part.mount.pos[2] += _v.z;
+    }
+    this.rebuild();
+    return true;
+  }
+
+  /**
+   * Straighten the selection to the world's axes.
+   *
+   * A part placed on a tilted host inherits the tilt, which is usually what
+   * you want and occasionally exactly what you do not — and there was no way
+   * back short of typing angles into a field.
+   */
+  straightenSelected() {
+    const ids = this._dragRoots().filter((id) => id !== this.assembly.rootId);
+    if (!ids.length) return false;
+    this._restPose();
+    this.onBeforeChange('世界の軸に戻す');
+    for (const id of ids) {
+      const part = this.assembly.get(id);
+      const host = this.rig.nodes.get(part?.parent);
+      if (!part?.mount || !host) continue;
+      // The rotation that cancels the parent's own, so the part ends up
+      // square with the world.
+      host.group.getWorldQuaternion(_q).invert();
+      part.mount.rot = _q.toArray();
+    }
+    this.rebuild();
+    return true;
+  }
+
+  /**
+   * Do the last thing again.
+   *
+   * Placing eight of something meant eight trips to the panel; anything the
+   * editor can repeat, it now repeats.
+   */
+  repeatLast() {
+    const last = this._lastAction;
+    if (!last) { this.onReject?.('繰り返せる操作がありません'); return false; }
+    last();
+    return true;
+  }
+
+  /** Remember something worth doing twice. */
+  _remember(fn) {
+    this._lastAction = fn;
+    return fn;
+  }
+
+  /** Give every part a name built from a stem, in tree order. */
+  renameSelected(stem) {
+    const clean = String(stem ?? '').trim();
+    if (!clean) return 0;
+    const ids = [...this.selection].filter((id) => this.assembly.get(id));
+    if (!ids.length) return 0;
+    this.onBeforeChange('名前を付ける');
+    ids.forEach((id, i) => {
+      const part = this.assembly.get(id);
+      part.label = ids.length > 1 ? `${clean} ${i + 1}` : clean;
+    });
+    this.onSelect(this.selectedParts());
+    return ids.length;
+  }
+
   /** Duplicate the selection in place, offset slightly so it is visible. */
-  duplicateSelected() {
+  /**
+   * @param {'x'|'y'|'z'|null} axis which way the copy steps off the original;
+   *   null keeps the old diagonal nudge
+   */
+  duplicateSelected(axis = null) {
+    this._remember(() => this.duplicateSelected(axis));
     const parts = this.selectedParts().filter((p) => p.id !== this.assembly.rootId);
     if (!parts.length) return false;
     this.onBeforeChange('複製');
     const made = [];
     for (const p of parts) {
+      // Clear of the original along the axis asked for, by the original's
+      // own width on that axis. A fixed nudge leaves a copy of a big part
+      // sitting inside the part it came from, which reads as nothing having
+      // happened at all.
+      const span = Array.isArray(p.size) ? p.size : [SIZE_STEP, SIZE_STEP, SIZE_STEP];
+      const at = { x: 0, y: 1, z: 2 }[axis];
+      const step = [0, 0, 0];
+      if (at === undefined) { step[0] = SIZE_STEP; step[2] = SIZE_STEP; }
+      else step[at] = Math.max(SIZE_STEP, span[at] ?? SIZE_STEP);
       const mount = {
-        pos: [p.mount.pos[0] + SIZE_STEP, p.mount.pos[1], p.mount.pos[2] + SIZE_STEP],
+        pos: [
+          p.mount.pos[0] + step[0], p.mount.pos[1] + step[1], p.mount.pos[2] + step[2],
+        ],
         rot: [...p.mount.rot],
       };
       let copy;
@@ -1619,6 +2882,11 @@ export class EditorScene {
         && Math.hypot(e.clientX - press.x, e.clientY - press.y) > CLICK_SLOP) {
         press.moved = true;
       }
+      // Shift and drag with nothing in hand draws a box round parts.
+      if (press?.marquee) {
+        press.now = { x: e.clientX, y: e.clientY };
+        this.onMarquee(this._marqueeRect());
+      }
       this._hover();
       // Holding the button and dragging lays a row rather than making one
       // careful click per part.
@@ -1635,6 +2903,8 @@ export class EditorScene {
       this._updateNdc(e);
       this._press = {
         x: e.clientX, y: e.clientY, button: e.button, moved: false, laid: 0,
+        marquee: e.button === 0 && e.shiftKey && this.tool === TOOL.SELECT,
+        now: { x: e.clientX, y: e.clientY },
         // Read from the PRESS, not the release: holding Ctrl and letting go
         // of it a moment early still means "add to the selection", and it is
         // the press that the person was thinking about.
@@ -1655,6 +2925,19 @@ export class EditorScene {
       this._lane = null;
       this._laid.clear();
       if (!press || !this.active) return;
+      if (press.marquee) {
+        this.onMarquee(null);
+        const r = this.canvas.getBoundingClientRect();
+        if (Math.hypot(press.now.x - press.x, press.now.y - press.y) > CLICK_SLOP) {
+          this.boxSelect(
+            press.x - r.left, press.y - r.top,
+            press.now.x - r.left, press.now.y - r.top,
+            e.ctrlKey || e.metaKey,
+          );
+          return;
+        }
+      }
+      if (this._awaitParent) { this._finishReparent(); return; }
       if (press.laid) { this.onGesture(false); return; }
       if (press.moved) return;                  // that was the camera, or a row
       if (press.button === 2) { this.deleteUnderCursor(); return; }
@@ -1680,8 +2963,19 @@ export class EditorScene {
       if (!this.active) return;
       if (e.target && /input|textarea|select/i.test(e.target.tagName)) return;
       if (e.code === 'Delete' || e.code === 'Backspace') { e.preventDefault(); this.deleteSelected(); }
-      if (e.code === 'BracketLeft') this.brushPercent = Math.max(1, this.brushPercent - 1);
-      if (e.code === 'BracketRight') this.brushPercent = Math.min(25, this.brushPercent + 1);
+      if (e.code === 'Escape' && this._awaitParent) { e.preventDefault(); this.cancelReparent(); }
+      // The brackets size the brush while carving and the selection the rest
+      // of the time — resizing a part was a trip to a numeric field, which is
+      // a poor way to answer "a bit smaller than that".
+      const carving = SCULPT_TOOLS.has(this.tool);
+      if (e.code === 'BracketLeft') {
+        if (carving) this.brushPercent = Math.max(1, this.brushPercent - 1);
+        else if (this.selection.length) { e.preventDefault(); this.scaleSelected(1 / 1.1); }
+      }
+      if (e.code === 'BracketRight') {
+        if (carving) this.brushPercent = Math.min(25, this.brushPercent + 1);
+        else if (this.selection.length) { e.preventDefault(); this.scaleSelected(1.1); }
+      }
     };
 
     /**
@@ -1856,6 +3150,51 @@ export class EditorScene {
    * against the plane instead of falling back to the ray — which, mid-drag,
    * hits the part just laid.
    */
+  /**
+   * Line a free placement up with the parts already on the machine.
+   *
+   * The grid is absolute, so a part dropped beside an existing one landed on
+   * the nearest quarter-metre and not on the neighbour — which is what
+   * everybody was actually aiming at. Within a short reach the ghost takes
+   * the neighbour's face or centre line instead of the grid's.
+   *
+   * @returns {{pos:number[], to:string|null}} the adjusted rest position
+   */
+  _snapToNeighbour(rest, size) {
+    const REACH = 0.14;
+    const out = [...rest];
+    let to = null;
+    const half = [size[0] / 2, size[1] / 2, size[2] / 2];
+
+    // Every candidate line, per axis: the neighbour's two faces and its
+    // middle. A face pairs with the ghost's opposite face so they end flush.
+    const best = [null, null, null];
+    for (const [, node] of this.rig.nodes) {
+      if (!this._worldAabb(node, _box2)) continue;
+      // The rig's frame is the machine's own; the rest position is measured
+      // in the same one, so the ground offset is the only thing between them.
+      for (let a = 0; a < 3; a++) {
+        const k = 'xyz'[a];
+        const lo = _box2.min[k] - (a === 1 ? this.groundOffset : 0);
+        const hi = _box2.max[k] - (a === 1 ? this.groundOffset : 0);
+        const mid = (lo + hi) / 2;
+        for (const [want, label] of [
+          [lo - half[a], '面'], [hi + half[a], '面'], [mid, '中心'],
+        ]) {
+          const d = Math.abs(want - rest[a]);
+          if (d > REACH) continue;
+          if (!best[a] || d < best[a].d) best[a] = { d, want, label };
+        }
+      }
+    }
+    for (let a = 0; a < 3; a++) {
+      if (!best[a]) continue;
+      out[a] = best[a].want;
+      to = best[a].label;
+    }
+    return { pos: out, to };
+  }
+
   _proposeFree(size, forBone, forEquip) {
     _plane.setFromNormalAndCoplanarPoint(
       _v2.set(0, 1, 0), _v.set(0, this.groundOffset + this.workPlaneY, 0),
@@ -1873,14 +3212,20 @@ export class EditorScene {
     // the waist in it.
     const lift = forBone || forEquip ? 0 : (size[1] ?? 0) / 2;
     const foot = forBone || forEquip ? [0, 0, 0] : size;
+    // The neighbours get first refusal, and the grid catches what is left.
+    const near = this.snap && !forBone && !forEquip
+      ? this._snapToNeighbour([rest[0], rest[1] + lift, rest[2]], size)
+      : { pos: null, to: null };
+    const grid = [
+      this._snapValue(rest[0], foot[0]),
+      this._snapValue(rest[1], foot[1]) + lift,
+      this._snapValue(rest[2], foot[2]),
+    ];
     return {
       parentId,
+      alignedTo: near.to,
       mount: {
-        pos: [
-          this._snapValue(rest[0], foot[0]),
-          this._snapValue(rest[1], foot[1]) + lift,
-          this._snapValue(rest[2], foot[2]),
-        ],
+        pos: near.pos ?? grid,
         rot: this._turned(forBone ? alignYToFace(3) : [0, 0, 0, 1], 2),
       },
       size,
@@ -1973,7 +3318,7 @@ export class EditorScene {
       this._snapValue(local.y, step ? step[1] : 0),
       this._snapValue(local.z, step ? step[2] : 0),
     ];
-    const pos = faceAnchor(parent, face, alignY ? [0, 0, 0] : size, at);
+    const pos = faceAnchor(parent, face, alignY ? [0, 0, 0] : size, at, this.placeGap);
     // Whether the face ran out before the cursor did. The read-out says so;
     // silently pinning the ghost to the edge looks like the tool stopped
     // working.
@@ -2023,6 +3368,39 @@ export class EditorScene {
 
     node.group.worldToLocal(hit);
     return this._planOnFace(lane.parentId, parent, lane.face, size, alignY, hit);
+  }
+
+  /** The marquee rectangle in canvas pixels, or null. */
+  _marqueeRect() {
+    const p = this._press;
+    if (!p?.marquee) return null;
+    const r = this.canvas.getBoundingClientRect();
+    return {
+      x: Math.min(p.x, p.now.x) - r.left,
+      y: Math.min(p.y, p.now.y) - r.top,
+      w: Math.abs(p.now.x - p.x),
+      h: Math.abs(p.now.y - p.y),
+    };
+  }
+
+  /**
+   * Put the camera on one of the cardinal views.
+   *
+   * A machine is symmetrical and is looked at from the front, the side and
+   * above more than from anywhere else — and getting back to those by hand
+   * with an orbit control is fiddly enough that nobody bothers.
+   */
+  setView(which = 'front') {
+    const target = this.controls.target.clone();
+    const d = Math.max(6, this.rig.boundingRadius * 3.2);
+    const at = {
+      front: [0, 0, d], back: [0, 0, -d], left: [-d, 0, 0], right: [d, 0, 0],
+      top: [0, d, 0.001], iso: [d * 0.7, d * 0.55, d * 0.7],
+    }[which] ?? [0, 0, d];
+    this.camera.position.set(target.x + at[0], target.y + at[1], target.z + at[2]);
+    this.camera.lookAt(target);
+    this.controls.update();
+    return this;
   }
 
   _snapValue(v, footprint = 0) {
@@ -2134,7 +3512,10 @@ export class EditorScene {
     // And when the face ran out before the cursor did. Pinning the ghost
     // to the edge in silence looks like the tool stopped working.
     const edge = plan.clamped ? ' ・端' : '';
-    return `${shape} ${d}${turn}${high}${edge}`;
+    // Saying so, because a ghost that quietly ignores the grid to line up
+    // with a neighbour looks like the grid is broken.
+    const near = plan.alignedTo ? ` ・隣の${plan.alignedTo}に合わせた` : '';
+    return `${shape} ${d}${turn}${high}${edge}${near}`;
   }
 
   /**
@@ -2304,7 +3685,25 @@ export class EditorScene {
 
   // ---------------------------------------------------------- sculpting
 
+  /**
+   * Carve whatever is under the cursor, not only what happens to be picked.
+   *
+   * Sculpting worked on the selected block and nothing else, so crossing
+   * onto the next block did nothing at all — and the reason was invisible.
+   * The cursor takes the selection with it.
+   */
+  _followSculptTarget() {
+    if (this._press) return;                     // never mid-stroke
+    const hits = _ray.intersectObjects(this.rig.pickables, false);
+    const id = hits.length ? hits[0].object.userData.partId : null;
+    if (!id || id === this.selected) return;
+    if (this.locked.has(id) || this.hidden.has(id)) return;
+    if (!this.assembly.get(id)?.vox) return;
+    this.select(id);
+  }
+
   _hoverVoxel() {
+    this._followSculptTarget();
     this.hoverVoxel = null;
     const id = this.selected;
     const node = id ? this.rig.nodes.get(id) : null;
@@ -2458,9 +3857,22 @@ export class EditorScene {
     const r = this.brushRadiusCells(vox, node.part);
     let changed = false;
 
-    if (this.tool === TOOL.CARVE) changed = vox.brush(x, y, z, r, 0);
-    else if (this.tool === TOOL.ADD) changed = vox.brush(x, y, z, r, this.colorIndex + 1);
-    else changed = vox.paint(x, y, z, r, this.colorIndex);
+    const value = this.tool === TOOL.CARVE ? 0
+      : this.tool === TOOL.ADD ? this.colorIndex + 1 : this.colorIndex;
+    const cut = (cx) => {
+      if (this.tool === TOOL.PAINT) return vox.paint(cx, y, z, r, this.colorIndex);
+      return this.brushRound
+        ? vox.ball(cx, y, z, r, value)
+        : vox.brush(cx, y, z, r, value);
+    };
+    changed = cut(x);
+    // The same cut on the other side of the block, when symmetry is on.
+    // Carving one side of a chest and then doing it again by eye is the
+    // slowest work in the editor and the least likely to match.
+    if (this.symmetry) {
+      const mirrored = vox.n - 1 - x;
+      if (mirrored !== x && cut(mirrored)) changed = true;
+    }
 
     if (!changed) return;
 
@@ -2544,6 +3956,7 @@ export class EditorScene {
    * @param {number} face 0..5, +X -X +Y -Y +Z -Z. The top by default.
    */
   placeOnSelected(face = 2) {
+    this._remember(() => this.placeOnSelected(face));
     if (!PART_TOOLS.has(this.tool)) return null;
     const parentId = this.selected ?? this.assembly.rootId;
     const parent = this.assembly.get(parentId);
@@ -2617,7 +4030,15 @@ export class EditorScene {
             : blocked === 'rack'
               ? `武器は${WEAPON_SLOTS}枚までです。どれかを外してください`
               : `${label}は${EQUIP_META[blocked]?.label ?? blocked}と一緒には付けられません`;
-          this.onReject?.(why);
+          // Which plates it means, so "take one off" has somewhere to point.
+          const blame = blocked === 'rack'
+            ? this.assembly.equips()
+              .filter((e) => EQUIP_META[e.equipType]?.category === 'weapon')
+              .map((e) => e.id)
+            : this.assembly.equips()
+              .filter((e) => e.equipType === (blocked === 'unique' ? this.equipType : blocked))
+              .map((e) => e.id);
+          this.onReject?.(why, blame);
           return null;
         }
       }
@@ -2653,6 +4074,8 @@ export class EditorScene {
         added = this.assembly.addBone(plan.parentId, plan.mount, this.tool, { ...this.boneOpts });
       }
       if (!added) return null;
+      // Where "back to the one I just put down" points.
+      this._lastPlaced = added.id;
       const made = [added.id];
       if (this.symmetry && this.tool !== TOOL.STAMP) {
         const twin = this._mirror(added, twinPlan);
@@ -2708,6 +4131,8 @@ export class EditorScene {
     const order = [];
     for (const hit of hits) {
       const id = hit.object.userData.partId;
+      // Locked and hidden parts are not in the conversation.
+      if (this.locked.has(id) || this.hidden.has(id)) continue;
       if (id && !order.includes(id)) order.push(id);
     }
     if (order.length < 2 || additive) return order[0];

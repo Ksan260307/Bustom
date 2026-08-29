@@ -43,13 +43,11 @@ const TAU = Math.PI * 2;
  * matters.
  */
 const VITALS = {
-  /** Health fraction at which the frame begins to darken. */
+  /** Health fraction at which the frame begins to redden. */
   showBelow: 0.6,
-  /** ...and at which it starts beating. */
-  beatBelow: 0.3,
   /** How far in it reaches, as a fraction of the shorter screen edge. */
   depth: 0.16,
-  alpha: 0.5,
+  alpha: 0.42,
 };
 
 export class Hud {
@@ -310,14 +308,17 @@ export class Hud {
     // Nothing at all while healthy: a permanent red border is a border you
     // stop seeing, and then it cannot warn you of anything.
     const hurt = 1 - Math.min(1, left / VITALS.showBelow);
-    this.vitalPulse = (this.vitalPulse ?? 0) + dt * lerp(2.2, 7.5, 1 - left);
     if (hurt <= 0.001) return;
 
-    const beat = left < VITALS.beatBelow
-      ? 0.55 + 0.45 * Math.sin(this.vitalPulse * TAU)
-      : 1;
+    // Red, and only red.
+    //
+    // It also used to BEAT — all four edges pulsing at up to seven and a
+    // half times a second once the hull was under a third. Something that
+    // moves takes the eye away from the fight, which is the opposite of
+    // what a read-out at the edge of vision is for. How red it is already
+    // says how bad it is.
     const depth = Math.min(this.w, this.h) * VITALS.depth;
-    const alpha = hurt ** 1.4 * VITALS.alpha * beat;
+    const alpha = hurt ** 1.4 * VITALS.alpha;
 
     for (const [x0, y0, x1, y1] of [
       [0, 0, 0, depth], [0, this.h, 0, this.h - depth],

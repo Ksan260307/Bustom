@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { History } from '../src/editor/History.js';
 import { PartLibrary } from '../src/editor/PartLibrary.js';
+import { starterParts } from '../src/core/Assembly.js';
 import { Assembly, PRESETS, _resetIds } from '../src/core/Assembly.js';
 
 // ============================================================
@@ -131,6 +132,44 @@ describe('PartLibrary', () => {
   it('starts empty', () => {
     expect(lib.size).toBe(0);
     expect(lib.list()).toEqual([]);
+  });
+
+  describe('starter parts', () => {
+    it('puts whole limbs on an empty shelf', () => {
+      const added = lib.seed(1, starterParts());
+      expect(added).toBeGreaterThanOrEqual(3);
+      // Each one has to be a real sub-assembly, not a lone block: a shelf of
+      // single cubes would teach nobody anything about building a limb.
+      for (const item of lib.list()) {
+        expect(item.builtin).toBe(true);
+        expect(item.json.parts.length).toBeGreaterThan(1);
+      }
+    });
+
+    it('is offered once, so deleting one does not bring it back', () => {
+      lib.seed(1, starterParts());
+      const first = lib.list()[0];
+      lib.remove(first.id);
+      const again = new PartLibrary(store);
+      expect(again.seed(1, starterParts())).toBe(0);
+      expect(again.find(first.name)).toBeNull();
+    });
+
+    it('a later batch can still add to a shelf that was already seeded', () => {
+      lib.seed(1, starterParts());
+      const before = lib.size;
+      expect(lib.seed(2, [{ name: 'NEW BIT', json: part().toJSON() }])).toBe(1);
+      expect(lib.size).toBe(before + 1);
+    });
+
+    it('grafts back into a machine like anything else', () => {
+      lib.seed(1, starterParts());
+      const arm = lib.open(lib.list()[0].id);
+      const machine = Assembly.createDefault();
+      const before = machine.size;
+      machine.graft(arm, machine.rootId, { pos: [0, 1, 0], rot: [0, 0, 0, 1] });
+      expect(machine.size).toBeGreaterThan(before + 1);
+    });
   });
 
   it('stores a part and gives it an id', () => {

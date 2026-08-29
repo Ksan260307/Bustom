@@ -384,25 +384,60 @@ export class FieldScene {
 
   // ---------------------------------------------------------- lock-on
 
+  /**
+   * The nearest opponent, wherever it happens to be.
+   *
+   * It used to score by how squarely the CAMERA was facing something and
+   * refuse anything more than a fifth of a turn off screen or past two
+   * hundred metres — so pressing lock while looking the wrong way found
+   * nothing at all, and which machine you got depended on where the boom
+   * had drifted rather than on where the machines were. Nearest is a rule
+   * anybody can predict, and the arrows are there to disagree with it.
+   */
   _pickTarget(cycle = false) {
-    const cam = this.camera;
-    cam.getWorldDirection(_dir);
     let best = null;
-    let bestScore = -Infinity;
-    const current = this.lock?.robot;
-
+    let bestD = Infinity;
+    const current = this.lock?.robot ?? this.locking?.robot;
     for (const e of this.enemies) {
       if (!e.alive) continue;
       if (cycle && e === current) continue;
-      _v.copy(e.position).sub(cam.position);
-      const dist = _v.length();
-      if (dist > 220) continue;
-      const align = _v.divideScalar(dist).dot(_dir);
-      if (align < 0.35) continue;                       // roughly on screen
-      const score = align * 3.2 - dist / 160;
-      if (score > bestScore) { bestScore = score; best = e; }
+      const d = e.position.distanceTo(this.player.position);
+      if (d < bestD) { bestD = d; best = e; }
     }
     return best;
+  }
+
+  /** Every live opponent, in the order they appear across the screen. */
+  _targetsAcross() {
+    const out = [];
+    for (const e of this.enemies) {
+      if (!e.alive) continue;
+      _v.copy(e.position).project(this.camera);
+      // Behind the camera comes back mirrored, so those go to the ends
+      // rather than into the middle of the row.
+      out.push({ e, x: _v.z > 1 ? Math.sign(_v.x) * 1e3 : _v.x });
+    }
+    out.sort((a, b) => a.x - b.x);
+    return out.map((r) => r.e);
+  }
+
+  /**
+   * Move the lock one opponent to the left or to the right.
+   *
+   * Across the SCREEN, not around the machine: left means the one that
+   * looks left of this one, which is the only ordering the player can see.
+   */
+  shiftLock(dir) {
+    const list = this._targetsAcross();
+    if (!list.length) return null;
+    const cur = this.lock?.robot ?? this.locking?.robot;
+    const at = cur ? list.indexOf(cur) : -1;
+    const next = at < 0
+      ? list[dir > 0 ? 0 : list.length - 1]
+      : list[(at + dir + list.length) % list.length];
+    if (!next || next === cur) return null;
+    this._beginLock(next);
+    return next;
   }
 
   /**
@@ -431,6 +466,9 @@ export class FieldScene {
 
   _updateLock(dt) {
     const inp = this.input;
+
+    if (inp.consume('lockLeft', 0.2)) this.shiftLock(-1);
+    if (inp.consume('lockRight', 0.2)) this.shiftLock(1);
 
     if (inp.consume('cycleTarget', 0.2)) {
       const next = this._pickTarget(true) ?? this._pickTarget(false);

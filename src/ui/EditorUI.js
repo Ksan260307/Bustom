@@ -19,6 +19,7 @@ import { h, slider, vectorField, collapsible, toolSection, resizable, append } f
 import { KeyConfig } from './KeyConfig.js';
 import { ShareDialog } from './ShareDialog.js';
 import { Help } from './Help.js';
+import { partSketch } from './PartSketch.js';
 import { TitleScreen, ResultScreen } from './Title.js';
 
 export { h, slider, vectorField };
@@ -92,6 +93,155 @@ export class EditorUI {
     return this;
   }
 
+  _toggleMenu(menu) {
+    const wasOpen = !menu.classList.contains('hidden');
+    this._closeMenus();
+    if (!wasOpen) menu.classList.remove('hidden');
+    return this;
+  }
+
+  _closeMenus() {
+    for (const m of [this.fileMenu, this.historyMenu]) m?.classList.add('hidden');
+    return this;
+  }
+
+  /**
+   * Say where the weight sits, in words.
+   *
+   * Mass was reported and its PLACE was not, so "why does this keep tipping"
+   * had no answer anywhere on screen.
+   */
+  showBalance() {
+    const s = this.app.editor.stats;
+    const b = s?.balance;
+    const el = this.balanceNote;
+    if (!el) return this;
+    if (!b) { el.textContent = '重心を出せません'; el.classList.remove('hidden'); return this; }
+    const side = Math.abs(b[0]) < 0.05 ? '中央' : (b[0] > 0 ? `右に ${b[0].toFixed(2)}m` : `左に ${(-b[0]).toFixed(2)}m`);
+    const fore = Math.abs(b[2]) < 0.05 ? '' : (b[2] > 0 ? ` / 前に ${b[2].toFixed(2)}m` : ` / 後ろに ${(-b[2]).toFixed(2)}m`);
+    el.textContent = `重心: 高さ ${b[1].toFixed(2)}m ・ ${side}${fore}`;
+    el.classList.remove('hidden');
+    return this;
+  }
+
+  /** Redraw the kept mixes. */
+  renderRecipes(list) {
+    const box = this.recipeRow;
+    if (!box) return this;
+    const app = this.app;
+    box.replaceChildren(
+      h('button', { title: 'いまの形・寸法・色を覚えます', onClick: () => app.editor.keepRecipe() }, '＋'),
+      ...(list ?? []).map((r, i) => h('button', {
+        class: 'recipe',
+        title: `${SHAPES[r.shape]?.label ?? ''} ${r.size.map((n) => n.toFixed(2)).join('x')}`,
+        style: `border-color:${hexToCss(app.assembly.palette.get(r.color))}`,
+        onClick: () => app.editor.useRecipe(i),
+      }, SHAPES[r.shape]?.label?.slice(0, 2) ?? '？')),
+    );
+    return this;
+  }
+
+  /**
+   * Ask before something takes work away.
+   *
+   * Undo can put it back, but a carve is the slowest thing anybody does
+   * here and losing one silently is not a thing to find out about later.
+   */
+  confirmAction({ message, accept, cancel }) {
+    const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
+      ? window.confirm(message)
+      : true;
+    if (ok) accept?.(); else cancel?.();
+    return ok;
+  }
+
+  /** Draw the selection rectangle, or take it away. */
+  showMarquee(rect) {
+    const el = this.marquee;
+    if (!el) return this;
+    if (!rect || rect.w < 2 || rect.h < 2) { el.classList.add('hidden'); return this; }
+    el.classList.remove('hidden');
+    el.style.left = `${rect.x}px`;
+    el.style.top = `${rect.y}px`;
+    el.style.width = `${rect.w}px`;
+    el.style.height = `${rect.h}px`;
+    return this;
+  }
+
+  /** Say how much of the machine is currently out of sight or pinned down. */
+  syncVisibility(hidden, locked) {
+    const el = this.hiddenNote;
+    if (!el) return this;
+    const bits = [];
+    if (hidden) bits.push(`${hidden}個を隠しています`);
+    if (locked) bits.push(`${locked}個を固定しています`);
+    el.textContent = bits.join(' / ');
+    el.classList.toggle('hidden', !bits.length);
+    return this;
+  }
+
+  /** Say whether there is anything unsaved, next to the machine's name. */
+  syncDirty(dirty) {
+    this.dirtyDot?.classList.toggle('hidden', !dirty);
+    return this;
+  }
+
+  /**
+   * The undo stack, newest first, with how far back each one is. Clicking a
+   * row walks back to it — the same thing as pressing Ctrl+Z that many
+   * times, except you can see where you are going.
+   */
+  renderHistory() {
+    const box = this.historyList;
+    if (!box) return this;
+    const past = this.app.history.past;
+    if (!past.length) {
+      box.replaceChildren(h('div', { class: 'inspector-empty' }, 'まだ何もしていません。'));
+      return this;
+    }
+    box.replaceChildren(...past.slice(-24).reverse().map((entry, i) => h('button', {
+      class: 'historyrow',
+      onClick: () => { for (let k = 0; k <= i; k++) this.app.undo(); this.renderHistory(); },
+    }, h('span', { class: 'k' }, i === 0 ? '直前' : `${i + 1}手前`), entry.label)));
+    return this;
+  }
+
+  /** Redraw the list of named saves. */
+  renderSlots() {
+    const box = this.slotList;
+    if (!box) return this;
+    const list = this.app.slots();
+    if (!list.length) {
+      box.replaceChildren(h('div', { class: 'inspector-empty' },
+        'まだありません。「名前を付けて保存」で残せます。'));
+      return this;
+    }
+    box.replaceChildren(...list.map((entry) => h('div', { class: 'slotrow' },
+      h('button', {
+        class: 'slotopen', title: new Date(entry.at).toLocaleString(),
+        onClick: () => { this.app.openSlot(entry.id); this._closeMenus(); },
+      }, entry.name || 'NO NAME'),
+      h('button', {
+        class: 'danger', title: 'この保存を削除',
+        onClick: (e) => { e.stopPropagation(); this.app.deleteSlot(entry.id); },
+      }, '×'),
+    )));
+    return this;
+  }
+
+  /**
+   * Offer the safety net back, once, on the way in. Only an offer:
+   * restoring over the top of what somebody meant to open would be the same
+   * mistake in the other direction.
+   */
+  offerDraft() {
+    const d = this.app.draft();
+    if (!d || !this.draftBar) return this;
+    this.draftWhen.textContent = new Date(d.at).toLocaleString();
+    this.draftBar.classList.remove('hidden');
+    return this;
+  }
+
   /** Set the size the next block will be placed at, sliders and all. */
   _setNewSize(size) {
     this.app.editor.newBlockSize = [...size];
@@ -135,6 +285,93 @@ export class EditorUI {
       onInput: (e) => { app.assembly.name = e.target.value.toUpperCase(); },
     });
 
+    // A dot beside the name, lit while there is unsaved work. There was no
+    // sign at all: the only way to know whether the last hour was safe was
+    // to remember whether you had pressed the button.
+    this.dirtyDot = h('span', { class: 'dirtydot hidden', title: '保存していない変更があります' });
+
+    this.slotList = h('div', { class: 'slotlist' });
+
+    /**
+     * Narrow the parts list to one kind of thing.
+     *
+     * The list was the tree and only the tree, so "every plate on this
+     * machine" meant reading forty rows looking for the plate icon.
+     */
+    this.treeFilter = h('select', {
+      onChange: (e) => { this.treeKind = e.target.value; this.renderTree(); },
+    },
+      h('option', { value: '' }, 'すべて'),
+      h('option', { value: 'block' }, 'ブロックだけ'),
+      h('option', { value: 'bone' }, 'ボーンだけ'),
+      h('option', { value: 'equip' }, '装備プレートだけ'),
+      h('option', { value: 'color' }, '選択中と同じ色だけ'),
+      h('option', { value: 'picked' }, '選択中のものだけ'),
+    );
+    this.treeKind = '';
+
+    /**
+     * Find a row by what it is called or what it is cut from.
+     *
+     * On a machine of forty parts the list is a wall, and the thing you want
+     * is usually one you named — but naming it bought you nothing, because
+     * there was no way to ask for it back.
+     */
+    this.treeSearch = h('input', {
+      type: 'search', placeholder: '名前・形で探す', 'aria-label': 'パーツを探す',
+      onInput: (e) => { this.treeQuery = e.target.value.trim().toLowerCase(); this.renderTree(); },
+    });
+    this.treeQuery = '';
+
+    /** Whether typing one size changes the other two to match. */
+    this.keepAspect = h('input', { type: 'checkbox' });
+
+    /** Named selections: the row of them, and the verb that makes one. */
+    this.setRow = h('div', { class: 'row tight wrap' });
+
+    /** The last few colours used, most recent first. */
+    this.recentColors = [];
+    this.recentEl = h('div', { class: 'swatches hidden' });
+
+    /** Says how much is out of sight, because hidden work is easy to forget. */
+    this.hiddenNote = h('div', { class: 'note hidden' });
+
+    /** Where the weight sits, when somebody asks. */
+    this.balanceNote = h('div', { class: 'note hidden' });
+
+    /** Mixes worth keeping: shape, size and colour together. */
+    this.recipeRow = h('div', { class: 'row tight recipes' });
+
+    /** The rectangle drawn while Shift-dragging a selection. */
+    this.marquee = h('div', { class: 'marquee hidden' });
+
+    this.draftWhen = h('span', { class: 'k' }, '');
+    this.draftBar = h('div', { id: 'draftbar', class: 'hidden' },
+      h('span', {}, '前回の作業が残っています'),
+      this.draftWhen,
+      h('button', {
+        class: 'primary',
+        onClick: () => { this.app.restoreDraft(); this.draftBar.classList.add('hidden'); },
+      }, '復元する'),
+      h('button', {
+        onClick: () => { this.app.forgetDraft(); this.draftBar.classList.add('hidden'); },
+      }, '破棄'),
+    );
+
+    /**
+     * The undo stack, as a list.
+     *
+     * Sixty snapshots were kept and none could be seen: going back twenty
+     * steps meant pressing Ctrl+Z twenty times and watching for the moment
+     * it looked right.
+     */
+    this.historyList = h('div', { class: 'historylist' });
+    this.historyMenu = h('div', { class: 'menupop hidden' }, this.historyList);
+    this.historyBtn = h('button', {
+      class: 'icon', title: '編集の履歴',
+      onClick: (e) => { e.stopPropagation(); this._toggleMenu(this.historyMenu); this.renderHistory(); },
+    }, '⋮');
+
     this.presetSelect = h('select', {
       onChange: (e) => { if (e.target.value) { app.loadPreset(e.target.value); e.target.value = ''; } },
     },
@@ -151,24 +388,45 @@ export class EditorUI {
     this.undoBtn = h('button', { class: 'icon', title: '元に戻す (Ctrl+Z)', onClick: () => app.undo() }, '↶');
     this.redoBtn = h('button', { class: 'icon', title: 'やり直し (Ctrl+Y)', onClick: () => app.redo() }, '↷');
 
+    this.fileMenu = h('div', { class: 'menupop hidden' },
+      h('button', { onClick: () => { app.save(); this._closeMenus(); } }, '保存（上書き）'),
+      h('button', {
+        onClick: () => {
+          const name = window.prompt('名前を付けて保存', app.assembly.name);
+          if (name !== null) app.saveAs(name);
+          this._closeMenus();
+        },
+      }, '名前を付けて保存…'),
+      h('button', { onClick: () => { app.load(); this._closeMenus(); } }, '上書き保存から読込'),
+      h('div', { class: 'k', style: 'padding:6px 8px 2px' }, '保存したもの'),
+      this.slotList,
+      h('button', { onClick: () => { app.exportJson(); this._closeMenus(); } }, 'ファイルに書き出す'),
+      h('button', { onClick: () => { app.importJson(); this._closeMenus(); } }, 'ファイルから読み込む'),
+      h('button', { onClick: () => { this.share.show(); this._closeMenus(); } }, 'QRで共有 / 読み込み'),
+    );
+    this.fileBtn = h('button', {
+      onClick: (e) => { e.stopPropagation(); this._toggleMenu(this.fileMenu); this.renderSlots(); },
+    }, 'ファイル ▾');
+
     this.topbar = h('div', { id: 'topbar' },
       h('div', { class: 'brand' }, 'BLOSTOM', h('small', {}, 'BLOCK ROBO ARENA')),
       h('div', { class: 'sep' }),
       this.nameInput,
+      this.dirtyDot,
       this.presetSelect,
       h('div', { class: 'sep' }),
       this.undoBtn,
       this.redoBtn,
+      this.historyBtn,
+      h('div', { class: 'sep' }),
+      // Sixteen controls in one undifferentiated row is sixteen things to
+      // read every time you want one of them. Everything to do with keeping
+      // the machine now lives behind one word.
+      h('div', { class: 'menuwrap' }, this.fileBtn, this.fileMenu),
       h('button', {
         class: 'icon', title: '使い方 (F1)', onClick: () => this.help.toggle(),
       }, '？'),
       h('button', { class: 'icon', title: 'キー設定', onClick: () => this.keyConfig.show() }, '⌨'),
-      h('button', { class: 'icon', title: 'QRで共有 / 読み込み', onClick: () => this.share.show() }, '⧉'),
-      h('div', { class: 'sep' }),
-      h('button', { onClick: () => app.save() }, '保存'),
-      h('button', { onClick: () => app.load() }, '読込'),
-      h('button', { class: 'ghost', onClick: () => app.exportJson() }, '書出'),
-      h('button', { class: 'ghost', onClick: () => app.importJson() }, '取込'),
       h('div', { class: 'spacer' }),
       this.titleBtn,
       this.editBtn,
@@ -237,13 +495,212 @@ export class EditorUI {
       value: n, ...(n === SIZE_STEP ? { selected: 'selected' } : {}),
     }, `${n} m`)));
 
+    /**
+     * How far one notch of the rotation gizmo turns.
+     *
+     * Fifteen degrees was fixed while the placement grid became adjustable:
+     * a quarter turn was six drags, and five degrees was not available at
+     * all — so anything deliberately off-square had to be typed in.
+     */
+    this.turnStep = h('select', {
+      onChange: (e) => { app.editor.setTurnStep(Number(e.target.value)); },
+    }, ...[5, 15, 30, 45, 90].map((n) => h('option', {
+      value: n, ...(n === 15 ? { selected: 'selected' } : {}),
+    }, `${n}°`)));
+
+    /**
+     * Which way the machine is cut open, and how far along.
+     *
+     * Everything past the first layer of armour was invisible, so a block
+     * buried in the chest could not be inspected or even known about.
+     */
+    this.sectionAxis = h('select', {
+      onChange: () => this._applySection(),
+    },
+      h('option', { value: '' }, '切らない'),
+      h('option', { value: 'x' }, '左右で切る'),
+      h('option', { value: 'y' }, '上下で切る'),
+      h('option', { value: 'z' }, '前後で切る'),
+    );
+    this.sectionAt = h('input', {
+      type: 'range', min: -3, max: 3, step: 0.05, value: 0,
+      onInput: () => this._applySection(),
+    });
+    this.seeThrough = h('input', {
+      type: 'checkbox',
+      onChange: (e) => app.editor.setSeeThrough(e.target.checked),
+    });
+
+    /** World axes or the part's own. */
+    this.spaceButtons = [
+      h('button', {
+        class: 'active', title: '世界の軸で動かす',
+        onClick: () => this.setGizmoSpace('world'),
+      }, '世界の軸'),
+      h('button', {
+        title: 'そのパーツ自身の軸で動かす',
+        onClick: () => this.setGizmoSpace('local'),
+      }, 'パーツの軸'),
+    ];
+
     this.gizmoBox = h('div', {},
       h('div', { class: 'row tight' }, ...this.gizmoButtons),
-      h('label', { class: 'checkline' }, this.snapToggle, 'グリッドと 15° にスナップ'),
+      h('div', { class: 'row tight' }, ...this.spaceButtons),
+      h('label', { class: 'checkline' }, this.snapToggle, 'グリッドと角度にスナップ'),
       h('label', { class: 'field' }, h('span', {}, 'グリッド'), this.snapStep),
+      h('label', { class: 'field' }, h('span', {}, '角度'), this.turnStep),
+      slider('面からの隙間', {
+        min: 0, max: 0.3, step: 0.01, value: 0, unit: ' m', fixed: 2,
+      }, (v) => { app.editor.placeGap = v; }),
+      h('div', { class: 'note' }, '0 なら面にぴったり。少し空けるとフィンや装甲の重なりが作れます。'),
+      h('h3', { class: 'inline' }, '中を見る'),
+      h('label', { class: 'field' }, h('span', {}, '断面'), this.sectionAxis),
+      this.sectionAt,
+      h('label', { class: 'checkline' }, this.seeThrough, '機体を透かす'),
+      h('div', { class: 'note' }, '床のマスは 1m。機体の全高は右上のスペック帯に出ます。'),
       h('div', { class: 'row tight' },
         h('button', { onClick: () => app.editor.selectAll() }, '全選択'),
         h('button', { onClick: () => app.editor.duplicateSelected() }, '複製'),
+      ),
+      h('h3', { class: 'inline' }, '選ぶ'),
+      h('div', { class: 'row tight' },
+        h('button', {
+          title: '選んだパーツの下にあるもの全部を足します（削除で消えるのと同じ範囲）',
+          onClick: () => app.editor.selectSubtree(),
+        }, '配下ごと'),
+        h('button', {
+          title: '同じ形のブロック・同じ種類のプレートを全部足します',
+          onClick: () => app.editor.selectSimilar(),
+        }, '同じ種類'),
+      ),
+      h('div', { class: 'note' }, 'Shift+ドラッグで、囲んだ範囲のパーツを選べます。'),
+      h('h3', { class: 'inline' }, '隠す・固定'),
+      h('div', { class: 'row tight' },
+        h('button', { onClick: () => app.editor.hideSelected() }, '隠す'),
+        h('button', { onClick: () => app.editor.isolateSelected() }, '選択だけ'),
+        h('button', { onClick: () => app.editor.showAll() }, '全部出す'),
+      ),
+      h('div', { class: 'row tight' },
+        h('button', {
+          title: '選んだパーツを、クリックでもギズモでも掴めなくします',
+          onClick: () => app.editor.lockSelected(true),
+        }, '固定する'),
+        h('button', { onClick: () => app.editor.unlockAll() }, '固定を解除'),
+      ),
+      this.hiddenNote,
+      h('h3', { class: 'inline' }, '直す'),
+      h('div', { class: 'row tight' },
+        h('button', {
+          title: 'えらんだパーツを機体の中心線に戻します',
+          onClick: () => app.editor.centreSelected(),
+        }, '中心へ'),
+        h('button', {
+          title: '親の傾きを打ち消して、世界の軸に揃えます',
+          onClick: () => app.editor.straightenSelected(),
+        }, '世界の軸'),
+        h('button', {
+          title: 'ひとつ前の選択に戻ります',
+          onClick: () => app.editor.selectBack(),
+        }, '選択を戻す'),
+      ),
+      h('div', { class: 'row tight' },
+        h('button', {
+          title: 'コピーせず、その場で向きを反転します',
+          onClick: () => app.editor.flipSelected('x'),
+        }, 'その場で反転'),
+        h('button', {
+          title: '最後に選んだパーツの傾きを、他の全部に写します',
+          onClick: () => app.editor.matchRotationSelected(),
+        }, '傾きを揃える'),
+        h('button', {
+          title: '最後に選んだブロックの形と色を、他の全部に写します',
+          onClick: () => app.editor.matchLookSelected(),
+        }, '見た目を揃える'),
+      ),
+      h('div', { class: 'row tight' },
+        h('button', {
+          title: '最初に選んだ2つの中間に、残りを置きます',
+          onClick: () => app.editor.centreBetween(),
+        }, 'あいだに置く'),
+        h('button', {
+          title: 'ついている面いっぱいの大きさにします',
+          onClick: () => app.editor.fitToHost(),
+        }, '面いっぱい'),
+        h('button', {
+          title: 'ボーンの長さと太さを、最後に選んだものに揃えます',
+          onClick: () => app.editor.matchBoneSelected(),
+        }, '骨を揃える'),
+      ),
+      h('h3', { class: 'inline' }, '探す'),
+      h('div', { class: 'row tight' },
+        h('button', {
+          title: '他のブロックの中に完全に埋まっているものを探します',
+          onClick: () => app.editor.findBuried(),
+        }, '埋まったブロック'),
+        h('button', {
+          title: '同じ色のブロックを全部選びます',
+          onClick: () => app.editor.selectByColor(),
+        }, '同じ色'),
+        h('button', {
+          title: '反対側の相棒に飛びます',
+          onClick: () => app.editor.selectTwin(),
+        }, '反対側'),
+        h('button', {
+          title: '最後に置いたパーツに戻ります',
+          onClick: () => app.editor.selectLastPlaced(),
+        }, '最後に置いたもの'),
+      ),
+      h('h3', { class: 'inline' }, '選択のまとまり'),
+      h('div', { class: 'note' }, '選び出すのに手間のかかる組を、名前を付けて残しておけます。'),
+      this.setRow,
+      h('div', { class: 'row tight' },
+        h('button', {
+          onClick: () => this.keepSelectionSet(),
+        }, '今の選択を残す'),
+      ),
+      h('div', { class: 'row tight' },
+        h('button', {
+          title: 'クリックしたパーツを新しい連結先にします',
+          onClick: () => app.editor.beginReparent(),
+        }, 'つなぎ替え'),
+        h('button', {
+          title: '直前の操作をもう一度（Ctrl+R）',
+          onClick: () => app.editor.repeatLast(),
+        }, 'もう一度'),
+        h('button', {
+          title: 'えらんだパーツに名前を付けます',
+          onClick: () => this.askName(),
+        }, '名前'),
+      ),
+      h('h3', { class: 'inline' }, '肢をつくる'),
+      h('div', { class: 'note' }, 'えらんだパーツから、骨2本と足先を一度に生やします。'),
+      h('div', { class: 'row tight' },
+        h('button', { onClick: () => app.editor.addLimb('leg', { segments: 2 }) }, '脚'),
+        h('button', { onClick: () => app.editor.addLimb('arm', { segments: 2, foot: false }) }, '腕'),
+        h('button', { onClick: () => app.editor.addLimb('leg', { segments: 3 }) }, '脚（3節）'),
+      ),
+      h('h3', { class: 'inline' }, '円周にならべる'),
+      h('div', { class: 'row tight' },
+        ...[4, 6, 8].map((n) => h('button', {
+          onClick: () => app.editor.repeatAround(n, 'y'),
+        }, `${n}個`)),
+      ),
+      h('h3', { class: 'inline' }, '確かめる'),
+      h('div', { class: 'row tight' },
+        h('button', {
+          title: '左右で相方のいないパーツをえらびます',
+          onClick: () => app.editor.findAsymmetry(),
+        }, '左右の食い違い'),
+        h('button', {
+          title: '重心の位置を出します',
+          onClick: () => this.showBalance(),
+        }, '重心'),
+      ),
+      this.balanceNote,
+      h('h3', { class: 'inline' }, '視点'),
+      h('div', { class: 'row tight' },
+        ...[['front', '正面'], ['left', '側面'], ['top', '上'], ['iso', '斜め']]
+          .map(([id, label]) => h('button', { onClick: () => app.editor.setView(id) }, label)),
       ),
       h('div', { class: 'row tight' },
         h('button', {
@@ -255,7 +712,18 @@ export class EditorUI {
       h('div', { class: 'note' }, '2つ以上えらんでから。同じパーツにつながっているもの同士で働きます。'),
       ...['x', 'y', 'z'].map((axis) => h('div', { class: 'row tight' },
         h('span', { class: 'k', style: 'width:14px' }, axis.toUpperCase()),
-        h('button', { onClick: () => app.editor.arrangeSelected(axis, 'align') }, '揃える'),
+        h('button', {
+          title: '平均の位置へ。いちばん動かす距離が短くなります',
+          onClick: () => app.editor.arrangeSelected(axis, 'align'),
+        }, '揃える'),
+        h('button', {
+          title: 'いちばん手前のものに合わせます',
+          onClick: () => app.editor.arrangeSelected(axis, 'min'),
+        }, '手前で'),
+        h('button', {
+          title: 'いちばん奥のものに合わせます',
+          onClick: () => app.editor.arrangeSelected(axis, 'max'),
+        }, '奥で'),
         h('button', { onClick: () => app.editor.arrangeSelected(axis, 'spread') }, '均等'),
         h('button', {
           title: 'この向きに、自分の幅ぶんずつ繰り返します',
@@ -321,6 +789,8 @@ export class EditorUI {
       ),
       h('div', { class: 'note' },
         'Shift+ホイールでも変えられます。0 は床の上。'),
+      h('h3', { class: 'inline' }, 'よく使う組み合わせ'),
+      this.recipeRow,
       h('h3', { class: 'inline' }, '寸法'),
       h('label', { class: 'checkline' }, this.sizeLinked, '縦横高さを揃える'),
       h('div', { class: 'row tight' },
@@ -395,8 +865,25 @@ export class EditorUI {
       onChange: (e) => app.setVoxResolution(Number(e.target.value)),
     }, ...VOX_LEVELS.map((n) => h('option', { value: n }, `1/${n}`)));
 
+    /**
+     * The ordinary brush cuts cubes, so every carved edge has corners in it.
+     * This one cuts spheres: drilled holes, and recesses that curve.
+     */
+    this.brushShape = h('input', {
+      type: 'checkbox',
+      onChange: (e) => { app.editor.brushRound = e.target.checked; },
+    });
+
+    /** The same cut on both sides at once. */
+    this.sculptMirror = h('input', {
+      type: 'checkbox', checked: 'checked',
+      onChange: (e) => this.syncSymmetry(e.target.checked),
+    });
+
     this.sculptBox = h('div', {},
       this.brushSlider,
+      h('label', { class: 'checkline' }, this.brushShape, '丸いブラシ'),
+      h('label', { class: 'checkline' }, this.sculptMirror, '左右対称に削る'),
       h('label', { class: 'field' }, h('span', {}, '加工の細かさ')),
       this.resSelect,
       h('div', { class: 'note' },
@@ -405,7 +892,7 @@ export class EditorUI {
 
     this.symmetryToggle = h('input', {
       type: 'checkbox', checked: 'checked',
-      onChange: (e) => { app.editor.symmetry = e.target.checked; },
+      onChange: (e) => this.syncSymmetry(e.target.checked),
     });
     this.previewToggle = h('input', {
       type: 'checkbox', onChange: (e) => app.editor.setPreviewMotion(e.target.checked),
@@ -441,6 +928,10 @@ export class EditorUI {
     // pointer itself.
     this.placeHint = h('div', { class: 'placehint hidden' });
     this.root.append(this.placeHint);
+    this.root.append(this.draftBar);
+    this.root.append(this.marquee);
+    // A click anywhere else puts the menus away.
+    document.addEventListener('pointerdown', () => this._closeMenus());
 
     this.leftScroll = h('div', { class: 'panelscroll' });
     this.leftPanel = resizable(
@@ -499,10 +990,12 @@ export class EditorUI {
       'パーツ一覧',
       h('div', { class: 'body' },
         h('div', { class: 'row tight' },
-          h('span', { class: 'note', style: 'margin:0' }, '見えない所のパーツもここから選べます'),
+          h('span', { class: 'note', style: 'margin:0' }, '見えない所のパーツもここから'),
+          this.treeFilter,
           h('div', { class: 'spacer' }),
           this.treeCount,
         ),
+        this.treeSearch,
         this.treeEl,
       ),
       // Open: this is the only way to reach a part that something else is
@@ -521,6 +1014,8 @@ export class EditorUI {
           // folded away it is four actions from "I want that one red".
           collapsible('色', h('div', { class: 'body' },
             this.paletteEl,
+            h('h3', { class: 'inline' }, '最近使った色'),
+            this.recentEl,
             h('h3', { class: 'inline' }, 'カスタム色'),
             this.customEl,
             this.wheelToggle,
@@ -844,7 +1339,13 @@ export class EditorUI {
 
     this.libraryEl.replaceChildren(
       ...items.map((item) => h('div', { class: 'libitem' },
-        h('div', { class: 'libname', title: item.name }, item.name),
+        partSketch(item.json, 40),
+        h('div', { class: 'libname', title: item.name },
+          item.name,
+          // Which of these you made and which came with the game. Deleting
+          // your own work and deleting a starter part are not the same act,
+          // and the row said nothing either way.
+          item.builtin ? h('div', { class: 'libtag' }, '最初から入っているパーツ') : null),
         h('div', { class: 'row tight' },
           h('button', { title: 'メイン編集に置く', onClick: () => app.placePart(item.id) }, '配置'),
           h('button', { title: 'パーツ編集で開く', onClick: () => app.openPartEditor(item.id) }, '編集'),
@@ -865,9 +1366,79 @@ export class EditorUI {
     this.equipHint.textContent = EQUIP_META[type]?.blurb ?? '';
   }
 
+  /**
+   * Name what is selected now, so it can be picked again in one click.
+   *
+   * Picking out "the eight thruster housings" is a minute of careful
+   * clicking that the next click throws away.
+   */
+  keepSelectionSet() {
+    if (!this.app.editor.selection.size) { this.toastMsg('残す選択がありません'); return; }
+    const name = window.prompt('このまとまりの名前', '');
+    if (name === null) return;
+    if (this.app.editor.keepSelection(name)) this.toastMsg(`「${name}」として残しました`);
+  }
+
+  /** Draw one button per saved selection, plus a way to forget one. */
+  renderSelectionSets(names) {
+    const app = this.app;
+    this.setRow.replaceChildren(
+      ...(names ?? []).map((name) => h('button', {
+        title: `${name} を選び直す（右クリックで削除）`,
+        onClick: () => app.editor.useSelection(name),
+        onContextmenu: (e) => { e.preventDefault(); app.editor.dropSelection(name); },
+      }, name)),
+      ...(names?.length ? [] : [h('span', { class: 'note', style: 'margin:0' }, 'まだありません')]),
+    );
+    return this;
+  }
+
+  /** One of two axis frames, and the buttons say which. */
+  setGizmoSpace(space) {
+    this.app.editor.setGizmoSpace(space);
+    this.spaceButtons[0].classList.toggle('active', space !== 'local');
+    this.spaceButtons[1].classList.toggle('active', space === 'local');
+    return this;
+  }
+
+  _applySection() {
+    const axis = this.sectionAxis.value || null;
+    this.app.editor.setSection(axis, Number(this.sectionAt.value));
+    this.sectionAt.classList.toggle('hidden', !axis);
+    return this;
+  }
+
   syncGizmoMode(mode) {
     this.gizmoButtons[0].classList.toggle('active', mode === 'translate');
     this.gizmoButtons[1].classList.toggle('active', mode === 'rotate');
+  }
+
+  /**
+   * Symmetry is one setting with a box in two places — beside placement and
+   * beside carving — because it matters in both and walking to the other
+   * panel to find it is how people end up carving one side only.
+   */
+  syncSymmetry(on) {
+    this.app.editor.setSymmetry(on);
+    this.symmetryToggle.checked = on;
+    this.sculptMirror.checked = on;
+    return this;
+  }
+
+  /**
+   * Name the selection.
+   *
+   * A machine of forty parts is forty rows called 「ブロック」, and the one
+   * you want is the one you would have named if naming had been possible.
+   */
+  askName() {
+    const parts = this.app.editor.selectedParts();
+    if (!parts.length) { this.toastMsg('名前を付けるパーツを選んでください'); return; }
+    const now = parts.length === 1 ? (parts[0].label ?? '') : '';
+    const next = window.prompt('パーツの名前', now);
+    if (next === null) return;
+    const n = this.app.editor.renameSelected(next);
+    if (n) { this.renderTree(); this.toastMsg(`${n} 個に名前を付けました`); }
   }
 
   syncResolution(n) { this.resSelect.value = String(n); }
@@ -902,6 +1473,25 @@ export class EditorUI {
       ...custom.map((e) => mk(e.hex, e.index, hexToCss(e.hex))),
       ...(custom.length ? [] : [h('div', { class: 'note', style: 'grid-column:1/-1' }, 'まだありません')]),
     );
+
+    // The last few colours actually used, in the order they were used.
+    //
+    // A scheme is three or four colours out of thirty-odd swatches, and
+    // every switch between them was a hunt across two grids — including the
+    // switch back to the one used a second ago.
+    this.recentEl.replaceChildren(
+      ...this.recentColors
+        .filter((i) => pal.get(i) !== undefined)
+        .map((i) => mk(pal.get(i), i, `最近使った色 ${hexToCss(pal.get(i))}`)),
+    );
+    this.recentEl.classList.toggle('hidden', !this.recentColors.length);
+  }
+
+  /** Remember a colour the moment it is chosen, most recent first. */
+  noteColor(index) {
+    this.recentColors = [index, ...this.recentColors.filter((i) => i !== index)].slice(0, 8);
+    this.renderPalette();
+    return this;
   }
 
   syncMode(mode) {
@@ -927,6 +1517,12 @@ export class EditorUI {
     // brings it back, and so does pausing.
     const wantBar = !editing && !isTitle;
     this.fieldBar.classList.toggle('hidden', !wantBar);
+    // A pause menu belongs to a fight and to nothing else.
+    //
+    // It was only ever put away by whoever opened it, so leaving a paused
+    // fight for the title screen — which does not go through resume — left
+    // it sitting over the menu. Owning it here means no exit can forget.
+    if (!wantBar) this.setPaused(false);
     if (wantBar && !this._fieldBarWasOn) this.showFieldHint();
     this._fieldBarWasOn = wantBar;
 
@@ -969,6 +1565,9 @@ export class EditorUI {
     const app = this.app;
     const asm = app.assembly;
     const selected = new Set(app.editor.selection ?? []);
+    // Which colour "the same colour" means: the one the selection is wearing.
+    const seed = asm.get(app.editor.selected);
+    const wantColor = seed?.vox?.dominantColor?.() ?? null;
     const rows = [];
 
     const KIND = {
@@ -981,6 +1580,23 @@ export class EditorUI {
     const walk = (id, depth) => {
       const part = asm.get(id);
       if (!part) return;
+      // Narrowed to one kind: the tree was the tree and only the tree, so
+      // "every plate on this machine" meant reading forty rows looking for
+      // an icon. The shape of the tree is kept — a hidden row's children
+      // still hang off where it was.
+      const shapeName = SHAPES[part.shape ?? SHAPE_DEFAULT]?.label ?? '';
+      // The colour is in the haystack too: "the red ones" is how people
+      // describe a part far more often than by the shape it was cut from.
+      const hex = part.vox?.dominantColor?.() >= 0
+        ? hexToCss(asm.palette.get(part.vox.dominantColor()) ?? 0)
+        : '';
+      const hay = `${part.label ?? ''} ${shapeName} ${part.kind} ${hex}`.toLowerCase();
+      const kindOk = !this.treeKind
+        || (this.treeKind === 'picked' ? selected.has(id)
+          : this.treeKind === 'color' ? (wantColor !== null
+            && part.vox?.dominantColor?.() === wantColor)
+          : part.kind === this.treeKind);
+      const wanted = kindOk && (!this.treeQuery || hay.includes(this.treeQuery));
       const kind = KIND[part.kind] ?? KIND.block;
       // A name the builder gave it beats the shape it happens to be cut
       // from: "PELVIS" says more about a row than "面取り" ever will.
@@ -995,7 +1611,9 @@ export class EditorUI {
       const row = h('button', {
         class: `treerow${selected.has(id) ? ' active' : ''}`,
         style: `padding-left:${6 + depth * 11}px`,
-        title: `${kind.label} / ${id}`,
+        // How deep it is, because a part seven levels down takes everything
+        // below it when it goes and nothing on screen said so.
+        title: `${kind.label} / 第${depth + 1}階層 / ${id}`,
         onClick: (e) => {
           app.editor.select(id, e.ctrlKey || e.metaKey);
           // Selecting something you cannot see is only useful if the view
@@ -1006,13 +1624,13 @@ export class EditorUI {
         h('span', { class: 'tk' }, kind.icon),
         h('span', { class: 'tn' }, name),
       );
-      rows.push(row);
+      if (wanted) rows.push(row);
       for (const child of part.children) walk(child, depth + 1);
     };
 
     if (asm.rootId) walk(asm.rootId, 0);
     this.treeEl.replaceChildren(...rows);
-    this.treeCount.textContent = `${asm.size}`;
+    this.treeCount.textContent = this.treeKind ? `${rows.length} / ${asm.size}` : `${asm.size}`;
     return this;
   }
 
@@ -1092,9 +1710,42 @@ export class EditorUI {
         size[i] = v;
         app.editor.resizeSelected(size);
       };
+      // Sliders set ONE size on all of them, which is right for four
+      // identical legs and destructive for anything else. Say so, and put
+      // the thing people actually mean next to it.
+      if (blocks.length > 1 && new Set(blocks.map((b) => b.size.join())).size > 1) {
+        rows.push(h('div', { class: 'note warn' },
+          'えらんだブロックの寸法はばらばらです。下のスライダーは全部を同じ寸法にします。'));
+      }
+      rows.push(h('div', { class: 'row tight' },
+        h('button', {
+          title: 'えらんだものを、それぞれの寸法のまま大きくします',
+          onClick: () => app.editor.scaleSelected(1.1),
+        }, '× 1.1'),
+        h('button', { onClick: () => app.editor.scaleSelected(1 / 1.1) }, '÷ 1.1'),
+        h('button', {
+          title: '最後にえらんだものの寸法に揃えます',
+          onClick: () => app.editor.matchSizeSelected(),
+        }, '寸法を揃える'),
+      ));
       rows.push(...['X', 'Y', 'Z'].map((axis, i) => slider(`幅 ${axis}`, {
         min: SIZE_MIN, max: SIZE_MAX, step: SIZE_STEP, value: base[i], fixed: 2,
       }, (v) => set(i, v))));
+      rows.push(vectorField('寸法', base, SIZE_STEP, (v) => {
+        // Three independent fields, unless the lock says otherwise: making
+        // a part "a bit bigger" without squashing it meant working out two
+        // more numbers by hand, every time.
+        if (!this.keepAspect.checked || blocks.length !== 1) {
+          app.editor.resizeSelected(v);
+          return;
+        }
+        const was = blocks[0].size;
+        const axis = v.findIndex((n, i) => Math.abs(n - was[i]) > 1e-6);
+        if (axis < 0) return;
+        app.editor.resizeKeepingShape(axis, v[axis]);
+        this.renderInspector(app.editor.selectedParts());
+      }));
+      rows.push(h('label', { class: 'checkline' }, this.keepAspect, '縦横比を保つ'));
 
       rows.push(h('h3', { class: 'inline' }, '形'));
       rows.push(...this._shapeGrid(() => blocks[0].shape, (id) => app.editor.setBlockShapeSelected(id)));
@@ -1151,8 +1802,44 @@ export class EditorUI {
         ));
         app.editor.setMountSelected({ rot: q.toArray() });
       }));
+      // Three angles do not commute, and the order they are applied in
+      // decides where the part ends up. Typing 90 into Y after 90 into X
+      // gives a different answer than the other way round, and the panel
+      // never said which one it was doing.
+      rows.push(h('div', { class: 'note' },
+        '角度は X → Y → Z の順にかかります。親の傾きごと戻すなら「世界の軸」。'));
+
+      // Where it sits on the machine, not on its parent.
+      //
+      // The fields above are measured against whatever the part hangs off,
+      // so the same height on two limbs reads as two different numbers and
+      // "are these level?" had no answer anywhere on screen.
+      const world = app.editor.machinePosition(part.id);
+      if (world) {
+        rows.push(h('div', { class: 'stat' },
+          h('span', { class: 'k' }, '機体基準'),
+          h('span', { class: 'v' }, world.map((n) => n.toFixed(2)).join(' , '))));
+      }
+
+      // Which face it is on. Getting this wrong used to mean deleting the
+      // part and placing it again, which loses everything carved into it.
+      if (part.mount?.face !== undefined) {
+        rows.push(h('h3', { class: 'inline' }, 'ついている面'));
+        rows.push(h('div', { class: 'row tight wrap' },
+          ...[['右', 0], ['左', 1], ['上', 2], ['下', 3], ['前', 4], ['後', 5]]
+            .map(([label, face]) => h('button', {
+              class: part.mount.face === face ? 'active' : '',
+              onClick: () => app.editor.moveToFace(face),
+            }, label)),
+        ));
+      }
 
       // --- which segment does it ride with?
+      rows.push(h('button', {
+        class: 'ghost wide',
+        title: 'クリックしたパーツを新しい連結先にします',
+        onClick: () => app.editor.beginReparent(),
+      }, 'クリックでつなぎ替え'));
       const options = [...app.assembly.parts.values()]
         .filter((p) => app.assembly.canReparent(part.id, p.id))
         .map((p) => h('option', {
@@ -1202,6 +1889,12 @@ export class EditorUI {
           type: 'checkbox', ...(part.invert ? { checked: 'checked' } : {}),
           onChange: (ev) => { part.invert = ev.target.checked; app.editor.rebuild(); },
         }), '動きを反転'));
+
+      rows.push(h('button', {
+        class: 'ghost wide',
+        title: '選んだ他のボーンを、このボーンの長さと太さに揃えます',
+        onClick: () => app.editor.matchBoneSelected(),
+      }, '他のボーンをこれに揃える'));
 
       rows.push(...this._boneMotion(part));
 
@@ -1359,6 +2052,12 @@ export class EditorUI {
       }
     } else {
       rows.push(h('h3', { class: 'inline' }, '寸法'));
+      rows.push(vectorField('数値', part.size, SIZE_STEP,
+        (v) => app.editor.resizeSelected(v)));
+      rows.push(h('div', { class: 'row tight' },
+        h('button', { onClick: () => app.editor.scaleSelected(1.1) }, '× 1.1'),
+        h('button', { onClick: () => app.editor.scaleSelected(1 / 1.1) }, '÷ 1.1'),
+      ));
       ['X', 'Y', 'Z'].forEach((axis, i) => {
         rows.push(slider(axis, {
           min: SIZE_MIN, max: SIZE_MAX, step: SIZE_STEP, value: part.size[i], fixed: 2,
@@ -1557,19 +2256,40 @@ export class EditorUI {
   renderStats(stats) {
     const pct = (v) => `${Math.round(v * 100)}%`;
 
+    // What moved since the last time this was drawn.
+    //
+    // The numbers changed as you built and never said which way, so whether
+    // the last five minutes made the machine better or worse was something
+    // you had to have written down beforehand.
+    const was = this._lastStats;
+    const delta = (key, now) => {
+      const before = was?.[key];
+      if (before === undefined || Math.abs(now - before) < 0.05) return '';
+      return now > before ? 'up' : 'down';
+    };
     const cell = (k, v, cls = '') => h('div', { class: 'speccell' },
       h('span', { class: 'k' }, k), h('span', { class: `v ${cls}` }, v));
     this.specStrip.replaceChildren(
-      cell('質量', stats.mass.toFixed(1)),
+      cell('質量', stats.mass.toFixed(1), delta('mass', stats.mass)),
       cell('機動', stats.thrustToMass.toFixed(1),
-        stats.agility > 0.55 ? 'good' : stats.agility < 0.22 ? 'warn' : ''),
-      cell('耐久', String(Math.round(stats.durability * (1 + (stats.hpBonus ?? 0))))),
+        delta('thrustToMass', stats.thrustToMass)
+        || (stats.agility > 0.55 ? 'good' : stats.agility < 0.22 ? 'warn' : '')),
+      cell('耐久', String(Math.round(stats.durability * (1 + (stats.hpBonus ?? 0)))),
+        delta('durability', stats.durability)),
       cell('脚', String(stats.legs)),
+      // How big the thing is. A builder of robots never said.
+      cell('全高', `${(this.app.editor.measure().whole.y).toFixed(1)}m`),
       // Only when there is something to say. A row reading "x1.0" on every
       // machine that has never fitted a tank is a row nobody reads.
       ...((stats.energyCapacity ?? 1) > 1
         ? [cell('EN', `x${stats.energyCapacity.toFixed(2)}`, 'good')] : []),
+      // Part count, which is what decides how heavy the editor itself feels.
+      cell('パーツ', String(this.app.assembly.parts.size),
+        this.app.assembly.parts.size > 220 ? 'warn' : ''),
     );
+    this._lastStats = {
+      mass: stats.mass, thrustToMass: stats.thrustToMass, durability: stats.durability,
+    };
 
     this.statsEl.replaceChildren(
       // The machine's gait is not named here, and deliberately. Stamping a

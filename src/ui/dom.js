@@ -41,15 +41,88 @@ export function slider(label, { min, max, step, value, unit = '', fixed = 0 }, o
   return wrap;
 }
 
+/**
+ * Read a number field that may contain arithmetic.
+ *
+ * Sizes come out of other sizes — half of that, three of these plus a gap —
+ * and the field took only the answer, so the arithmetic was done in your
+ * head or in another window and then typed in as a decimal you could no
+ * longer check.
+ *
+ * Only digits and the four operators are accepted, so nothing here can run
+ * anything: a stray letter falls back to the plain number.
+ */
+export function readNumber(text, fallback = 0) {
+  const raw = String(text ?? '').trim();
+  if (!raw) return fallback;
+  const plain = Number(raw);
+  if (Number.isFinite(plain)) return plain;
+  if (!/^[-+*/().\d\s]+$/.test(raw)) return fallback;
+  try {
+    // eslint-disable-next-line no-new-func
+    const v = Function(`"use strict";return (${raw});`)();
+    return Number.isFinite(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Let a number field be dragged as well as typed.
+ *
+ * Nudging a part half a centimetre meant clicking into a field, selecting
+ * what was there and typing a new number — for a change you could have made
+ * with your hand if the field had let you. Dragging sideways scrubs it.
+ */
+export function scrubbable(input, step, onChange) {
+  let from = 0;
+  let at = 0;
+  const move = (e) => {
+    // Fine control on Shift, coarse on Ctrl, because the useful range of a
+    // size field spans two orders of magnitude.
+    const scale = e.shiftKey ? 0.1 : e.ctrlKey ? 10 : 1;
+    const next = from + Math.round((e.clientX - at) / 4) * step * scale;
+    input.value = next.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+    onChange();
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    document.body.classList.remove('scrubbing');
+  };
+  input.classList.add('scrub');
+  input.addEventListener('pointerdown', (e) => {
+    // A click still puts the caret in the field; only a drag scrubs, and
+    // the drag has to start on the field's own edge marker.
+    if (e.button !== 0 || !e.altKey) return;
+    e.preventDefault();
+    from = Number(input.value) || 0;
+    at = e.clientX;
+    document.body.classList.add('scrubbing');
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
+  return input;
+}
+
 /** Three numeric fields in a row — for free positions and rotations. */
 export function vectorField(label, value, step, onChange) {
-  const inputs = ['X', 'Y', 'Z'].map((axis, i) => h('input', {
-    type: 'number', step, value: Number(value[i]).toFixed(2), 'aria-label': `${label} ${axis}`,
-    onChange: (e) => {
-      const next = inputs.map((el) => Number(el.value) || 0);
-      onChange(next);
-    },
-  }));
+  const fire = () => {
+    // Read through the calculator, then write the answer back so the field
+    // shows what it actually did with what you typed.
+    const next = inputs.map((el) => readNumber(el.value, Number(el.value) || 0));
+    inputs.forEach((el, i) => { el.value = String(next[i]); });
+    onChange(next);
+  };
+  const inputs = ['X', 'Y', 'Z'].map((axis) => scrubbable(h('input', {
+    // `text`, not `number`: a number field silently discards "0.5*3" before
+    // anything here ever sees it.
+    type: 'text', inputmode: 'decimal', step,
+    value: Number(value[['X', 'Y', 'Z'].indexOf(axis)]).toFixed(2),
+    'aria-label': `${label} ${axis}`,
+    title: `${label} ${axis} — Altを押しながら左右にドラッグ、「0.5*3」のような式も打てます`,
+    onChange: fire,
+  }), step, fire));
   const wrap = h('div', { class: 'vecbox' },
     h('label', { class: 'field' }, h('span', {}, label)),
     h('div', { class: 'vecrow' }, ...inputs),

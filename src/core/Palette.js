@@ -7,6 +7,23 @@
 //  bake vertex colours and cache the result.
 // ============================================================
 
+/**
+ * What to call them.
+ *
+ * Sixteen swatches with no names cannot be talked about — not in a note, not
+ * to somebody else, not in the read-out beside the cursor. A colour anybody
+ * can point at is a colour anybody can ask for.
+ */
+export const COLOR_NAMES = [
+  'コア銀', 'ガンメタル', '鋼', '白',
+  '赤', '橙', '黄', '若草',
+  '緑', '青緑', '空', '青',
+  '紫', '桃', '茶', '黒',
+];
+
+/** The name of a palette entry, or a number for one somebody mixed. */
+export const colorName = (i) => COLOR_NAMES[i] ?? `カスタム${i - COLOR_NAMES.length + 1}`;
+
 export const STANDARD_COLORS = [
   0xc9d2dc, // 0 core silver
   0x2b303a, // 1 gunmetal

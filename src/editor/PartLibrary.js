@@ -26,6 +26,8 @@ export class PartLibrary {
   constructor(storage = (typeof localStorage !== 'undefined' ? localStorage : null)) {
     this.storage = storage;
     this.items = [];
+    /** Which batch of starter parts has already been offered. */
+    this.seeded = 0;
     this.load();
   }
 
@@ -37,6 +39,9 @@ export class PartLibrary {
       if (!raw) return this;
       const data = JSON.parse(raw);
       if (Array.isArray(data?.items)) this.items = data.items;
+      // Which batch of starter parts this shelf has already been offered.
+      // Without it, deleting one would put it back on the next launch.
+      this.seeded = Number(data?.seeded) || 0;
     } catch (e) {
       console.warn('part library could not be read', e);
     }
@@ -46,7 +51,9 @@ export class PartLibrary {
   save() {
     if (!this.storage) return false;
     try {
-      this.storage.setItem(KEY, JSON.stringify({ version: 1, items: this.items }));
+      this.storage.setItem(KEY, JSON.stringify({
+        version: 1, seeded: this.seeded, items: this.items,
+      }));
       return true;
     } catch (e) {
       // Quota is the realistic failure here, and silently losing a part the
@@ -57,7 +64,38 @@ export class PartLibrary {
   }
 
   get size() { return this.items.length; }
-  list() { return this.items.map(({ id, name, updatedAt }) => ({ id, name, updatedAt })); }
+
+  list() {
+    return this.items.map(({ id, name, updatedAt, builtin, json }) => ({
+      id, name, updatedAt, builtin: !!builtin, json,
+    }));
+  }
+
+  /**
+   * Put a batch of starter parts on the shelf, once.
+   *
+   * A new shelf was empty, and the only way onto it was to have already
+   * built something worth saving — so the feature was invisible to exactly
+   * the people it would have helped most. These are whole limbs lifted off
+   * the built-in machines: something to hang on a core and then cut about.
+   *
+   * @param {number} batch bumped when the starter set changes
+   * @param {Array<{name:string, json:object}>} parts
+   */
+  seed(batch, parts) {
+    if (this.seeded >= batch) return 0;
+    this.seeded = batch;
+    let added = 0;
+    for (const { name, json } of parts) {
+      if (this.find(name)) continue;
+      this.items.push({
+        id: nextId(), name, json: { ...json, name }, updatedAt: Date.now(), builtin: true,
+      });
+      added++;
+    }
+    this.save();
+    return added;
+  }
   get(id) { return this.items.find((i) => i.id === id) ?? null; }
   find(name) { return this.items.find((i) => i.name === name) ?? null; }
 

@@ -18,11 +18,9 @@ export default defineConfig(({ mode }) => ({
     target: 'es2022',
     outDir: 'dist',
     rollupOptions: {
-      // The test page is built alongside the game everywhere except a
-      // release build, which is the one that gets shipped to players.
-      input: mode === 'release'
-        ? { main: 'index.html' }
-        : { main: 'index.html', tests: 'tests.html' },
+      // One entry. The game runs in Electron and nowhere else, so there is
+      // no second page to build and no browser to build it for.
+      input: { main: 'index.html' },
     },
   },
 }));

@@ -93,3 +93,46 @@ describe('the arena stops rounds', () => {
     world.pillars.forEach((p, i) => expect(p.hp).toBe(hp[i]));
   });
 });
+
+// ============================================================
+//  Where the weight sits, and what the colours are called.
+//
+//  Both are things the editor could not say: mass was reported without its
+//  place, and sixteen swatches had no names at all.
+// ============================================================
+
+describe('what the machine is made of', () => {
+  it('says where the weight sits, not just how much of it there is', async () => {
+    const { PRESETS, computeStats } = await import('../src/core/Assembly.js');
+    const { Rig } = await import('../src/core/Rig.js');
+    const a = PRESETS.biped.build();
+    const s = computeStats(a, new Rig(a));
+    expect(s.balance, 'a centre of mass').toBeTruthy();
+    expect(s.balance).toHaveLength(3);
+    // A machine built symmetrically balances on its own centre line.
+    expect(Math.abs(s.balance[0]), 'centred left to right').toBeLessThan(0.2);
+    expect(Number.isFinite(s.balance[1])).toBe(true);
+  });
+
+  it('and says nothing rather than guessing without a rig', async () => {
+    const { PRESETS, computeStats } = await import('../src/core/Assembly.js');
+    expect(computeStats(PRESETS.biped.build()).balance).toBe(null);
+  });
+
+  it('the standard colours have names', async () => {
+    const { COLOR_NAMES, colorName, STANDARD_COLORS } = await import('../src/core/Palette.js');
+    expect(COLOR_NAMES).toHaveLength(STANDARD_COLORS.length);
+    expect(colorName(0)).toBe(COLOR_NAMES[0]);
+    // One somebody mixed is numbered rather than left blank.
+    expect(colorName(STANDARD_COLORS.length)).toContain('カスタム');
+  });
+
+  it('a colour can be swapped for another throughout a block', async () => {
+    const { VoxelBlock } = await import('../src/core/VoxelBlock.js');
+    const v = new VoxelBlock(8, 3);
+    expect(v.dominantColor()).toBe(3);
+    expect(v.recolor(3, 6), 'it found some').toBe(true);
+    expect(v.dominantColor(), 'and changed them').toBe(6);
+    expect(v.recolor(3, 6), 'and says so when there are none').toBe(false);
+  });
+});

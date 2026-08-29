@@ -8,6 +8,54 @@ const palette = new Palette();
 /** Count distinct quads by counting triangles: the mesher emits 2 per quad. */
 const quadCount = (geo) => geo.getAttribute('position').count / 6;
 
+describe('the round brush and the wholesale recolour', () => {
+  it('a square cut removes exactly the cube it says it does', () => {
+    const b = new VoxelBlock(16, 3);
+    const before = b.solid;
+    b.box(8, 8, 8, 2, 0);
+    expect(before - b.solid).toBe(5 ** 3);
+  });
+
+  it('the ordinary brush cuts cubes, which is why a round one was needed', () => {
+    // `inBrush` measures the longest side, not the distance, so every cut
+    // anybody had ever made had hard corners in it.
+    const plain = new VoxelBlock(16, 3);
+    const square = new VoxelBlock(16, 3);
+    plain.brush(8, 8, 8, 3, 0);
+    square.box(8, 8, 8, 3, 0);
+    expect(plain.solid).toBe(square.solid);
+  });
+
+  it('a round cut takes less than the cube it fits inside', () => {
+    const round = new VoxelBlock(16, 3);
+    const square = new VoxelBlock(16, 3);
+    round.ball(8, 8, 8, 3, 0);
+    square.box(8, 8, 8, 3, 0);
+    expect(round.solid).toBeGreaterThan(square.solid);
+    // And it is a ball: the corner of the cube's reach is untouched, the
+    // point straight out along an axis is not.
+    expect(round.get(11, 8, 8)).toBe(0);
+    expect(round.get(10, 10, 10)).not.toBe(0);
+  });
+
+  it('recolouring keeps the shape; filling does not', () => {
+    const carved = new VoxelBlock(16, 3);
+    carved.brush(8, 8, 8, 4, 0);
+    const hollow = carved.solid;
+    expect(carved.repaintAll(5)).toBe(true);
+    expect(carved.solid).toBe(hollow);
+    expect(carved.dominantColor()).toBe(5);
+
+    carved.fill(5);
+    expect(carved.solid).toBe(carved.total);
+  });
+
+  it('says so when there was nothing to recolour', () => {
+    const b = new VoxelBlock(8, 2);
+    expect(b.repaintAll(2)).toBe(false);
+  });
+});
+
 describe('VoxelBlock storage', () => {
   it('fills solid on construction and tracks the count', () => {
     const b = new VoxelBlock(16, 3);

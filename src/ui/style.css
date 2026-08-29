@@ -1322,3 +1322,129 @@ button:disabled:hover { background: rgba(255, 255, 255, 0.045); border-color: va
   vertical-align: baseline;
   border: 1px solid rgba(255, 255, 255, 0.35);
 }
+
+
+/* ------------------------------------------------------------------
+   Keeping a machine: the unsaved dot, the file menu, named saves, the
+   undo list, and the offer to pick up where you left off.
+   ------------------------------------------------------------------ */
+.dirtydot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin: 0 2px 0 -4px;
+  flex: 0 0 auto;
+}
+
+.menuwrap { position: relative; }
+
+.menupop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 208px;
+  max-height: 62vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.menupop button { text-align: left; }
+
+.slotlist,
+.historylist { display: flex; flex-direction: column; gap: 2px; }
+
+.slotrow { display: flex; gap: 4px; }
+.slotrow .slotopen { flex: 1; text-align: left; }
+
+.historyrow {
+  display: flex;
+  gap: 8px;
+  text-align: left;
+  font-size: 10.5px;
+}
+
+.historyrow .k { min-width: 46px; color: var(--dim); }
+
+#draftbar {
+  position: absolute;
+  top: 58px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  font-size: 11px;
+  background: var(--panel);
+  border: 1px solid rgba(255, 209, 102, 0.5);
+  border-radius: 9px;
+}
+
+
+/* The rectangle drawn while Shift-dragging a selection. */
+.marquee {
+  position: absolute;
+  z-index: 8;
+  pointer-events: none;
+  border: 1px solid var(--accent);
+  background: rgba(79, 210, 255, 0.10);
+  border-radius: 2px;
+}
+
+
+/* Kept mixes: a shape, a size and a colour, in one button. */
+.recipes { flex-wrap: wrap; }
+
+.recipes .recipe {
+  min-width: 30px;
+  border-width: 2px;
+  font-size: 9.5px;
+  padding: 3px 4px;
+}
+
+/* A note that is a warning rather than an aside. */
+.note.warn {
+  color: #ffd166;
+  border-left: 2px solid rgba(255, 209, 102, 0.5);
+  padding-left: 6px;
+}
+
+
+/* Which way a number just moved. */
+.speccell .v.up { color: #8effc9; }
+.speccell .v.down { color: #ff8a5c; }
+
+/* A number field you can drag as well as type into. */
+input.scrub { cursor: ew-resize; }
+body.scrubbing, body.scrubbing * { cursor: ew-resize !important; user-select: none; }
+
+/* The picture on a saved part, so the shelf is not a list of names. */
+.libsketch {
+  width: 40px; height: 40px; flex: 0 0 40px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+}
+.libitem { display: flex; align-items: center; gap: 8px; }
+.libitem .libname { flex: 1 1 auto; min-width: 0; }
+.libtag {
+  font-size: 10px; opacity: 0.6; letter-spacing: 0.04em;
+}
+
+/* Finding one row on a machine of forty. */
+.tree + input[type="search"], .body > input[type="search"] {
+  width: 100%; margin: 4px 0 6px;
+}
+
+/* Buttons that wrap when there are more of them than fit. */
+.row.tight.wrap { flex-wrap: wrap; }

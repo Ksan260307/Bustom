@@ -142,7 +142,7 @@ export function touchesLine(part, local, quat, radius) {
  * block. Sockets are gone, but this is still the sensible default when the
  * builder clicks on a surface, and it keeps the presets readable.
  */
-export function faceAnchor(parentPart, face, childSize = [0, 0, 0], at = null) {
+export function faceAnchor(parentPart, face, childSize = [0, 0, 0], at = null, gap = 0) {
   const axis = FACE_AXIS[face];
   const n = FACE_NORMAL[face];
   const size = parentPart.size ?? [1, 1, 1];
@@ -171,7 +171,10 @@ export function faceAnchor(parentPart, face, childSize = [0, 0, 0], at = null) {
     );
   }
 
-  out[axis] = n[axis] * (reach + (childSize[axis] ?? 0) / 2);
+  // A gap, when one was asked for: everything landed flush, which is right
+  // for a hull and wrong for a row of fins or a slot somebody wants to see
+  // through.
+  out[axis] = n[axis] * (reach + (childSize[axis] ?? 0) / 2 + (gap || 0));
   return out;
 }
 
@@ -469,7 +472,16 @@ export class Assembly {
     const parent = this.parts.get(parentId);
     if (!parent) return null;
     const size = (opts.size ?? [1, 1, 1]).map(snapSize);
-    return this.addBlock(parentId, { pos: faceAnchor(parent, face, size) }, colorIndex, { ...opts, size });
+    // The face goes on the mount, the way a click-placed block records it.
+    // Without it a preset's blocks sink into their host when resized, and
+    // cannot be moved to a different face at all — the editor knows which
+    // way is "out" only from this.
+    return this.addBlock(
+      parentId,
+      { pos: faceAnchor(parent, face, size), face },
+      colorIndex,
+      { ...opts, size },
+    );
   }
 
   addBoneOnFace(parentId, face, boneType, opts = {}) {
@@ -1065,6 +1077,33 @@ export function computeStats(assembly, rig = null) {
 
   const inertia = mass * extent * extent * 0.42;
 
+  /**
+   * Where the weight sits, relative to where the machine stands.
+   *
+   * Mass was reported and its PLACE was not, so "why does this thing keep
+   * tipping" had no answer on screen. Measured in the machine's own frame
+   * from the rig, so it means the same thing whichever way it is facing.
+   */
+  let balance = null;
+  if (rig) {
+    let wx = 0;
+    let wy = 0;
+    let wz = 0;
+    let total = 0;
+    for (const [id, node] of rig.nodes) {
+      const part = assembly.get(id);
+      if (!part || !Array.isArray(part.size)) continue;
+      const w = part.size[0] * part.size[1] * part.size[2];
+      if (!(w > 0)) continue;
+      node.group.updateMatrixWorld(true);
+      const p = node.group.getWorldPosition(new THREE.Vector3());
+      rig.root.worldToLocal(p);
+      wx += p.x * w; wy += p.y * w; wz += p.z * w;
+      total += w;
+    }
+    if (total > 0) balance = [wx / total, wy / total, wz / total];
+  }
+
   return {
     blockCount,
     volume,
@@ -1073,6 +1112,8 @@ export function computeStats(assembly, rig = null) {
     density,
     extent,
     inertia,
+    /** Centre of mass in the machine's own frame, or null without a rig. */
+    balance,
     thrust,
     thrustToMass,
     legs: limbs,
@@ -1533,6 +1574,31 @@ export function presetBits() {
   const pad = a.addBlockOnBone(shank.id, 1, 2, { size: [1.3, 0.35, 1.3], shape: SHAPE.DISH });
   a.addEquipOnFace(pad.id, 3, EQUIP.MISSILE, { size: 0.45 });
   return a;
+}
+
+/**
+ * Whole limbs, lifted off the built-in machines.
+ *
+ * A machine preset answers "give me something that works" and a bare core
+ * answers "let me start clean"; nothing answered "I have a torso, now I need
+ * an arm" — which is the part of a build that takes longest and looks worst
+ * when done in a hurry. These are ordinary part documents: graft one on and
+ * cut it about like anything else.
+ */
+export function starterParts() {
+  const out = [];
+  const take = (assembly, label, name) => {
+    let found = null;
+    assembly.walk((p) => { if (!found && p.label === label) found = p; });
+    const doc = found ? assembly.extract(found.id) : null;
+    if (doc) out.push({ name, json: doc.toJSON() });
+  };
+  const biped = presetBiped();
+  take(biped, 'PAULDRON', '腕 ARM');
+  take(biped, 'HIP', '脚 LEG');
+  take(biped, 'HEAD', '頭 HEAD');
+  take(biped, 'CHEST', '上半身 UPPER BODY');
+  return out;
 }
 
 export const PRESETS = {

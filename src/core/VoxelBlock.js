@@ -215,6 +215,121 @@ export class VoxelBlock {
   }
 
   /**
+   * Recolour every solid cell without touching what is or is not solid.
+   *
+   * `fill` sets the whole grid solid, which is right for a fresh block and
+   * destroys the shape of a carved one. This is what "make it that colour"
+   * actually means.
+   */
+  repaintAll(colorIndex) {
+    const v = colorIndex + 1;
+    let changed = false;
+    for (let i = 0; i < this.data.length; i++) {
+      if (!this.data[i] || this.data[i] === v) continue;
+      this.data[i] = v;
+      changed = true;
+    }
+    if (changed) this.markAllDirty();
+    return changed;
+  }
+
+  /**
+   * A round brush: the same reach, cut as a ball rather than a cube.
+   *
+   * The ordinary brush is square — `inBrush` measures the longest side, not
+   * the distance — so every cut anybody made had hard corners in it, and a
+   * curved recess or a drilled hole was not available at all.
+   */
+  ball(x, y, z, r, value) {
+    let changed = false;
+    const rr = r * r;
+    const lo = (v) => Math.max(0, Math.ceil(v - r));
+    const hi = (v) => Math.min(this.n - 1, Math.floor(v + r));
+    for (let pz = lo(z); pz <= hi(z); pz++) {
+      for (let py = lo(y); py <= hi(y); py++) {
+        for (let px = lo(x); px <= hi(x); px++) {
+          const dx = px - x;
+          const dy = py - y;
+          const dz = pz - z;
+          if (dx * dx + dy * dy + dz * dz > rr) continue;
+          if (this.set(px, py, pz, value)) changed = true;
+        }
+      }
+    }
+    if (changed) this.markAllDirty();
+    return changed;
+  }
+
+  /**
+   * A square brush, stated explicitly rather than inherited from `inBrush`.
+   *
+   * `brush` happens to cut cubes today; this says so, so the round one has
+   * something to be the opposite of.
+   */
+  box(x, y, z, r, value) {
+    let changed = false;
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const px = x + dx;
+          const py = y + dy;
+          const pz = z + dz;
+          if (!this.inBounds(px, py, pz)) continue;
+          const i = this.index(px, py, pz);
+          if (this.data[i] === value) continue;
+          if (this.data[i]) this.solid--;
+          if (value) this.solid++;
+          this.data[i] = value;
+          changed = true;
+        }
+      }
+    }
+    if (changed) this.markAllDirty();
+    return changed;
+  }
+
+  /**
+   * How much of the block's own box is solid, 0..1.
+   *
+   * Carving is invisible from the outside once the outside is closed again,
+   * so "have I hollowed this out or not" was a question with no answer.
+   *
+   * Named for the ratio rather than the verb: `fill()` already means
+   * "make every cell this colour", and a getter of the same name quietly
+   * replaced it.
+   */
+  get fillRatio() { return this.solid / Math.max(1, this.total); }
+
+  /**
+   * Has this block been carved away from the shape it was cut to?
+   *
+   * Asked before anything is about to overwrite the grid.
+   */
+  isCarved(shape) {
+    if (!shape) return this.solid !== this.total;
+    const probe = new VoxelBlock(this.n, 0).fillShape(shape, 0);
+    return probe.solid !== this.solid;
+  }
+
+  /**
+   * Swap one colour for another throughout this block.
+   *
+   * @returns {boolean} whether anything actually changed
+   */
+  recolor(from, to) {
+    const a = from + 1;
+    const b = to + 1;
+    let hit = false;
+    for (let i = 0; i < this.data.length; i++) {
+      if (this.data[i] !== a) continue;
+      this.data[i] = b;
+      hit = true;
+    }
+    if (hit) this.markAllDirty();
+    return hit;
+  }
+
+  /**
    * The colour most of this block is made of, or -1 when it is empty.
    *
    * A whole-grid count rather than a sample of one cell: the cell at the
