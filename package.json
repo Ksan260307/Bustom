@@ -12,13 +12,15 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:browser": "vite --open /tests.html",
+    "test:browser": "vite build && electron scripts/browser-tests.cjs",
     "build:release": "vite build --mode release",
     "game": "npm run build:release && electron .",
     "game:dev": "electron . --dev-server=http://localhost:3000",
     "pack": "npm run build:release && electron-builder --dir",
     "dist:win": "npm run build:release && electron-builder --win",
-    "dist:linux": "npm run build:release && electron-builder --linux"
+    "dist:linux": "npm run build:release && electron-builder --linux",
+    "test:browser:watch": "vite --open /tests.html",
+    "test:all": "vitest run && npm run test:browser"
   },
   "devDependencies": {
     "electron": "^33.4.11",

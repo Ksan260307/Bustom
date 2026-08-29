@@ -14,6 +14,25 @@ import { LOCK_COLOR } from '../core/constants.js';
 // ============================================================
 
 const _ndc = new THREE.Vector3();
+
+/**
+ * How far down the run's read-out starts.
+ *
+ * Clear of the control legend that sits across the top of the field. That
+ * legend folds away after a few seconds now, but it can be called back at
+ * any moment, and a read-out that hides when you ask for help is no better
+ * than one that was hidden all along.
+ */
+export const MISSION_TOP = 64;
+
+/**
+ * Where the run's read-out starts, given how much the control legend is
+ * currently taking off the top.
+ *
+ * A fixed number cannot do this: the legend wraps to more lines in a narrow
+ * window, so what clears it at 1440 across is underneath it at 900.
+ */
+export const missionTop = (inset = 0) => Math.max(MISSION_TOP, inset + 12);
 const TAU = Math.PI * 2;
 
 /**
@@ -99,7 +118,12 @@ export class Hud {
    */
   debugRows(s) {
     const t = s.telemetry;
-    const rows = [
+    // ZETA, JERK, ASSIST and FRAME are how the motion model is TUNED. They
+    // belong on the practice field, where somebody is deliberately looking
+    // at how the machine behaves — and nowhere near a run, where they are
+    // six rows of numbers that mean nothing and sit where something useful
+    // could be.
+    const rows = s.diagnostics === false ? [] : [
       ['MASS', `${t.mass.toFixed(2)}`],
       ['ZETA', `${t.zeta.toFixed(2)}`],
       ['JERK', `${t.jerk.toFixed(0)}`],
@@ -147,7 +171,12 @@ export class Hud {
     ctx.clearRect(0, 0, this.w, this.h);
     if (!this.visible) return;
 
-    this.lockProgress = damp(this.lockProgress, s.lock ? 1 : 0, s.lock ? 0.07 : 0.05, dt);
+    // While a lock is being reached for, the ring shows how far along it
+    // is rather than easing toward nothing: acquisition costs a moment now,
+    // and a moment the player cannot see is a moment they think is a bug.
+    const want = s.lock ? 1 : clamp01(s.locking ?? 0);
+    this.lockProgress = s.locking
+      ? want : damp(this.lockProgress, want, s.lock ? 0.07 : 0.05, dt);
     this.lockPulse = (this.lockPulse + dt * 0.35) % 1;
     this.weaponFlash = Math.max(0, this.weaponFlash - dt);
 
@@ -158,10 +187,108 @@ export class Hud {
     this._drawHits(s, ctx, dt);
     this._drawTelemetry(s, ctx);
     this._drawWeapons(s, ctx);
-    if (s.mission) this._drawMission(s.mission, ctx);
+    this._drawThreats(s, ctx);
+    if (s.mission) this._drawMission(s.mission, ctx, s.topInset ?? 0);
+    if (s.mission?.offer) this._drawOffer(s.mission.offer, ctx, s.player);
     // Last, over everything: how close you are to losing is not a detail to
     // be read past other details.
     this._drawVitals(s, ctx, dt);
+  }
+
+  /**
+   * Who is shooting at you, and from where.
+   *
+   * The read-out only ever spoke about the machine that was LOCKED. With
+   * six of them on the field the other five announced themselves by hitting
+   * you, and the arc that says so arrives after the damage does. These are
+   * the ones with a trigger down right now — a short list on purpose,
+   * because a marker for every opponent is a ring of markers and says
+   * nothing.
+   */
+  _drawThreats(s, ctx) {
+    const list = s.threats;
+    if (!list?.length || !s.camera) return;
+    const cx = this.w / 2;
+    const cy = this.h / 2;
+    const edge = Math.min(this.w, this.h) * 0.38;
+
+    ctx.save();
+    for (const bot of list) {
+      if (bot === s.lock?.robot) continue;      // that one already has an arc
+      _ndc.copy(bot.position).project(s.camera);
+      let x = (_ndc.x * 0.5 + 0.5) * this.w;
+      let y = (-_ndc.y * 0.5 + 0.5) * this.h;
+      // Behind the camera comes back mirrored, which would point the marker
+      // at exactly the wrong side of the screen.
+      if (_ndc.z > 1) { x = this.w - x; y = this.h - y; }
+      const dx = x - cx;
+      const dy = y - cy;
+      const d = Math.hypot(dx, dy) || 1;
+      const at = Math.min(1, edge / d);
+      const px = cx + dx * at;
+      const py = cy + dy * at;
+
+      ctx.globalAlpha = 0.7;
+      ctx.strokeStyle = '#ff6a5c';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      const a = Math.atan2(dy, dx);
+      ctx.moveTo(px + Math.cos(a) * 7, py + Math.sin(a) * 7);
+      ctx.lineTo(px + Math.cos(a + 2.5) * 7, py + Math.sin(a + 2.5) * 7);
+      ctx.lineTo(px + Math.cos(a - 2.5) * 7, py + Math.sin(a - 2.5) * 7);
+      ctx.closePath();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /**
+   * The choice on the table between waves.
+   *
+   * Number keys, like the title menu: it exists for three seconds and
+   * nobody should have to find it in the key settings.
+   */
+  _drawOffer(offer, ctx, player = null) {
+    const y = this.h * 0.62;
+    const gap = 168;
+    const x0 = this.w / 2 - gap;
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#9fc4dd';
+    ctx.font = '600 10px ui-monospace, Menlo, Consolas, monospace';
+    ctx.fillText('つぎの ウェーブまでに ひとつ', this.w / 2, y - 52);
+
+    // What the hull is at, in a number, and only here.
+    //
+    // During a fight the edge of the screen is the right way to know how
+    // badly you are doing — it is read without looking away. But choosing
+    // between armour and ammunition is not a fight, and it cannot be
+    // answered by a feeling: it needs the figure.
+    if (player?.maxHp) {
+      const left = clamp01(player.hp / player.maxHp);
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = left > 0.6 ? '#8effc9' : left > 0.3 ? '#ffd166' : '#ff6a5c';
+      ctx.font = '700 15px ui-monospace, Menlo, Consolas, monospace';
+      ctx.fillText(`装甲 ${Math.round(player.hp)} / ${player.maxHp}`, this.w / 2, y - 30);
+    }
+
+    offer.choices.forEach((c, i) => {
+      const x = x0 + i * gap;
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = '#4fd2ff';
+      ctx.font = '700 15px ui-monospace, Menlo, Consolas, monospace';
+      ctx.fillText(`${i + 1}`, x, y - 12);
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = '#dff0ff';
+      ctx.font = '700 17px ui-monospace, Menlo, Consolas, monospace';
+      ctx.fillText(c.label, x, y + 10);
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = '#9fc4dd';
+      ctx.font = '600 10px ui-monospace, Menlo, Consolas, monospace';
+      ctx.fillText(c.note, x, y + 26);
+    });
+    ctx.restore();
   }
 
   /**
@@ -291,9 +418,15 @@ export class Hud {
    * while actually fighting — speed, energy, the rack — is already along the
    * bottom, and the middle belongs to the reticle.
    */
-  _drawMission(m, ctx) {
+  _drawMission(m, ctx, inset = 0) {
+    // Below the control legend, and all of it in one column.
+    //
+    // The wave sat top left and the score top right, which put both of them
+    // under a panel that spans the screen — and scattered the four things a
+    // run IS across two corners. One block, one place to look.
     const pad = 22;
     ctx.save();
+    ctx.translate(0, missionTop(inset));
 
     // ---- wave and what is left of it, top left
     ctx.textAlign = 'left';
@@ -315,8 +448,8 @@ export class Hud {
     ctx.font = '700 16px ui-monospace, Menlo, Consolas, monospace';
     ctx.fillText(String(m.remaining), pad + 58, pad + 34);
 
-    // ---- score and lives, top right
-    const rx = this.w - pad;
+    // ---- score and lives, under the wave rather than across the screen
+    const rx = pad + 132;
     ctx.textAlign = 'right';
     ctx.globalAlpha = 0.5;
     ctx.fillStyle = '#9fc4dd';
@@ -341,6 +474,7 @@ export class Hud {
       if (on) ctx.fill(); else ctx.stroke();
     }
 
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     // ---- the banner: what just happened, briefly, where the eyes are
     if (m.banner) {
       const a = clamp01(m.bannerFade ?? 1);
@@ -592,7 +726,20 @@ export class Hud {
     const cx = this.w / 2, cy = this.h / 2;
     const t = s.telemetry;
     ctx.save();
-    ctx.globalAlpha = 0.5;
+    // Drawn dark first, then light on top.
+    //
+    // A one-pixel pale ring on a pale background is not a reticle, and the
+    // background it most often has is the machine's own glowing core, which
+    // sits exactly there. The dark ring underneath means the outline holds
+    // against anything.
+    ctx.globalAlpha = 0.45;
+    ctx.strokeStyle = '#04080d';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 3.2, 0, TAU);
+    ctx.stroke();
+
+    ctx.globalAlpha = 0.75;
     ctx.strokeStyle = '#cfe6ff';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -662,7 +809,12 @@ export class Hud {
     ctx.fillText('m/s', bx + 56 + ctx.measureText(t.speed.toFixed(1)).width * 2.1, by + 30);
 
     // ---- energy bar
-    const ex = bx + 56, ey = by + 40, ew = 172, eh = 5;
+    //
+    // As long as the tank is big. A machine carrying tanks holds more, and a
+    // gauge that is always the same width says the opposite — it would look
+    // like the fuel simply drains more slowly for no reason.
+    const ex = bx + 56, ey = by + 40, eh = 5;
+    const ew = 172 * Math.min(2, t.energyCapacity ?? 1);
     ctx.globalAlpha = 0.25;
     ctx.fillStyle = '#dff0ff';
     ctx.fillRect(ex, ey, ew, eh);

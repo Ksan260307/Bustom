@@ -6,6 +6,8 @@ import { makeSky, makeSkyline, FIELD_SKY } from './Sky.js';
 //  pillars to exercise the environment-interference module.
 // ============================================================
 
+const _size = new THREE.Vector3();
+
 export class World {
   constructor(scene, renderer = null) {
     this.scene = scene;
@@ -15,12 +17,57 @@ export class World {
     this.ceiling = 95;
     /** @type {THREE.Box3[]} */
     this.colliders = [];
+    /**
+     * The pillars, as things that can be worn down.
+     *
+     * Cover that can never be taken away is a place to stand and win from;
+     * cover that runs out is a decision about when to leave it.
+     * @type {{mesh: THREE.Object3D[], box: THREE.Box3, hp: number, maxHp: number}[]}
+     */
+    this.pillars = [];
     this.group = new THREE.Group();
     scene.add(this.group);
     this._build();
   }
 
   groundHeight() { return 0; }
+
+  /**
+   * Wear down whatever piece of cover contains `point`.
+   *
+   * Returns the pillar that broke, or null. Everything that decides the
+   * fight lives here rather than in the round that hit it, so the same
+   * arena answers the same way in a replay.
+   */
+  damageCover(point, amount) {
+    for (const pillar of this.pillars) {
+      if (pillar.hp <= 0 || !pillar.box.containsPoint(point)) continue;
+      pillar.hp -= amount;
+      if (pillar.hp > 0) return null;
+      for (const m of pillar.mesh) m.visible = false;
+      const at = this.colliders.indexOf(pillar.box);
+      if (at >= 0) this.colliders.splice(at, 1);
+      return pillar;
+    }
+    return null;
+  }
+
+  /** Is this point inside a piece of cover that is still standing? */
+  blocksAt(point) {
+    for (const box of this.colliders) if (box.containsPoint(point)) return true;
+    return false;
+  }
+
+  /** Put every pillar back. A new match is a new arena. */
+  resetCover() {
+    for (const pillar of this.pillars) {
+      if (pillar.hp > 0) continue;
+      pillar.hp = pillar.maxHp;
+      for (const m of pillar.mesh) m.visible = true;
+      if (!this.colliders.includes(pillar.box)) this.colliders.push(pillar.box);
+    }
+    return this;
+  }
 
   /**
    * Point the shadow box at `at`.
@@ -184,7 +231,15 @@ export class World {
       cap.position.set(x, h + 0.2, z);
       this.group.add(cap);
 
-      this.colliders.push(new THREE.Box3().setFromObject(m));
+      const box = new THREE.Box3().setFromObject(m);
+      this.colliders.push(box);
+      // Bigger pillars stand up to more. A wall you can chew through in a
+      // second is not cover, it is scenery with extra steps.
+      box.getSize(_size);
+      const bulk = _size.x * _size.z * h;
+      this.pillars.push({
+        mesh: [m, cap], box, hp: 60 + bulk * 2.4, maxHp: 60 + bulk * 2.4,
+      });
     }
 
     // ---- floating platforms, so air combat has something to relate to

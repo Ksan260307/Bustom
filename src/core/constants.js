@@ -156,6 +156,7 @@ export const EQUIP = {
   GRENADE: 'grenade',
   SHIELD: 'shield',
   BOOST: 'boost',
+  TANK: 'tank',
   GRAVITY: 'gravity',
   ROLLING: 'rolling',
   FLOAT: 'float',
@@ -208,8 +209,11 @@ export const EQUIP_META = {
     // A rifle: one heavy shot at a time, drawn as a long thin line. The slow
     // interval is the price of the damage, and it is what stops the beam
     // from being the gatling with better numbers.
+    // Range brought down to about the width of the arena. At 246 metres it
+    // reached further than anything could be, which made the sniper's one
+    // advantage over it imaginary.
     ammo: 5, reload: 1.4, interval: 0.55, auto: false,
-    shots: 1, spread: 0, speed: 112, damage: 26, life: 2.2, radius: 0.14, mass: 0.55,
+    shots: 1, spread: 0, speed: 112, damage: 26, life: 1.1, radius: 0.14, mass: 0.55,
     lead: 0.5,
     shape: 'beam', streak: 6,
     blurb: '長く細い一線を撃つビームライフル。連射は効かない',
@@ -217,18 +221,27 @@ export const EQUIP_META = {
   [EQUIP.GATLING]: {
     label: 'ガトリング', category: 'weapon', plate: 0x2b3a49, accent: 0xffd166,
     colorable: true, bullet: 0xffd166,
+    // 2.4 a round made this the worst weapon in the game by a wide margin:
+    // 14 sustained where the next worst was 20 and the best was 56, on the
+    // one gun whose whole identity is holding the trigger down. Held fire
+    // also loosens the group now, so it was being charged twice for the
+    // thing it is for.
     ammo: 30, reload: 3.0, interval: 0.07, auto: true,
-    shots: 1, spread: 0.022, speed: 88, damage: 2.4, life: 1.9, radius: 0.13, mass: 0.7,
+    shots: 1, spread: 0.022, speed: 88, damage: 3.6, life: 1.9, radius: 0.13, mass: 0.7,
     lead: 0.3,
     blurb: '押しっぱなしで連射。30発でリロード3秒',
   },
   [EQUIP.SHOT]: {
     label: 'ショット', category: 'weapon', plate: 0x2b3a49, accent: 0xff9f5c,
     colorable: true, bullet: 0xff9f5c,
+    // The tight one. It used to be the spread gun with a third of the
+    // throughput and a slightly narrower cone, which is not a niche — so
+    // the cone came in and the pellets got heavier. Three aimed slugs at
+    // middle distance, against nine thrown ones up close.
     ammo: 6, reload: 3.0, interval: 0.42, auto: false,
-    shots: 3, spread: 0.14, speed: 62, damage: 7, life: 1.9, radius: 0.2, mass: 0.6,
+    shots: 3, spread: 0.10, speed: 62, damage: 11, life: 1.9, radius: 0.2, mass: 0.6,
     lead: 0.25,
-    blurb: '3方向へ拡散。6発でリロード3秒',
+    blurb: '3発をまとめて撃つ。中距離向き。6発でリロード3秒',
   },
   [EQUIP.BLADE]: {
     label: 'ブレード', category: 'weapon', plate: 0x2b3a49, accent: 0xff5c7a,
@@ -252,8 +265,11 @@ export const EQUIP_META = {
   [EQUIP.SNIPER]: {
     label: 'スナイパー', category: 'weapon', plate: 0x2b3a49, accent: 0x9fffe0,
     colorable: true, bullet: 0x9fffe0,
+    // The heaviest single round there is. It has to be: everything else it
+    // could claim — reach — stopped being a distinction once the arena
+    // turned out to be smaller than the shots.
     ammo: 3, reload: 2.6, interval: 1.1, auto: false,
-    shots: 1, spread: 0, speed: 180, damage: 52, life: 3.2, radius: 0.1, mass: 0.9,
+    shots: 1, spread: 0, speed: 180, damage: 68, life: 3.2, radius: 0.1, mass: 0.9,
     lead: 0.6,                     // the aimed shot, and the closest to right
     shape: 'beam', streak: 14, scope: 0.42,      // FOV multiplier while scoped
     blurb: '超長射程の一撃。スコープ（Q）で狙える',
@@ -270,11 +286,14 @@ export const EQUIP_META = {
   [EQUIP.SPREAD]: {
     label: 'スプレッド', category: 'weapon', plate: 0x2b3a49, accent: 0xffe066,
     colorable: true, bullet: 0xffe066,
+    // The highest sustained damage in the game, so it pays for it in
+    // range: the pellets stop existing at fifty metres. Walk in or do
+    // nothing.
     ammo: 8, reload: 2.4, interval: 0.5, auto: false,
-    shots: 9, spread: 0.30, speed: 54, damage: 5, life: 1.5, radius: 0.16, mass: 0.75,
+    shots: 9, spread: 0.30, speed: 54, damage: 5, life: 0.9, radius: 0.16, mass: 0.75,
     lead: 0.25,
     streak: 1.1,                   // pellets, not tracers
-    blurb: '9発を大きく拡散。近ければ全弾当たる',
+    blurb: '9発を大きく拡散。至近距離なら全弾当たるが、遠くには届かない',
   },
   [EQUIP.MAGNUM]: {
     label: 'マグナム', category: 'weapon', plate: 0x2b3a49, accent: 0xff8a3d,
@@ -309,6 +328,25 @@ export const EQUIP_META = {
     colorable: false,
     dashBonus: 0.14, mass: 0.35,
     blurb: 'ブーストが使えるようになる。ダッシュの効果も小アップ',
+  },
+  [EQUIP.TANK]: {
+    label: 'エナジータンク', category: 'system', plate: 0x243a34, accent: 0xffd166,
+    colorable: false,
+    /**
+     * A bigger tank, and a slower one to fill.
+     *
+     * Energy is what pays for flight, for the boost and for every dash, and
+     * it was one fixed size on every machine — so how long you could stay
+     * off the ground was not something anybody could build for.
+     *
+     * A tank buys ENDURANCE, not free fuel: everything drains as a smaller
+     * fraction of a larger tank, and refills as a smaller fraction too. So
+     * it suits a machine that wants one long flight, and costs a machine
+     * that wants to be topped up between short hops — plus it is heavy,
+     * which is felt everywhere else.
+     */
+    energyBonus: 0.55, mass: 1.3,
+    blurb: 'ブーストゲージが増える。長く飛べるが、満タンに戻るのも遅くなる。重い',
   },
   [EQUIP.ROLLING]: {
     label: 'ローリング', category: 'system', plate: 0x24303a, accent: 0x6fe3ff,
@@ -496,6 +534,17 @@ export const LANDING = {
 };
 
 export const EQUIP_TYPES = Object.keys(EQUIP_META);
+/**
+ * How many weapon plates one machine may carry.
+ *
+ * There was no limit, and plate mass is under a tenth of what a machine
+ * weighs — so bolting on all ten and cycling through them was strictly
+ * better than choosing, and the ten different cost structures never became
+ * a question anybody had to answer. Four is enough for a close weapon, a
+ * long one and two opinions.
+ */
+export const WEAPON_SLOTS = 4;
+
 export const WEAPON_TYPES = EQUIP_TYPES.filter((t) => EQUIP_META[t].category === 'weapon');
 export const SYSTEM_TYPES = EQUIP_TYPES.filter((t) => EQUIP_META[t].category === 'system');
 

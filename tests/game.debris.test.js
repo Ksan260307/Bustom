@@ -32,7 +32,14 @@ describe('durability', () => {
     const mid = withCore(1);
     const big = withCore(2);
     expect(mid.durability).toBeGreaterThan(small.durability);
-    expect(big.durability).toBeGreaterThan(mid.durability * 2);
+    // Clearly more, but no longer more than double. The core term used to be
+    // SQUARED, which made one slider in the editor worth more than every
+    // other decision put together — a four-metre core bought eight times the
+    // hit points of an ordinary machine, and the only price was agility,
+    // which matters little when what you are buying is ninety seconds of
+    // standing still and winning.
+    expect(big.durability).toBeGreaterThan(mid.durability * 1.5);
+    expect(big.durability, 'and not a free win').toBeLessThan(mid.durability * 2);
     expect(big.coreScale).toBeCloseTo(2, 6);
   });
 

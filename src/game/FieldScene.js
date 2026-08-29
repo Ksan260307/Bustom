@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { World } from './World.js';
-import { Robot, SimpleAI } from './Robot.js';
+import { Robot, SimpleAI, HABITS } from './Robot.js';
 import { Projectiles } from './Weapons.js';
 import { Debris } from './Debris.js';
 import { Effects } from './Effects.js';
@@ -26,6 +26,7 @@ const _cross = new THREE.Vector3();
 const _screenDir = new THREE.Vector2();
 /** Reused by `_machines`: this runs for every machine, every step. */
 const _machines = [];
+const _threats = [];
 
 /** Below this, a machine is shuffling rather than running. */
 const DUST_MIN_SPEED = 3.5;
@@ -43,6 +44,22 @@ const HUD_INTERVAL = 1 / 30;
  * something passed between you would be worse than no lock at all.
  */
 const LOCK_BREAK = 0.55;
+/**
+ * How long it takes to get a lock, in seconds.
+ *
+ * Short enough that it never feels like a wait, long enough that switching
+ * targets in the middle of a fight is a decision with a price.
+ */
+const LOCK_TIME = 0.35;
+
+/**
+ * The actions that take the three offers between waves.
+ *
+ * The same keys that pick a movement layer in a fight, borrowed for the
+ * three seconds when there is no fight — so nothing new has to be found in
+ * the key settings, and rebinding one rebinds both.
+ */
+const OFFER_KEYS = ['layerA', 'layerB', 'layerC'];
 
 /** The practice field's three, and the corners they stand in. */
 const REGULARS = [
@@ -133,6 +150,8 @@ export class FieldScene {
     this._dustBank = new WeakMap();
     /** Machines waiting to be put back together: { robot, at }. */
     this.pendingRespawns = [];
+    /** A lock being reached for, but not yet made. */
+    this.locking = null;
   }
 
   /** Seconds a wreck lies on the field before the machine comes back. */
@@ -214,7 +233,10 @@ export class FieldScene {
    * six machines at the head of every wave is a visible hitch at exactly
    * the moment the player is being asked to fight.
    */
-  spawnEnemy({ preset = 'biped', style = 'orbit', range = 24, toughness = 1, aggression = 1, at = null } = {}) {
+  spawnEnemy({
+    preset = 'biped', style = 'orbit', range = 24, toughness = 1,
+    aggression = 1, habit = 'steady', ace = false, at = null,
+  } = {}) {
     const shelved = this.retired.findIndex((e) => e.presetKey === preset);
     let bot = shelved >= 0 ? this.retired.splice(shelved, 1)[0] : null;
     if (!bot) {
@@ -225,7 +247,7 @@ export class FieldScene {
       // rather than build a second machine of exactly the same kind.
       bot.presetKey = preset;
       this.scene.add(bot.object3D);
-      this.ais.push(new SimpleAI(bot, { style, range, aggression }));
+      this.ais.push(new SimpleAI(bot, { style, range, aggression, habit, ace }));
     }
     this.enemies.push(bot);
     const ai = this.ais.find((a) => a.robot === bot);
@@ -233,6 +255,8 @@ export class FieldScene {
       ai.style = style;
       ai.preferredRange = range;
       ai.aggression = clamp01(aggression);
+      ai.habit = HABITS[habit] ? habit : 'steady';
+      ai.ace = !!ace;
       ai.reset();
     }
 
@@ -279,6 +303,11 @@ export class FieldScene {
     // emptying the array leaves the built-in gun with nothing to draw with.
     for (const t of this.tracers) { t.life = 0; t.line.visible = false; }
     this.input.clearState?.();
+
+    this.locking = null;
+    // Cover that was shot away comes back. A match starts from the arena as
+    // it is drawn, or the same seed gives two different fights.
+    this.world.resetCover?.();
 
     this.respawn();
     if (this.director) {
@@ -376,24 +405,66 @@ export class FieldScene {
     return best;
   }
 
+  /**
+   * The wave break, and what it is for.
+   *
+   * Number keys rather than a bound action: this is a menu that exists for
+   * three seconds between waves, like the one on the title screen, not a
+   * control anybody should have to find in the key settings.
+   */
+  _updateOffer() {
+    const offer = this.director?.offer;
+    if (!offer) return;
+    const inp = this.input;
+    for (let i = 0; i < offer.choices.length && i < OFFER_KEYS.length; i++) {
+      const action = OFFER_KEYS[i];
+      if (!inp.wasPressed?.(action)) continue;
+      // The menu swallows the key. 1, 2 and 3 pick a movement layer during a
+      // fight, and there is no fight for another three seconds — but leaving
+      // the press to fall through would quietly change a combat setting on
+      // the way out of a menu.
+      for (const code of inp.keysFor?.(action) ?? []) inp.pressed?.delete(code);
+      this.director.choose(i);
+      return;
+    }
+  }
+
   _updateLock(dt) {
     const inp = this.input;
 
     if (inp.consume('cycleTarget', 0.2)) {
       const next = this._pickTarget(true) ?? this._pickTarget(false);
-      if (next) { this.lock = { robot: next, aimPoint: next.position.clone() }; this._applyLock(); }
+      if (next) this._beginLock(next);
     }
 
     if (inp.consume('lock', 0.2)) {
-      if (this.lock) {
-        this.lock = null;
-        this.feedback.lock?.(false);
-        this.player.setTarget(null);
-        this.player.setLocked(false);
-        this.hud.lockProgress = 0;
+      if (this.lock || this.locking) {
+        this._dropLock();
       } else {
         const t = this._pickTarget();
-        if (t) { this.lock = { robot: t, aimPoint: t.position.clone() }; this._applyLock(); }
+        if (t) this._beginLock(t);
+      }
+    }
+
+    // Acquisition takes a moment.
+    //
+    // A lock used to be instant, free, permanent and re-aimable at the best
+    // available target with one keypress — which means that in a fight with
+    // six machines in it there was never a question about who to shoot.
+    // Paying a third of a second for it makes choosing one an actual choice,
+    // and makes changing your mind mid-fight cost the same again.
+    if (this.locking) {
+      const t = this.locking.robot;
+      if (!t.alive || this._blocked(this.player.position, t.position)) {
+        this.locking = null;
+        this.hud.lockProgress = 0;
+      } else {
+        this.locking.t += dt;
+        if (this.locking.t >= LOCK_TIME) {
+          this.lock = { robot: t, aimPoint: t.position.clone() };
+          this.locking = null;
+          this._applyLock();
+        }
       }
     }
 
@@ -416,13 +487,7 @@ export class FieldScene {
       // running for one a point.
       const blocked = this._blocked(this.player.position, this.lock.robot.position);
       this.lock.hidden = blocked ? (this.lock.hidden ?? 0) + dt : 0;
-      if (this.lock.hidden > LOCK_BREAK) {
-        this.lock = null;
-        this.feedback.lock?.(false);
-        this.player.setTarget(null);
-        this.player.setLocked(false);
-        this.hud.lockProgress = 0;
-      }
+      if (this.lock.hidden > LOCK_BREAK) this._dropLock();
     }
   }
 
@@ -446,6 +511,26 @@ export class FieldScene {
       for (const box of boxes) if (box.containsPoint(_v)) return true;
     }
     return false;
+  }
+
+  /** Start reaching for a target; `_updateLock` finishes the job. */
+  _beginLock(robot) {
+    this.lock = null;
+    this.player.setTarget(null);
+    this.player.setLocked(false);
+    this.locking = { robot, t: 0 };
+    return this.locking;
+  }
+
+  /** Let go of whatever we had, or were reaching for. */
+  _dropLock() {
+    this.lock = null;
+    this.locking = null;
+    this.feedback.lock?.(false);
+    this.player.setTarget(null);
+    this.player.setLocked(false);
+    this.hud.lockProgress = 0;
+    return this;
   }
 
   _applyLock() {
@@ -722,15 +807,35 @@ export class FieldScene {
         const weight = clamp01(blow.damage / (robot.maxHp * 0.14));
         if (robot === this.player) {
           if (blow.from) this.hud.markHurt(blow.from, weight);
+          if (this.director) this.director.tookHits = true;
           // Being hit shakes the view, and harder for a heavier blow. Landing
           // one already does; taking one used to do nothing at all.
           this.hitPulse = Math.max(this.hitPulse, 0.25 + weight * 0.55);
         } else {
           this.hud.markHit(robot.position, weight, blow.fatal);
+          // Nobody shoots their own side, so anything an opponent took came
+          // from us — which is how the run knows what our aim was worth.
+          this.player.shotsLanded = (this.player.shotsLanded ?? 0) + 1;
         }
       }
       robot.blows.length = 0;
     }
+  }
+
+  /**
+   * Who is shooting at us right now.
+   *
+   * With six machines on the field the read-out only ever spoke about the
+   * one that was locked; the other five announced themselves by hitting
+   * you. This is the shortest honest answer — not every opponent, only the
+   * ones with their trigger down and us in front of it.
+   */
+  _threats() {
+    _threats.length = 0;
+    for (const ai of this.ais) {
+      if (ai.aiming && ai.robot.alive) _threats.push(ai.robot);
+    }
+    return _threats;
   }
 
   /** Everything with a body on the field right now, the player included. */
@@ -839,6 +944,7 @@ export class FieldScene {
 
     if (this.input.consume('reset', 0.2)) this.respawn();
 
+    this._updateOffer();
     this._updateLock(dt);
     this._shareOutWork();
     p.update(this.input, dt);
@@ -993,11 +1099,21 @@ export class FieldScene {
       player: p,
       targets: this.enemies.filter((e) => e.alive),
       lock: this.lock,
+      locking: this.locking ? this.locking.t / LOCK_TIME : 0,
+      threats: this._threats(),
       telemetry: p.body.telemetry(),
       gait: p.stats.gait,
       legs: p.stats.legs,
       weapons: p.weapons.readout(),
       mission: this.director?.readout ?? null,
+      // The motion model's tuning numbers belong on the practice field,
+      // where somebody is deliberately watching how a machine behaves.
+      // In a run they are six rows of nothing where something could be.
+      diagnostics: !this.director,
+      // How much of the top the control legend is covering right now. The
+      // arena does not know what a DOM panel is; the app measures it and
+      // hands the number over, which is the app's job.
+      topInset: this.topInset ?? 0,
     }, dt);
   }
 

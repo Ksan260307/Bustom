@@ -166,6 +166,7 @@ export class App {
     // A drag that lays a row of parts is ONE change, the way a slider drag is.
     ed.onGesture = (open) => (open ? this.beginGesture() : this.endGesture());
     ed.onHint = (hint) => this.ui?.showPlacementHint?.(hint);
+    ed.onWorkPlane = (y) => this.ui?.showWorkPlane?.(y);
     ed.onReject = (msg) => this.ui?.toastMsg(msg);
     return ed;
   }
@@ -700,10 +701,15 @@ export class App {
     this.field.setPaused(true);
     this.input.exitPointerLock();
     this.feedback.suspend();
+    // Paused is exactly when somebody wants to be reminded which key does
+    // what, and nothing is happening behind it to be hidden.
+    this.ui.showFieldHint(Infinity);
     this.ui.setPaused(true);
   }
 
   resumeField() {
+    // Coming back to the fight, the legend gets out of the way again.
+    this.ui?.hideFieldHint?.();
     if (!FIELD_MODES.has(this.mode)) return;
     this.field.setPaused(false);
     this.ui.setPaused(false);
@@ -759,6 +765,14 @@ export class App {
       const editing = EDIT_MODES.has(this.mode);
 
       // F1 anywhere, and "?" where it is not being typed into something.
+      // ? and F1 also bring the control legend back, for the times when
+      // the question is "which key" rather than "what is this game".
+      if ((e.code === 'F1' || (e.code === 'Slash' && e.shiftKey))
+        && FIELD_MODES.has(this.mode) && !this.field.paused) {
+        e.preventDefault();
+        this.ui.showFieldHint();
+        return;
+      }
       if (e.code === 'F1' || (e.code === 'Slash' && e.shiftKey)) {
         e.preventDefault();
         this.ui.help.toggle();
@@ -842,6 +856,13 @@ export class App {
           e.preventDefault();
           this.editor.liftWorkPlane(e.code === 'PageUp' ? 1 : -1);
         }
+        // Enter puts a part on the selected one. Placement was the only
+        // verb in the editor with no key at all.
+        if (e.code === 'Enter' && PART_TOOLS.has(this.editor.tool)) {
+          e.preventDefault();
+          this.editor.placeOnSelected(e.shiftKey ? 3 : 2);
+          return;
+        }
         if (e.code === 'KeyJ') {
           e.preventDefault();
           if (e.shiftKey) this.disconnectSelected();
@@ -889,14 +910,28 @@ export class App {
    * is that a slow frame schedules more work, which makes the next frame
    * slower still, and the game spirals down instead of degrading.
    */
-  frame() {
+  /**
+   * One frame: advance whatever this mode is made of, then draw it.
+   *
+   * `paint` exists for the browser suite, which drives thousands of frames
+   * and looks at the pixels in nine of them. Everything the rules decide is
+   * decided either way — what it skips is the draw, which costs about five
+   * milliseconds in a visible window and anywhere from ninety to two hundred
+   * and sixty in a backgrounded tab, where the suite lives.
+   *
+   * The scene graph is still brought up to date when the draw is skipped:
+   * a renderer updates world matrices on its way through, and a test that
+   * asks where a part ENDED UP has to get the same answer either way.
+   */
+  frame({ paint = true } = {}) {
     const elapsed = Math.min(this.clock.getDelta(), 0.25);
 
     if (this.mode === 'title') {
       // A turntable and a menu. Nothing here is a fight, so it simply
       // follows the clock.
       this.titleScene.update(Math.min(elapsed, 1 / 20));
-      this.titleScene.render();
+      if (paint) this.titleScene.render();
+      else this.titleScene.scene?.updateMatrixWorld(true);
       return;
     }
 
@@ -904,7 +939,8 @@ export class App {
       // The workbench has no simulation to keep honest; it just follows the
       // clock so dragging stays smooth at any refresh rate.
       this.editor.update(Math.min(elapsed, 1 / 20));
-      this.editor.render();
+      if (paint) this.editor.render();
+      else this.editor.scene.updateMatrixWorld(true);
       return;
     }
 
@@ -919,8 +955,15 @@ export class App {
     }
     this.stepsThisFrame = steps;
 
+    // Screen furniture runs on real seconds, not on the fight's clock.
+    this.ui?.tickFieldHint?.(elapsed);
+    // And the read-out is told how much of the top is spoken for, so it
+    // never ends up underneath the legend at any window width.
+    this.field.topInset = this.ui?.fieldHintHeight?.() ?? 0;
+
     this.field.present(elapsed);
-    this.field.render();
+    if (paint) this.field.render();
+    else this.field.scene.updateMatrixWorld(true);
 
     // Asked here rather than inside the rules: whether a screen comes up is
     // not something the fight should be deciding.

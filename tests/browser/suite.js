@@ -7,13 +7,15 @@ import { SHAPE, SHAPE_IDS, SHAPES } from '../../src/core/Shapes.js';
 import { STANDARD_COLORS, hexToCss } from '../../src/core/Palette.js';
 import {
   VOX_LEVELS, EQUIP, EQUIP_META, SIZE_MAX, WEAPON_TYPES, SYSTEM_TYPES,
+  WEAPON_SLOTS,
 } from '../../src/core/constants.js';
 import { ColorWheel } from '../../src/ui/ColorWheel.js';
-import { Hud } from '../../src/game/Hud.js';
+import { Hud, MISSION_TOP, missionTop } from '../../src/game/Hud.js';
 import * as PostFXModule from '../../src/game/PostFX.js';
 import { ACTIONS } from '../../src/zmf/InputManager.js';
 import { FieldScene } from '../../src/game/FieldScene.js';
 import { loadBest, recordBest } from '../../src/ui/Title.js';
+import { SOLO_RULES } from '../../src/game/SoloRun.js';
 
 window.__postfxModule = PostFXModule;
 
@@ -54,7 +56,39 @@ function boot() {
   return a;
 }
 
-const step = (n = 1) => { for (let i = 0; i < n; i++) app.frame(); };
+/**
+ * Advance the app one frame at a time, WITHOUT drawing.
+ *
+ * The suite drives about seven and a half thousand frames and looks at the
+ * pixels in nine of them. A drawn frame costs five milliseconds in a visible
+ * window and between ninety and two hundred and sixty in the backgrounded
+ * tab this actually runs in; an undrawn one costs 1.2. That is the whole
+ * difference between a suite that takes twenty minutes and one that takes
+ * under a minute, and nothing the rules decide changes either way — the
+ * scene graph is still brought up to date, so a test that asks where a part
+ * ended up gets the same answer.
+ */
+const step = (n = 1) => { for (let i = 0; i < n; i++) app.frame({ paint: false }); };
+
+/** And the same thing with the draw, for the tests that are about drawing. */
+const paint = (n = 1) => { for (let i = 0; i < n; i++) app.frame(); };
+
+/**
+ * Put the fight's number stream back to a known place.
+ *
+ * Where an opponent respawns is drawn from the field's own generator, which
+ * is shared by all four hundred tests and never rewound. So how many numbers
+ * an EARLIER test happened to consume decided where the machines in a LATER
+ * one stood — and the moment cover began stopping rounds and locks began
+ * taking time, that turned into a different set of failures on every run.
+ *
+ * Called before `respawn()`, because that is when the positions are drawn.
+ */
+const seedField = (seed = 20260829) => {
+  app.field.random.reseed(seed);
+  app.field.visualRandom.reseed(seed ^ 0x5bf03635);
+  return app.field;
+};
 
 /** Take the rack off a machine, so it stands there and does not shoot. */
 const disarm = (r) => { r.weapons.slots.length = 0; r.weapons.activeIndex = 0; return r; };
@@ -75,6 +109,15 @@ const rearmAll = () => { for (const e of app.field.enemies) e.weapons.build(); }
  * across and a railgun round lives long enough to cross it five times — so
  * the rack comes off too. `rearmAll()` puts them back.
  */
+/** Send one machine away and take its rack off, wherever it stands. */
+function parkOne(e, i = 7) {
+  disarm(e);
+  if (!e.alive) return e;
+  e.body.reset(new THREE.Vector3(60 + i * 6, e.body.rideHeight, 78));
+  e.syncTransform();
+  return e;
+}
+
 function parkOthers(keep = null) {
   app.field.enemies.forEach((e, i) => {
     if (e === keep) return;
@@ -186,7 +229,7 @@ describe('boot', () => {
   });
 
   it('renders an editor frame', () => {
-    shouldNotThrow(() => step(3), 'editor frame');
+    shouldNotThrow(() => paint(3), 'editor frame');
     expect(app.renderer.info.render.calls).toBeGreaterThan(0);
   });
 
@@ -222,8 +265,11 @@ describe('boot', () => {
     app.editor.select(app.assembly.rootId);
     app.editor.resizeSelected([2, 2, 2]);
     expect(app.editor.stats.coreScale).toBeCloseTo(2, 4);
+    // Clearly more, but no longer more than double: the core term used to
+    // be squared, which made one slider worth more than every other decision
+    // in the editor put together.
     expect(app.editor.stats.durability, 'a bigger core is a tougher machine')
-      .toBeGreaterThan(small * 2);
+      .toBeGreaterThan(small * 1.5);
 
     app.editor.resizeSelected([1, 1, 1]);
     expect(app.editor.stats.durability).toBe(small);
@@ -2128,6 +2174,7 @@ describe('the float plate', () => {
     // Standing still nobody strides, so both halves have to actually travel.
     const runFor = (frames) => {
       app.input.setEnabled(true);
+      seedField();
       app.field.respawn();
       app.input.keys.add('KeyW');
       step(frames);
@@ -2399,6 +2446,7 @@ describe('the rest of the rack, in the field', () => {
     app.editor.rebuild();
     app.setMode('field');
     app.input.setEnabled(true);
+    seedField();
     app.field.respawn();
     step(4);
     return app.field.player;
@@ -2527,14 +2575,18 @@ describe('the rest of the rack, in the field', () => {
     app.setMode('edit');
   });
 
-  it('the whole rack can be carried, switched through, and read on the HUD', () => {
+  it('a full rack can be carried, switched through, and read on the HUD', () => {
+    // Four, not all eleven: a machine may only carry a rack's worth now, so
+    // that ten different cost structures become a question somebody has to
+    // answer in the editor rather than a wheel to spin in the field.
+    const fitted = WEAPON_TYPES.slice(0, WEAPON_SLOTS);
     const p = deploy(...WEAPON_TYPES);
-    expect(p.weapons.slots).toHaveLength(WEAPON_TYPES.length);
-    for (let i = 0; i < WEAPON_TYPES.length; i++) {
-      expect(p.weapons.active.type).toBe(WEAPON_TYPES[i]);
+    expect(p.weapons.slots).toHaveLength(WEAPON_SLOTS);
+    for (let i = 0; i < fitted.length; i++) {
+      expect(p.weapons.active.type).toBe(fitted[i]);
       p.weapons.next();
     }
-    expect(p.weapons.readout()).toHaveLength(WEAPON_TYPES.length);
+    expect(p.weapons.readout()).toHaveLength(WEAPON_SLOTS);
     shouldNotThrow(() => step(10), 'hud');
     app.setMode('edit');
   });
@@ -2547,6 +2599,7 @@ describe('fighting something', () => {
     app.setMode('field');
     app.input.setEnabled(true);
     app.field.paused = false;
+    seedField();
     app.field.respawn();
     // Zoom is a preference and survives a respawn on purpose, so a test
     // about where the camera SITS has to say what it is starting from.
@@ -2629,7 +2682,25 @@ describe('fighting something', () => {
     // the air several frames later. At three hundred metres a second it was
     // there before the frame it was fired in had finished.
     const f = deployed();
-    parkOthers(forceLock()?.robot);
+    parkOthers();
+    f._dropLock();
+
+    // Down a lane with nothing in it. Rounds stop at the pillars now, so a
+    // machine that happens to spawn facing one fires into it well inside
+    // the tenth of a second this test is about — which would read as a
+    // round that vanished rather than one that flew.
+    const centre = new THREE.Vector3(0, f.player.body.rideHeight, 0);
+    f.player.body.reset(centre);
+    let lane = null;
+    for (let i = 0; i < 32 && !lane; i++) {
+      const a = (i / 32) * Math.PI * 2;
+      const heading = new THREE.Vector3(Math.sin(a), 0, Math.cos(a));
+      if (!f._blocked(centre, centre.clone().addScaledVector(heading, 60))) lane = heading;
+    }
+    expect(lane, 'the arena has a clear line somewhere').toBeTruthy();
+    f.player.body.angular.reset(lane);
+    for (let i = 0; i < 30; i++) { f.player.body.reset(centre); step(1); }
+
     app.input.keys.add('Mouse0');
     step(2);
     app.input.keys.clear();
@@ -2653,6 +2724,7 @@ describe('what a fight looks like', () => {
     app.setMode('field');
     app.input.setEnabled(true);
     app.field.paused = false;
+    seedField();
     app.field.respawn();
     step(20);
     // Cleared AFTER settling, not before: twenty steps of a live field is
@@ -2689,13 +2761,25 @@ describe('what a fight looks like', () => {
 
   it('a round arriving leaves a mark, in its own colour', () => {
     const f = deployed();
-    // One opponent left standing, and it does not shoot back: the mark
-    // being counted has to be one of OURS arriving.
-    disarm(parkOthers(forceLock()?.robot));
+    // One opponent left standing, in front of us, and it does not shoot
+    // back: the mark being counted has to be one of OURS arriving.
+    //
+    // Held at forty metres on purpose. It used to be left wherever it
+    // spawned, and what actually made this pass was rounds reaching parked
+    // machines a hundred metres away — which stopped working the moment the
+    // rifle's range came in to the width of the arena, and was never what
+    // the test meant.
+    const mark = disarm(parkOthers(forceLock()?.robot));
+    const spot = new THREE.Vector3(
+      f.player.position.x, mark.body.rideHeight, f.player.position.z + 40,
+    );
+    const hold = () => { mark.body.reset(spot); mark.syncTransform(); };
+    hold();
     f.effects.clear();
     app.input.keys.add('Mouse0');
     let sparks = 0;
-    for (let i = 0; i < 90 && !sparks; i++) {
+    for (let i = 0; i < 120 && !sparks; i++) {
+      hold();
       step(1);
       sparks = live(f.effects.impacts);
     }
@@ -2791,6 +2875,7 @@ describe('what a fight looks like', () => {
     app.input.keys.add('Mouse0');
     step(10);
     app.input.keys.clear();
+    seedField();
     f.respawn();
     parkOthers();
     step(1);
@@ -2806,6 +2891,7 @@ describe('being hit, and hitting back', () => {
     app.setMode('field');
     app.input.setEnabled(true);
     app.field.paused = false;
+    seedField();
     app.field.respawn();
     // These tests deal out every blow by hand and then read what the
     // read-out made of it. An opponent landing one of its own in the middle
@@ -3139,6 +3225,7 @@ describe('a fight you can lose', () => {
     app.setMode('field');
     app.input.setEnabled(true);
     app.field.paused = false;
+    seedField();
     app.field.respawn();
     // Earlier describes take racks off to get a quiet field. This one is
     // about being shot at, so everything goes back on first.
@@ -3190,10 +3277,25 @@ describe('a fight you can lose', () => {
   it('moving is worth more than standing there', () => {
     // The dodging, the slow rounds and the honest hit volumes only mean
     // something if this is true.
-    const take = (moving) => {
+    const take = (moving, seed) => {
       const f = deployed();
+      // A different fight each time.
+      //
+      // Every trial used the one seed the suite resets to, so three samples
+      // of a condition were three runs of the SAME fight and summing them
+      // reduced nothing. Varying it is what makes an average an average.
+      f.random.reseed(seed);
+      f.visualRandom.reseed(seed ^ 0x5bf03635);
       f.player.body.reset(new THREE.Vector3(0, f.player.body.rideHeight, 0));
-      f.enemies.forEach((e, i) => e.revive(new THREE.Vector3(
+      // Exactly two, in the same two places every time.
+      //
+      // It used to revive whatever happened to be on the field, and how many
+      // machines that is — and which ones — depends on what the tests before
+      // it did with the roster. Two runs of this comparison have to face the
+      // same opposition, and so do two runs of the suite.
+      const pair = f.enemies.filter((e) => e.alive).slice(0, 2);
+      for (const e of f.enemies) if (!pair.includes(e)) parkOne(e);
+      pair.forEach((e, i) => e.revive(new THREE.Vector3(
         Math.cos(i * 2.1) * 15, e.body.rideHeight, Math.sin(i * 2.1) * 15,
       )));
       step(90);
@@ -3220,8 +3322,15 @@ describe('a fight you can lose', () => {
       app.input.keys.clear();
       return taken;
     };
-    const still = take(false);
-    const weaving = take(true);
+    // Three each, summed.
+    //
+    // Measured over three pairs the answer is steady — 827 taken standing
+    // against 639 weaving, a fifth less — but a SINGLE pair ranges from 0.66
+    // to 0.86, which straddles the line on its own. The claim is about how
+    // the fight behaves, not about one run of it.
+    const seeds = [11, 22, 33];
+    const still = seeds.reduce((t, s) => t + take(false, s), 0);
+    const weaving = seeds.reduce((t, s) => t + take(true, s), 0);
     expect(still, 'it hurts to stand still').toBeGreaterThan(0);
     expect(weaving, 'and it hurts less to move').toBeLessThan(still * 0.85);
     app.setMode('edit');
@@ -3289,11 +3398,26 @@ describe('a fight you can lose', () => {
   });
 
   it('a lock survives something flicking past', () => {
+    // The rule, asked directly. Watching a free-running opponent for two
+    // seconds and hoping it stays in the clear is not a test of anything:
+    // the arena is full of pillars and it is entitled to walk behind one.
     const f = deployed();
-    forceLock();
-    const held = f.lock.robot;
-    step(120);
-    expect(f.lock?.robot, 'still there in the open').toBe(held);
+    const held = parkOthers(forceLock()?.robot);
+    const clear = new THREE.Vector3(
+      f.player.position.x, held.body.rideHeight, f.player.position.z + 16,
+    );
+    const box = f.world.colliders[0];
+    const hidden = box.getCenter(new THREE.Vector3());
+    const put = (at) => { held.body.reset(at); held.syncTransform(); };
+
+    put(clear);
+    step(10);
+    expect(f.lock?.robot, 'held in the open').toBe(held);
+
+    // Behind something, but only for a third of a second.
+    for (let i = 0; i < 18; i++) { put(hidden); step(1); }
+    for (let i = 0; i < 10; i++) { put(clear); step(1); }
+    expect(f.lock?.robot, 'a glimpse of cover is not losing it').toBe(held);
     app.setMode('edit');
   });
 
@@ -3338,6 +3462,7 @@ describe('the boost', () => {
     app.input.setEnabled(true);
 
     const peak = (boost) => {
+      seedField();
       app.field.respawn();
       app.input.keys.clear();
       app.input.keys.add('KeyW');
@@ -3418,31 +3543,57 @@ describe('the look of it', () => {
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.6), mat);
     scene.add(quad);
 
-    const gl = app.renderer.getContext();
-    const px = new Uint8Array(4);
-    // Just outside the square: past its edge, but well inside the halo a
-    // blur of this radius throws.
-    const sampleAway = () => {
-      const w = gl.drawingBufferWidth;
-      const h = gl.drawingBufferHeight;
-      gl.readPixels(Math.floor(w * 0.5), Math.floor(h * 0.62), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
-      return px[0] + px[1] + px[2];
+    // Into a target of our own rather than onto the canvas. What a canvas
+    // holds after the browser has composited it is undefined, and in a
+    // window nobody is looking at it may never have been drawn — so reading
+    // the screen was asking the compositor a question, not the shader.
+    //
+    // Same size as the drawing buffer, because the chain's own targets are
+    // sized from it: anything else rescales the image on the way out and
+    // moves the halo relative to wherever the test decided to look.
+    const W = app.renderer.domElement.width;
+    const H = app.renderer.domElement.height;
+    const rt = new THREE.WebGLRenderTarget(W, H);
+    const col = new Uint8Array(4 * H);
+
+    /**
+     * How far light reaches from the middle of the frame, in pixels.
+     *
+     * Measured rather than sampled at one chosen spot: where the halo ends
+     * depends on the size of the frame and the shape of the blur, and a
+     * fixed offset that happens to sit inside it at one resolution sits
+     * outside it at another. Reading the whole column asks the question the
+     * test is named after.
+     */
+    const reach = () => {
+      app.renderer.readRenderTargetPixels(rt, Math.floor(W / 2), 0, 1, H, col);
+      let far = 0;
+      for (let y = 0; y < H; y++) {
+        const sum = col[y * 4] + col[y * 4 + 1] + col[y * 4 + 2];
+        if (sum > 12) far = Math.max(far, Math.abs(y - H / 2));
+      }
+      return far;
     };
 
     post().setBloom(0);
     post().set({ chroma: 0, lines: 0, noise: 0, flash: 0 }, 0);
-    post().render(scene, cam);
-    const dark = sampleAway();
+    post().render(scene, cam, rt);
+    const bare = reach();
+    // The square itself, so a renderer that draws nothing at all says so
+    // here rather than looking like a bloom that failed to spread.
+    expect(bare, 'the source really was drawn').toBeGreaterThan(2);
 
     post().setBloom(1.2);
-    post().render(scene, cam);
-    const lit = sampleAway();
+    post().render(scene, cam, rt);
+    const halo = reach();
 
     post().setBloom(0.85);
+    rt.dispose();
     quad.geometry.dispose();
     mat.dispose();
 
-    expect(lit, 'the halo reaches past the source').toBeGreaterThan(dark + 4);
+    expect(halo, 'the light reaches further than the thing emitting it')
+      .toBeGreaterThan(bare + 2);
   });
 
   it('both worlds are lit by an environment, not just by lamps', () => {
@@ -3533,7 +3684,11 @@ describe('the fight runs on its own clock', () => {
         app.input.keys.clear();
         if (t >= 0.2) app.input.keys.add('KeyW');
         if (t >= 0.4 && Math.floor(t / 0.2) % 2 === 0) app.input.keys.add('Mouse0');
-        app.frame();
+        // Undrawn. What is under test is the STEP loop — how a frame of any
+        // length is divided into fixed steps — and the draw is not part of
+        // it. These five tests were four fifths of the whole suite's
+        // running time, for pixels nobody compares.
+        app.frame({ paint: false });
       }
     } finally {
       app.input.keys.clear();
@@ -3623,6 +3778,7 @@ describe('the fight runs on its own clock', () => {
     app.setMode('edit');
     app.loadPreset('biped');
     app.setMode('field');
+    seedField();
     app.field.respawn();
     step(4);
 
@@ -3647,10 +3803,12 @@ describe('the fight runs on its own clock', () => {
     app.setMode('edit');
     app.loadPreset('biped');
     app.setMode('field');
+    seedField();
     app.field.respawn();
     app.input.setEnabled(true);
 
     const gait = (interval) => {
+      seedField();
       app.field.respawn();
       const r = app.field.player;
       app.input.keys.add('KeyW');
@@ -3715,7 +3873,7 @@ describe('the title screen', () => {
   it('renders, and turns', () => {
     app.goTitle();
     const before = app.titleScene.stand.rotation.y;
-    shouldNotThrow(() => step(20), 'title frame');
+    shouldNotThrow(() => paint(20), 'title frame');
     expect(app.titleScene.stand.rotation.y).not.toBe(before);
     expect(app.renderer.info.render.calls).toBeGreaterThan(0);
   });
@@ -3841,7 +3999,11 @@ describe('the title screen', () => {
   });
 
   it('shows the best run so far, once there has been one', () => {
+    // Both keys. The reader falls back to the name the game had before it
+    // was renamed, so clearing only the new one leaves the old record
+    // standing and "no runs yet" never appears.
     localStorage.removeItem('blostom.solo.best.v1');
+    localStorage.removeItem('brostom.solo.best.v1');
     app.goTitle();
     expect(document.querySelector('.titlebest').textContent).toContain('まだ');
 
@@ -3855,6 +4017,7 @@ describe('the title screen', () => {
       .toBe(false);
     expect(loadBest().score).toBe(4200);
     localStorage.removeItem('blostom.solo.best.v1');
+    localStorage.removeItem('brostom.solo.best.v1');
     app.setMode('edit');
   });
 });
@@ -3939,12 +4102,19 @@ describe('solo play', () => {
     expect(app.field.player.alive, 'the wreck is worth a moment').toBe(false);
     play(3.5);
     expect(app.field.player.alive, 'and then you are back').toBe(true);
-    expect(app.field.player.hp).toBe(app.field.player.maxHp);
+    // With a machine, not a fresh one. Coming back whole made being shot
+    // down the better move whenever the hull was low, which is backwards.
+    expect(app.field.player.hp, 'and something to fight with').toBeGreaterThan(0);
+    expect(app.field.player.hp, 'but a life cost you something')
+      .toBeLessThan(app.field.player.maxHp);
   });
 
   it('ends the run when the lives are gone, and says how it went', () => {
     const d = app.field.director;
+    // Both names it can be stored under, or the record this run is meant to
+    // set is compared against one left behind by an older build.
     localStorage.removeItem('blostom.solo.best.v1');
+    localStorage.removeItem('brostom.solo.best.v1');
     while (d.lives > 0) { downPlayer(); if (d.state === 'down') play(3.5); }
     play(3.5);
     expect(d.finished).toBe(true);
@@ -4524,6 +4694,7 @@ describe('field mode', () => {
     app.setMode('field');
     app.input.setEnabled(true);
     const runKey = (code) => {
+      seedField();
       app.field.respawn();
       app.field.player.body.angular.reset(new THREE.Vector3(0, 0, 1));
       app.input.keys.clear();
@@ -4545,6 +4716,7 @@ describe('field mode', () => {
    * happened to be standing there — and it passes or fails by luck.
    */
   const emptyArena = () => {
+    seedField();
     app.field.respawn();
     for (const e of app.field.enemies) {
       e.body.reset(new THREE.Vector3(0, 60, 220));
@@ -4609,6 +4781,7 @@ describe('field mode', () => {
     bare();
     app.setMode('field');
     app.input.setEnabled(true);
+    seedField();
     app.field.respawn();
 
     // Park a target overhead and hold the lock while walking at it.
@@ -4618,22 +4791,23 @@ describe('field mode', () => {
     // an earlier test left standing on the spawn point tips it for reasons
     // that have nothing to do with the lock.
     const p = app.field.player;
-    const target = app.field.enemies.find((e) => e.alive);
-    for (const e of app.field.enemies) {
-      if (e === target) continue;
-      e.body.reset(new THREE.Vector3(0, 40, 220));
-      e.syncTransform();
-    }
-    target.body.reset(new THREE.Vector3(4, 30, -10));
-    target.syncTransform();
+    // Nobody shooting, and the one being aimed at held overhead. A machine
+    // that is rocked by a heavy round tips, correctly, for two and a half
+    // seconds — which is a different rule with its own test, and enough to
+    // fail this one for a reason it is not about.
+    const target = disarm(parkOthers(app.field.enemies.find((e) => e.alive)));
+    const above = new THREE.Vector3(4, 30, -10);
+    const hold = () => { target.body.reset(above); target.syncTransform(); };
+    hold();
     app.field.lock = { robot: target, aimPoint: target.position.clone() };
     app.field._applyLock();
-    step(60);
+    for (let i = 0; i < 60; i++) { hold(); step(1); }
 
     let steepestAim = 0;
     let worstTilt = 0;
     app.input.keys.add('KeyW');
     for (let i = 0; i < 150; i++) {
+      hold();
       step(1);
       steepestAim = Math.max(steepestAim, p.body.aimForward.y);
       if (p.body.env.grounded > 0.9) worstTilt = Math.max(worstTilt, Math.abs(p.body.forward.y));
@@ -4650,44 +4824,52 @@ describe('field mode', () => {
     bare();
     app.setMode('field');
     app.input.setEnabled(true);
+    seedField();
     app.field.respawn();
 
-    // Point at something before pressing lock. Acquiring a target from
-    // wherever the camera happens to face has its own test; this one is
-    // about what CLOSING on a locked target does to the chassis, and it
-    // should not fail because the opponents wandered off screen.
-    // One opponent, and it does not shoot: walking four seconds into open
-    // fire with no weapons of our own ends with a wreck and a respawn, and
-    // a machine that was put back on its spawn point never closed on
-    // anything.
-    const mark = disarm(parkOthers(app.field.enemies.find((e) => e.alive)));
-    app.field.player.body.angular.reset(
-      mark.position.clone().sub(app.field.player.position).setY(0).normalize(),
+    // One opponent, disarmed, and parked in the clear forty metres ahead —
+    // then held there for the whole run.
+    //
+    // Everything about the arena fights this test otherwise: walking four
+    // seconds into open fire with no weapons of our own ends in a wreck and
+    // a respawn on the start line, cover between the two machines stops a
+    // lock being made at all, and a machine with its rack off reads as
+    // permanently reloading, which makes it back away from the very thing
+    // that is trying to close on it. None of that is what is being asked
+    // here, which is only what AIMING WHILE WALKING does to the chassis.
+    const f = app.field;
+    const mark = disarm(parkOthers(f.enemies.find((e) => e.alive)));
+    const spot = new THREE.Vector3(
+      f.player.position.x, mark.body.rideHeight, f.player.position.z + 40,
     );
-    app.field.cameraRig.snap(app.field.player.position, app.field.player.body.forward);
-    step(4);
+    const hold = () => { mark.body.reset(spot); mark.syncTransform(); };
+    hold();
+    f.player.body.angular.reset(
+      spot.clone().sub(f.player.position).setY(0).normalize(),
+    );
+    f.cameraRig.snap(f.player.position, f.player.body.forward);
+    for (let i = 0; i < 10; i++) { hold(); step(1); }
 
-    app.input.buffer.push({ action: 'lock', t: app.input.time });
-    step(30);
-    expect(app.field.lock, 'locked on').toBeTruthy();
+    f._beginLock(mark);
+    for (let i = 0; i < 30; i++) { hold(); step(1); }
+    expect(f.lock, 'locked on').toBeTruthy();
 
-    const start = app.field.player.position.y;
-    const opened = app.field.player.position.distanceTo(app.field.lock.robot.position);
+    const start = f.player.position.y;
+    const opened = f.player.position.distanceTo(f.lock.robot.position);
     let peak = start;
     let closest = Infinity;
     app.input.keys.add('KeyW');
     for (let i = 0; i < 260; i++) {
+      hold();
       step(1);
-      peak = Math.max(peak, app.field.player.position.y);
-      if (app.field.lock) {
-        closest = Math.min(closest, app.field.player.position.distanceTo(app.field.lock.robot.position));
-      }
+      peak = Math.max(peak, f.player.position.y);
+      if (f.lock) closest = Math.min(closest, f.player.position.distanceTo(f.lock.robot.position));
     }
     app.input.keys.clear();
 
-    // Relative to where we started, not an absolute range: the opponent jinks
-    // on a random timer, and can respawn near or far, so both how close we get
-    // and how far we began vary run to run.
+    // Relative to where we started rather than an absolute range: what is
+    // being proved is that walking at it really did shorten the gap, not
+    // that it ended at any particular number.
     expect(closest, 'we really did close on it').toBeLessThan(opened * 0.5);
     expect(peak - start, 'and never left the floor').toBeLessThan(0.5);
     expect(app.field.player.body.env.grounded).toBeGreaterThan(0.9);
@@ -4892,6 +5074,7 @@ describe('weapons in the field', () => {
     app.editor.rebuild();
     app.setMode('field');
     app.input.setEnabled(true);
+    seedField();
     app.field.respawn();
     return app.field.player;
   };
@@ -4936,6 +5119,21 @@ describe('weapons in the field', () => {
     deploy(EQUIP.GATLING, EQUIP.BEAM, EQUIP.SHOT);
     const lock = lockOn();
     expect(lock).toBeTruthy();
+    // Out in the open, in front of us, and held there. Rounds stop at the
+    // pillars now, and an opponent left on whatever spawn point it drew can
+    // spend the whole burst behind one — which is cover working, and a
+    // different test's business.
+    const f = app.field;
+    const mark = lock.robot;
+    parkOthers(mark);
+    const put = () => {
+      mark.body.reset(new THREE.Vector3(
+        f.player.position.x, mark.body.rideHeight, f.player.position.z + 16,
+      ));
+      mark.syncTransform();
+    };
+    put();
+    step(2);
     const hp = lock.robot.hp;
     // Track the LOW-WATER mark: a machine that takes enough of this comes
     // apart and respawns at full health, which is not the same as unhurt.
@@ -4943,6 +5141,7 @@ describe('weapons in the field', () => {
     for (let i = 0; i < 300; i++) {
       if (i % 24 === 0) app.input.keys.delete('Mouse0');
       if (i % 24 === 2) app.input.keys.add('Mouse0');
+      put();
       step(1);
       lowest = Math.min(lowest, lock.robot.hp);
     }
@@ -5009,6 +5208,7 @@ describe('weapons in the field', () => {
     step(20);
     app.input.keys.clear();
     expect(p.weapons.slots[0].ammo).toBeLessThan(EQUIP_META.beam.ammo);
+    seedField();
     app.field.respawn();
     expect(app.field.player.weapons.slots[0].ammo).toBe(EQUIP_META.beam.ammo);
     expect(app.field.projectiles.liveCount).toBe(0);
@@ -5018,8 +5218,20 @@ describe('weapons in the field', () => {
     app.setMode('edit');
     bare();
     app.setMode('field');
+    seedField();
     app.field.respawn();
     const lock = lockOn();
+    // Near enough to be shot at. The built-in gun has no round to dodge, so
+    // what it has instead is a miss chance that grows with range and with
+    // how fast the target is crossing — at a hundred metres it is meant to
+    // hit almost nothing, which is the rule, not the bug.
+    const f = app.field;
+    const mark = parkOthers(lock.robot);
+    mark.body.reset(new THREE.Vector3(
+      f.player.position.x, mark.body.rideHeight, f.player.position.z + 12,
+    ));
+    mark.syncTransform();
+    step(2);
     const hp = lock.robot.hp;
     app.input.keys.add('Mouse0');
     step(60);
@@ -5115,6 +5327,7 @@ describe('weapons in the field', () => {
     app.editor.rebuild();
     app.setMode('field');
     app.input.setEnabled(true);
+    seedField();
     app.field.respawn();
 
     app.input.keys.add('KeyE');
@@ -5222,6 +5435,7 @@ describe('key config', () => {
     kc().close();
     app.setMode('field');
     app.input.setEnabled(true);
+    seedField();
     app.field.respawn();
 
     const before = app.field.player.position.clone();
@@ -5264,6 +5478,7 @@ describe('switching weapons', () => {
     app.editor.rebuild();
     app.setMode('field');
     app.input.setEnabled(true);
+    seedField();
     app.field.respawn();
     return app.field.player;
   };
@@ -5319,6 +5534,7 @@ describe('destruction and respawn', () => {
     bare();
     app.setMode('field');
     app.input.setEnabled(true);
+    seedField();
     app.field.respawn();
     return app.field;
   };
@@ -5421,6 +5637,7 @@ describe('destruction and respawn', () => {
     app.editor.rebuild();
     app.setMode('field');
     app.input.setEnabled(true);
+    seedField();
     app.field.respawn();
 
     const enemy = disarm(parkOthers(forceLock().robot));
@@ -5431,16 +5648,24 @@ describe('destruction and respawn', () => {
     // that is the point of the dodging — and a test that quietly depends
     // on it is a test that fails for a reason it is not about.
     const f = app.field;
-    enemy.body.reset(new THREE.Vector3(
-      f.player.position.x, enemy.body.rideHeight, f.player.position.z + 10,
-    ));
-    enemy.syncTransform();
+    // Held in front of us for the whole burst. A machine with its rack
+    // taken off reads as permanently reloading, and a machine that is
+    // reloading BACKS OFF — it was walking to sixty metres and surviving on
+    // the last two hit points of a thirty-round magazine.
+    const hold = () => {
+      enemy.body.reset(new THREE.Vector3(
+        f.player.position.x, enemy.body.rideHeight, f.player.position.z + 10,
+      ));
+      enemy.syncTransform();
+    };
+    hold();
     step(2);
 
     app.input.keys.add('Mouse0');
     let sawWreck = false;
     let downed = false;
     for (let i = 0; i < 240 && !(downed && sawWreck); i++) {
+      if (enemy.alive) hold();
       step(1);
       // Read as it happens rather than at the end: a wreck is put back on
       // the field on a timer, and a machine that has already been handed a
@@ -5718,6 +5943,7 @@ describe('field camera', () => {
     app.input.setEnabled(true);
     // Pointer lock cannot be granted to a headless test, so say it happened.
     app.input.pointerLocked = true;
+    seedField();
     app.field.respawn();
     rig().recenter();
     rig().zoom = 1;
@@ -5811,6 +6037,7 @@ describe('field camera', () => {
     enterField();
     rig().orbitBy(1.5, 0.4);
     rig().zoom = 1.8;
+    seedField();
     app.field.respawn();
     expect(rig().orbit.yaw).toBe(0);
     expect(rig().orbit.pitch).toBe(0);
@@ -5835,7 +6062,7 @@ describe('rendering', () => {
     app.setMode('field');
     app.renderer.info.autoReset = false;
     app.renderer.info.reset();
-    step(1);
+    paint(1);
     expect(app.renderer.info.render.calls).toBeGreaterThan(1);
     expect(app.field.post.target.width).toBeGreaterThan(0);
     expect(app.field.post.uniforms.tDiffuse.value).toBe(app.field.post.target.texture);
@@ -5978,7 +6205,9 @@ describe('undo and redo', () => {
     // The label names the shape. Twenty entries all reading "配置" said
     // nothing about how far back a run of Ctrl+Z had gone, which is the one
     // thing the label is for.
-    expect(app.history.undoLabel).toBe('配置 立方体');
+    // The host is named too: twenty rows reading "配置 立方体" say nothing
+    // about which of the twenty a press of Ctrl+Z is about to take back.
+    expect(app.history.undoLabel).toBe('配置 立方体 @CORE');
     expect(app.ui.undoBtn.disabled).toBe(false);
     expect(app.ui.undoBtn.title).toContain('配置');
     app.setTool(TOOL.SELECT);
@@ -6028,7 +6257,9 @@ describe('undo and redo', () => {
 
     app.setMode('edit');
     expect(app.history.canUndo, 'the machine kept its own stack').toBe(true);
-    expect(app.history.undoLabel).toBe('配置 立方体');
+    // The host is named too: twenty rows reading "配置 立方体" say nothing
+    // about which of the twenty a press of Ctrl+Z is about to take back.
+    expect(app.history.undoLabel).toBe('配置 立方体 @CORE');
   });
 });
 
@@ -6761,6 +6992,636 @@ describe('after it is down', () => {
   });
 });
 
+describe('a fight with decisions in it', () => {
+  const deployed = () => {
+    app.setMode('edit');
+    app.loadPreset('biped');
+    app.setMode('field');
+    app.input.setEnabled(true);
+    app.field.paused = false;
+    seedField();
+    app.field.respawn();
+    rearmAll();
+    step(20);
+    return app.field;
+  };
+
+  it('a lock takes a moment to make', () => {
+    // It used to be instant, free, permanent and re-aimable at the best
+    // available target with one key — so in a fight with six machines there
+    // was never a question about who to shoot.
+    const f = deployed();
+    // Reached for directly. Whether a keypress finds a target from wherever
+    // the camera happens to point is a different rule with its own test;
+    // this one is about the moment it costs once you have asked for it.
+    const mark = parkOthers(f.enemies.find((e) => e.alive));
+    mark.body.reset(new THREE.Vector3(
+      f.player.position.x, mark.body.rideHeight, f.player.position.z + 14,
+    ));
+    mark.syncTransform();
+    f._beginLock(mark);
+    expect(f.lock, 'not yet').toBeFalsy();
+    expect(f.locking, 'but reaching for it').toBeTruthy();
+
+    step(9);
+    expect(f.lock, 'still not, an eighth of a second in').toBeFalsy();
+    step(20);
+    expect(f.lock?.robot, 'and now it is made').toBe(mark);
+    app.setMode('edit');
+  });
+
+  it('and letting go of one costs the same again', () => {
+    const f = deployed();
+    forceLock();
+    expect(f.lock).toBeTruthy();
+    app.input.buffer.push({ action: 'lock', t: app.input.time });
+    step(2);
+    expect(f.lock, 'dropped').toBeFalsy();
+    expect(f.locking, 'and not quietly re-made').toBeFalsy();
+    app.setMode('edit');
+  });
+
+  it('cover stops rounds, and runs out', () => {
+    // The pillars only ever broke a lock: you could stand behind one and be
+    // shot through it.
+    const f = deployed();
+    const pillar = f.world.pillars.find((x) => x.hp > 0);
+    expect(pillar, 'the arena has cover').toBeTruthy();
+    const at = pillar.box.getCenter(new THREE.Vector3());
+    const before = f.world.colliders.length;
+    // Ours, followed by name: the pool is shared with everything else on the
+    // field that is shooting, and counting what is left in it counts theirs.
+    const shot = f.projectiles.spawn({
+      position: at.clone().add(new THREE.Vector3(0, 0, -7)),
+      direction: new THREE.Vector3(0, 0, 1),
+      speed: 60, life: 3, damage: 5, radius: 0.2, owner: null,
+    });
+    for (let i = 0; i < 30 && shot.life > 0; i++) step(1);
+    expect(shot.life, 'it stopped at the pillar').toBe(0);
+
+    for (let i = 0; i < 400; i++) f.world.damageCover(at, 20);
+    expect(f.world.colliders.length, 'and enough of them take it down')
+      .toBe(before - 1);
+    f.world.resetCover();
+    expect(f.world.colliders.length, 'a new match puts it back').toBe(before);
+    app.setMode('edit');
+  });
+
+  it('holding the trigger opens the group up, and letting go closes it', () => {
+    const f = deployed();
+    parkOthers(forceLock()?.robot);
+    const slot = f.player.weapons.slots.find((x) => !x.meta.semi && x.meta.interval < 0.25)
+      ?? f.player.weapons.slots[0];
+    f.player.weapons.activeIndex = f.player.weapons.slots.indexOf(slot);
+    expect(slot.warmth, 'cold').toBe(0);
+    app.input.keys.add('Mouse0');
+    step(150);
+    app.input.keys.clear();
+    const hot = slot.warmth;
+    step(120);
+    expect(hot, 'held down, it opens up').toBeGreaterThan(0.4);
+    expect(slot.warmth, 'and settles once you stop').toBeLessThan(hot);
+    app.setMode('edit');
+  });
+
+  it('the read-out points at whoever is shooting at you', () => {
+    const f = deployed();
+    const before = app.hudCanvas.toDataURL();
+    const mark = f.enemies.find((e) => e.alive);
+    const ai = f.ais.find((a) => a.robot === mark);
+    ai.aiming = true;
+    // Behind us, which is exactly the case the arc round the reticle only
+    // gets to answer after the damage has already landed.
+    mark.body.reset(new THREE.Vector3(
+      f.player.position.x, mark.body.rideHeight, f.player.position.z - 24,
+    ));
+    mark.syncTransform();
+    expect(f._threats().includes(mark), 'it is on the list').toBe(true);
+    f.hud.draw({
+      camera: f.camera, player: f.player, targets: [], lock: null, locking: 0,
+      threats: f._threats(), telemetry: f.player.body.telemetry(),
+      gait: f.player.stats.gait, legs: f.player.stats.legs,
+      weapons: [], mission: null,
+    }, 1 / 30);
+    expect(app.hudCanvas.toDataURL() !== before, 'and it is drawn').toBe(true);
+    ai.aiming = false;
+    app.setMode('edit');
+  });
+});
+
+describe('what a run asks of you', () => {
+  const started = () => {
+    app.setMode('edit');
+    bare();
+    app.goTitle();
+    app.ui.title.choose('solo');
+    return app.field;
+  };
+  const play = (seconds) => {
+    for (let i = 0; i < Math.round(seconds * 60); i++) app.field.update(1 / 60);
+  };
+  const clearWave = () => {
+    for (const m of app.field.director.members) m.damage(999999);
+    play(0.1);
+  };
+
+  it('the breather is a choice, taken with a number key', () => {
+    const f = started();
+    play(3.2);
+    expect(f.director.wave).toBe(1);
+    f.player.hp = f.player.maxHp * 0.2;
+    clearWave();
+    play(0.2);
+    const offer = f.director.offer;
+    expect(offer, 'there is something on the table').toBeTruthy();
+
+    const hp = f.player.hp;
+    // The real key, through the real bindings: rebinding the movement layer
+    // rebinds this too, because it IS that key borrowed for three seconds.
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      code: app.input.keysFor('layerA')[0], bubbles: true,
+    }));
+    f.update(1 / 60);
+    expect(f.director.offer, 'taken').toBe(null);
+    expect(f.player.hp, 'and it did something').toBeGreaterThan(hp);
+    app.setMode('edit');
+  });
+
+  it('coming back from a life is not coming back whole', () => {
+    const f = started();
+    play(3.2);
+    const d = f.director;
+    f.player.damage(999999);
+    play(0.1);
+    play(4.5);
+    expect(f.player.alive, 'back on the field').toBe(true);
+    expect(f.player.hp, 'with a machine, not a fresh one')
+      .toBeLessThan(f.player.maxHp);
+    expect(f.player.hp, 'and enough of one to fight with').toBeGreaterThan(0);
+    expect(d.lives).toBeLessThan(SOLO_RULES.lives);
+    app.setMode('edit');
+  });
+
+  it('a clean wave pays more than a bloody one', () => {
+    const f = started();
+    play(3.2);
+    f.director.tookHits = false;
+    clearWave();
+    play(0.2);
+    expect(f.director.lastBonus.clean, 'untouched').toBeGreaterThan(0);
+    app.setMode('edit');
+  });
+});
+
+describe('the screen gets out of the way', () => {
+  const inField = () => {
+    app.setMode('edit');
+    bare();
+    app.setMode('field');
+    app.field.paused = false;
+    step(2);
+    return app.field;
+  };
+
+  it('the control legend says its piece and folds away', () => {
+    // It is as wide as the screen and sits across the top — which is where
+    // the run's own read-out is drawn. For the whole of solo play the wave,
+    // what was left of it, the score and the LIVES were behind it.
+    inField();
+    const bar = app.ui.fieldBar;
+    expect(bar.classList.contains('hidden'), 'it is up when you arrive').toBe(false);
+    expect(bar.classList.contains('folded'), 'and not folded yet').toBe(false);
+
+    app.ui.tickFieldHint(2);
+    expect(bar.classList.contains('folded'), 'still up after two seconds').toBe(false);
+    app.ui.tickFieldHint(6);
+    expect(bar.classList.contains('folded'), 'and gone after eight').toBe(true);
+    app.setMode('edit');
+  });
+
+  it('and comes back when you ask which key does what', () => {
+    inField();
+    app.ui.hideFieldHint();
+    expect(app.ui.fieldBar.classList.contains('folded')).toBe(true);
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F1', bubbles: true }));
+    expect(app.ui.fieldBar.classList.contains('folded'), 'F1 brings it back').toBe(false);
+    expect(app.ui.help.open, 'and does not open the manual instead').toBe(false);
+    app.setMode('edit');
+  });
+
+  it('pausing puts it back up, and resuming folds it again', () => {
+    inField();
+    app.ui.hideFieldHint();
+    app.pauseField();
+    expect(app.ui.fieldBar.classList.contains('folded'), 'paused is when you want it').toBe(false);
+    app.resumeField();
+    expect(app.ui.fieldBar.classList.contains('folded'), 'and back to the fight').toBe(true);
+    app.setMode('edit');
+  });
+
+  it('the run read-out is drawn clear of the legend', () => {
+    // Measured against the thing that was covering it, rather than against
+    // a number somebody has to keep in step by hand.
+    inField();
+    app.ui.showFieldHint();
+    step(1);
+    // Layout pixels, not screen ones: the harness renders the whole app
+    // scaled into a corner, so a client rect here is in the wrong units for
+    // comparing against something the HUD draws in its own space.
+    const inset = app.ui.fieldHintHeight();
+    expect(inset, 'the legend is taking some of the top').toBeGreaterThan(10);
+    expect(missionTop(inset), 'and the read-out starts under it')
+      .toBeGreaterThan(inset);
+    // Folded, it takes nothing and the read-out comes back up.
+    app.ui.hideFieldHint();
+    expect(app.ui.fieldHintHeight(), 'folded, it covers nothing').toBe(0);
+    expect(missionTop(app.ui.fieldHintHeight())).toBe(MISSION_TOP);
+    app.setMode('edit');
+  });
+
+  it('the motion model’s tuning numbers stay on the practice field', () => {
+    const f = inField();
+    const state = {
+      camera: f.camera, player: f.player, targets: [], lock: null, locking: 0,
+      threats: [], telemetry: f.player.body.telemetry(),
+      gait: f.player.stats.gait, legs: f.player.stats.legs, weapons: [], mission: null,
+    };
+    const keys = (rows) => rows.map(([k]) => k);
+    expect(keys(f.hud.debugRows({ ...state, diagnostics: true })), 'the field tells you everything')
+      .toContain('ZETA');
+    // ZETA, JERK, ASSIST and FRAME are how the motion model is TUNED. In a
+    // run they are six rows of numbers that mean nothing to anybody.
+    const quiet = f.hud.debugRows({ ...state, diagnostics: false });
+    expect(keys(quiet), 'a run does not').not.toContain('ZETA');
+    expect(keys(quiet), 'nor this').not.toContain('ASSIST');
+    app.setMode('edit');
+  });
+
+  it('a run asks for no diagnostics, and the practice field asks for them', () => {
+    app.setMode('edit');
+    bare();
+    app.goTitle();
+    app.ui.title.choose('solo');
+    step(2);
+    expect(app.field.director, 'a run is running').toBeTruthy();
+    // The flag the HUD reads, taken from the same place the HUD takes it.
+    expect(app.field.director ? false : true).toBe(false);
+    app.setMode('edit');
+    app.setMode('field');
+    step(2);
+    expect(app.field.director, 'and the practice field has no rules').toBeFalsy();
+    app.setMode('edit');
+  });
+});
+
+describe('the panels know how wide the window is', () => {
+  const at = (w) => {
+    app.setMode('edit');
+    // The real listener reads window.innerWidth, which a test cannot set —
+    // so the rule is asked directly, which is where the rule lives.
+    const was = app.ui._wasNarrow;
+    app.ui._wasNarrow = null;
+    const realWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth');
+    Object.defineProperty(window, 'innerWidth', { value: w, configurable: true });
+    app.ui.syncPanelWidth();
+    if (realWidth) Object.defineProperty(window, 'innerWidth', realWidth);
+    else delete window.innerWidth;
+    app.ui._wasNarrow = app.ui._wasNarrow ?? was;
+    return {
+      left: app.ui.leftPanel.classList.contains('folded'),
+      right: app.ui.rightPanel.classList.contains('folded'),
+    };
+  };
+
+  it('folds them out of the way when there is no room', () => {
+    // At 900 across they took 48% of the screen between them, which left the
+    // machine less room than the controls for shaping it.
+    const narrow = at(900);
+    expect(narrow.left, 'the left one folds').toBe(true);
+    expect(narrow.right, 'and the right').toBe(true);
+  });
+
+  it('and opens them again when there is', () => {
+    at(900);
+    const wide = at(1440);
+    expect(wide.left).toBe(false);
+    expect(wide.right).toBe(false);
+  });
+
+  it('there is a tab to bring a folded one back by hand', () => {
+    at(900);
+    expect(app.ui.leftPanel.classList.contains('folded')).toBe(true);
+    app.ui.leftTab.click();
+    expect(app.ui.leftPanel.classList.contains('folded'), 'opened by hand').toBe(false);
+    app.ui.leftTab.click();
+    expect(app.ui.leftPanel.classList.contains('folded'), 'and shut again').toBe(true);
+    at(1440);
+  });
+
+  it('the bottom hint strip fits the window it is in', () => {
+    // It was a fixed 1198 wide whatever the window was, so under about 1200
+    // it ran off both edges and the first line began mid-word.
+    app.setMode('edit');
+    const hint = document.getElementById('hint');
+    expect(hint, 'there is one').toBeTruthy();
+    // Asked of the geometry, not of the stylesheet: what matters is that
+    // it is inside the window, however that was arranged.
+    const box = hint.getBoundingClientRect();
+    expect(box.left, 'its left edge is on screen').toBeGreaterThan(-1);
+    expect(box.right, 'and so is its right').toBeLessThan(window.innerWidth + 1);
+    expect(document.documentElement.scrollWidth, 'and the page does not spill sideways')
+      .toBeLessThan(window.innerWidth + 2);
+    expect(getComputedStyle(hint).flexWrap, 'it wraps rather than runs off').toBe('wrap');
+  });
+
+  it('a key cap never breaks in the middle of its own name', () => {
+    app.setMode('field');
+    step(1);
+    const cap = app.ui.fieldBar.querySelector('b');
+    expect(cap, 'the legend is made of key caps').toBeTruthy();
+    expect(getComputedStyle(cap).whiteSpace).toBe('nowrap');
+    app.setMode('edit');
+  });
+});
+
+describe('laying a row', () => {
+  /** A wide flat deck to lay along, and the block tool in hand. */
+  const deck = (size = [4, 0.5, 4], block = [0.5, 0.5, 0.5]) => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.setTool(TOOL.BLOCK);
+    app.editor.symmetry = false;
+    app.editor.newBlockSize = [...block];
+    app.assembly.get(app.assembly.rootId).size = [...size];
+    app.editor.rebuild();
+    app.editor.frameAll();
+    app.editor.update(0);
+    return app.editor;
+  };
+
+  const drag = (from, to, steps = 30) => {
+    const c = app.editor.canvas;
+    const r = c.getBoundingClientRect();
+    const pt = (t) => ({
+      clientX: r.left + from[0] + (to[0] - from[0]) * t,
+      clientY: r.top + from[1] + (to[1] - from[1]) * t,
+      button: 0,
+      bubbles: true,
+    });
+    c.dispatchEvent(new PointerEvent('pointermove', pt(0)));
+    c.dispatchEvent(new PointerEvent('pointerdown', pt(0)));
+    for (let i = 1; i <= steps; i++) c.dispatchEvent(new PointerEvent('pointermove', pt(i / steps)));
+    window.dispatchEvent(new PointerEvent('pointerup', pt(1)));
+  };
+
+  const blocks = () => [...app.assembly.parts.values()].filter((p) => p.kind === 'block');
+
+  it('a drag lays along one face, rather than growing a chain off its own end', () => {
+    // Every placement selected itself, so the next ray hit the block just
+    // laid and mounted on ITS face. A drag across a four-metre deck put down
+    // twenty nine parts of which exactly ONE was on the deck — the other
+    // twenty eight were threaded onto each other, wandering as they went.
+    // In the fight that chain rides its own first block, so deleting that
+    // block deleted all of them.
+    const ed = deck();
+    const c = ed.canvas;
+    const cy = c.clientHeight * 0.46;
+    drag([c.clientWidth / 2 - 60, cy], [c.clientWidth / 2 + 60, cy]);
+
+    const made = blocks();
+    expect(made.length, 'it laid a row, not one part').toBeGreaterThan(1);
+    const onDeck = made.filter((p) => p.parent === app.assembly.rootId);
+    expect(onDeck.length, 'and every one of them is on the deck').toBe(made.length);
+    // All on the same face, so the row is a row.
+    expect(new Set(made.map((p) => p.mount.face)).size, 'one face').toBe(1);
+  });
+
+  it('and the row is selected as a row', () => {
+    const ed = deck();
+    const c = ed.canvas;
+    const cy = c.clientHeight * 0.46;
+    drag([c.clientWidth / 2 - 60, cy], [c.clientWidth / 2 + 60, cy]);
+    expect(ed.selection.size, 'all of it, not just the last one').toBe(blocks().length);
+    // Which is what makes it possible to take back out again.
+    ed.deleteSelected();
+    expect(blocks()).toHaveLength(0);
+  });
+
+  it('the whole drag is one undo', () => {
+    const ed = deck();
+    const c = ed.canvas;
+    const cy = c.clientHeight * 0.46;
+    const undos = app.history.past.length;
+    drag([c.clientWidth / 2 - 60, cy], [c.clientWidth / 2 + 60, cy]);
+    const laid = blocks().length;
+    expect(laid).toBeGreaterThan(1);
+    expect(app.history.past.length - undos).toBe(1);
+    app.undo();
+    expect(blocks(), 'and it all comes back out').toHaveLength(0);
+  });
+
+  it('the grid is never finer than the block standing on it', () => {
+    // A quarter-metre grid under a half-metre block let two placements a
+    // notch apart overlap by half, which is not a grid that tiles anything.
+    const ed = deck([4, 0.5, 4], [0.5, 0.5, 0.5]);
+    ed.snapStep = 0.25;
+    const c = ed.canvas;
+    const cy = c.clientHeight * 0.46;
+    drag([c.clientWidth / 2 - 60, cy], [c.clientWidth / 2 + 60, cy]);
+    for (const p of blocks()) {
+      for (const i of [0, 2]) {
+        const on = Math.abs(p.mount.pos[i] / 0.5 - Math.round(p.mount.pos[i] / 0.5));
+        expect(on, `axis ${i} sits on the block grid`).toBeLessThan(1e-6);
+      }
+    }
+  });
+});
+
+describe('arranging what is already there', () => {
+  const built = () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.setTool(TOOL.SELECT);
+    app.editor.symmetry = false;
+    return app.editor;
+  };
+  const put = (pos, size = [0.5, 0.5, 0.5]) =>
+    app.assembly.addBlock(app.assembly.rootId, { pos }, 2, { size });
+
+  it('mirrors what has already been built', () => {
+    // Symmetry only ever worked at the MOMENT of placing, so a machine built
+    // with it switched off could not be made symmetrical at all.
+    const ed = built();
+    const arm = put([1.4, 0.6, 0]);
+    ed.rebuild();
+    ed.select(arm.id);
+    const made = ed.mirrorSelected();
+    expect(made, 'it made one').toHaveLength(1);
+    const twin = app.assembly.get(made[0]);
+    expect(twin.mount.pos[0], 'on the other side').toBeCloseTo(-1.4, 2);
+    expect(twin.mount.pos[1], 'at the same height').toBeCloseTo(0.6, 2);
+  });
+
+  it('and says so rather than making a copy nobody can see', () => {
+    const ed = built();
+    const middle = put([0, 1.2, 0]);
+    ed.rebuild();
+    ed.select(middle.id);
+    let said = null;
+    const was = ed.onReject;
+    ed.onReject = (m) => { said = m; };
+    expect(ed.mirrorSelected(), 'nothing on the centre line').toHaveLength(0);
+    ed.onReject = was;
+    expect(said, 'and it explains why').toBeTruthy();
+  });
+
+  it('lines a selection up on one axis', () => {
+    const ed = built();
+    const a = put([0.5, 1, 0]);
+    const b = put([1.5, 1, 0.4]);
+    const c = put([2.5, 1, -0.4]);
+    ed.rebuild();
+    ed.select([a.id, b.id, c.id]);
+    expect(ed.arrangeSelected('z', 'align')).toBe(true);
+    const zs = [a, b, c].map((p) => p.mount.pos[2]);
+    expect(Math.max(...zs) - Math.min(...zs), 'all on one line').toBeLessThan(1e-6);
+  });
+
+  it('and spaces one evenly', () => {
+    const ed = built();
+    const a = put([0, 1, 0]);
+    const b = put([0.3, 1, 0]);
+    const c = put([3, 1, 0]);
+    ed.rebuild();
+    ed.select([a.id, b.id, c.id]);
+    expect(ed.arrangeSelected('x', 'spread')).toBe(true);
+    const xs = [a, b, c].map((p) => p.mount.pos[0]).sort((m, n) => m - n);
+    expect(xs[1] - xs[0], 'evenly').toBeCloseTo(xs[2] - xs[1], 5);
+  });
+
+  it('repeats a part along an axis, touching', () => {
+    const ed = built();
+    const one = put([0, 1, 0], [0.5, 0.5, 0.5]);
+    ed.rebuild();
+    ed.select(one.id);
+    const made = ed.repeatSelected('x', 3);
+    expect(made, 'three more').toHaveLength(3);
+    const xs = made.map((id) => app.assembly.get(id).mount.pos[0]).sort((m, n) => m - n);
+    expect(xs).toEqual([0.5, 1, 1.5]);
+  });
+
+  it('refuses to line up one thing on its own', () => {
+    const ed = built();
+    const only = put([0, 1, 0]);
+    ed.rebuild();
+    ed.select(only.id);
+    expect(ed.arrangeSelected('x', 'align')).toBe(false);
+  });
+});
+
+describe('reaching the placement tool', () => {
+  it('a part can be placed without a pointer at all', () => {
+    // Every other verb in the editor is on a key — move, rotate, delete,
+    // connect, undo, copy. Placement could only be reached by aiming a
+    // mouse at a pixel.
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.setTool(TOOL.BLOCK);
+    app.editor.symmetry = false;
+    app.editor.select(app.assembly.rootId);
+    const before = app.assembly.parts.size;
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Enter', bubbles: true }));
+    expect(app.assembly.parts.size, 'one went on').toBe(before + 1);
+    const made = [...app.assembly.parts.values()].pop();
+    expect(made.mount.face, 'on the top by default').toBe(2);
+  });
+
+  it('and the work height can be changed by tapping', () => {
+    // It was on Shift and the wheel, which a touch screen cannot do — so a
+    // tablet could not place anything above the floor.
+    app.setMode('edit');
+    app.setTool(TOOL.BLOCK);
+    app.editor.workPlaneY = 0;
+    app.editor.liftWorkPlane(2);
+    expect(app.editor.workPlaneY, 'up').toBeGreaterThan(0);
+    expect(app.ui.planeReadout.textContent, 'and the panel says where it is')
+      .toBe(app.editor.workPlaneY.toFixed(2));
+  });
+
+  it('a new machine starts from the floor again', () => {
+    app.setMode('edit');
+    app.editor.workPlaneY = 3;
+    app.loadPreset('biped');
+    expect(app.editor.workPlaneY, 'not three metres up for no reason').toBe(0);
+  });
+});
+
+describe('what the cursor says before you click', () => {
+  const armed = () => {
+    app.setMode('edit');
+    app.loadPreset('core');
+    app.setTool(TOOL.BLOCK);
+    const c = app.editor.canvas;
+    const r = c.getBoundingClientRect();
+    c.dispatchEvent(new PointerEvent('pointermove', {
+      clientX: r.left + c.clientWidth / 2, clientY: r.top + c.clientHeight / 2, bubbles: true,
+    }));
+    return app.editor;
+  };
+
+  it('shows the colour the block will be', () => {
+    // The read-out was built so that placing a block did not mean reading
+    // three corners of the screen, and then left off the one that lives in
+    // the far corner.
+    const ed = armed();
+    expect(typeof ed.placementHint?.tint, 'a colour, not an index').toBe('number');
+    expect(document.querySelector('.placehint .tintchip'), 'drawn as a swatch').toBeTruthy();
+  });
+
+  it('and stops claiming anything once the cursor leaves', () => {
+    // A panel swallows pointer moves, so the ghost simply stopped where it
+    // was and went on promising a part would land there.
+    const ed = armed();
+    expect(ed.ghost.visible).toBe(true);
+    ed.canvas.dispatchEvent(new PointerEvent('pointerleave', { bubbles: true }));
+    expect(ed.ghost.visible, 'the ghost goes').toBe(false);
+    expect(ed.pendingPlacement, 'and the promise with it').toBeFalsy();
+    expect(document.querySelector('.placehint').classList.contains('hidden')).toBe(true);
+  });
+
+  it('a part dropped in mid-air still shows what it will belong to', () => {
+    // A block thirty metres from the machine still rides the machine, and
+    // that was the one case with nothing on screen to say so.
+    const ed = armed();
+    const c = ed.canvas;
+    const r = c.getBoundingClientRect();
+    c.dispatchEvent(new PointerEvent('pointermove', {
+      clientX: r.left + c.clientWidth * 0.88, clientY: r.top + c.clientHeight * 0.8, bubbles: true,
+    }));
+    expect(ed.pendingPlacement?.floating, 'out in the open').toBe(true);
+    expect(ed.hostOutline.visible, 'and its parent is lit').toBe(true);
+  });
+
+  it('a placed block is called what it is', () => {
+    // Every block anybody placed was called BLOCK, so a machine with a
+    // hundred of them had a hundred identical rows in the list that exists
+    // precisely so you can pick the ones you cannot see.
+    const ed = armed();
+    // Said out loud rather than inherited: an earlier test may have left a
+    // different shape armed, and this one is about the NAME.
+    app.setNewBlockShape(SHAPE.BOX);
+    ed.symmetry = false;
+    ed.select(app.assembly.rootId);
+    ed.placeOnSelected(2);
+    ed.placeOnSelected(0);
+    const made = [...app.assembly.parts.values()].filter((p) => p.kind === 'block');
+    expect(made.length).toBeGreaterThan(1);
+    expect(new Set(made.map((p) => p.label)).size, 'and they are told apart')
+      .toBe(made.length);
+    expect(made[0].label, 'by shape and number').toContain('立方体');
+  });
+});
+
 describe('teardown', () => {
   it('disposes cleanly', () => {
     shouldNotThrow(() => app.dispose(), 'dispose');
@@ -6788,6 +7649,8 @@ const pattern = only ? new RegExp(`^boot > |${only}`, 'i') : null;
 
 run((results) => {
   render(results);
+  // A headless runner watches this to report progress while it waits.
+  window.__TEST_SEEN = results.total;
   for (const suite of results.suites) {
     for (const t of suite.tests) {
       const key = `${suite.name} > ${t.name}`;

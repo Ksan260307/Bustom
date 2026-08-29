@@ -224,3 +224,146 @@ describe('an opponent gets out of the way', () => {
     expect(hurt, 'wants to be further away').toBeLessThan(whole);
   });
 });
+
+describe('each one shoots differently', () => {
+  beforeEach(() => _resetIds(0));
+
+  it('a closer holds its fire until it is right on top of you', () => {
+    // Four opponents that vary only in preferred range are one opponent seen
+    // from four distances: the trigger logic was identical, so there was
+    // nothing about any of them to learn separately.
+    const far = opponent(EQUIP.GATLING, { z: 30, opts: { range: 11, habit: 'closer' } });
+    far.bot.body.reset(V(0, far.bot.body.rideHeight, 30));
+    // Pinned out at thirty metres so it cannot simply walk in and shoot.
+    const p = pool();
+    const target = player();
+    const before = far.ai.robot.weapons.slots[0].ammo;
+    for (let i = 0; i < 60 * 6; i++) {
+      far.bot.body.reset(V(0, far.bot.body.rideHeight, 30));
+      far.ai.update(target.position, 1 / 60, { target, projectiles: p, targets: [target] });
+      p.update(1 / 60, []);
+    }
+    expect(far.ai.robot.weapons.slots[0].ammo, 'nothing from out there').toBe(before);
+
+    // And the same machine, once it is in.
+    const near = opponent(EQUIP.GATLING, { z: 9, opts: { range: 11, habit: 'closer' } });
+    expect(fireFor(near.ai, player(), pool(), 6), 'but plenty from in here')
+      .toBeGreaterThan(0);
+  });
+
+  it('a salvo waits longer and then empties for longer', () => {
+    const runFor = (habit) => {
+      _resetIds(0);
+      const { ai } = opponent(EQUIP.GATLING, { z: 16, opts: { habit } });
+      const p = pool(64);
+      const target = player();
+      let longest = 0;
+      let run = 0;
+      for (let i = 0; i < 60 * 30; i++) {
+        ai.update(target.position, 1 / 60, { target, projectiles: p, targets: [target] });
+        p.update(1 / 60, []);
+        if (ai.firing) { run++; longest = Math.max(longest, run); } else run = 0;
+      }
+      return longest / 60;
+    };
+    expect(runFor('salvo'), 'it commits').toBeGreaterThan(runFor('steady') * 1.4);
+  });
+
+  it('a hopper only fires near the top of its arc', () => {
+    const { ai, bot } = opponent(EQUIP.GATLING, { z: 16, opts: { habit: 'peak' } });
+    const p = pool();
+    const target = player();
+    ai.firing = true;
+    ai.burstTimer = 99;
+    const ammo = () => ai.robot.weapons.slots[0].ammo;
+
+    // Flung upward: nothing while it is climbing.
+    bot.body.velocity.set(0, 12, 0);
+    const before = ammo();
+    for (let i = 0; i < 30; i++) {
+      ai._shoot({ target, projectiles: p, targets: [target] }, 16,
+        target.position.clone().sub(bot.position).normalize(), 1 / 60);
+      bot.body.velocity.set(0, 12, 0);
+    }
+    expect(ammo(), 'not on the way up').toBe(before);
+  });
+
+  it('the ace closes on its reload instead of backing off it', () => {
+    // Every other machine hands you a window while it reloads. This one
+    // turns that window into the reason it is suddenly much nearer.
+    const wants = (ace) => {
+      _resetIds(0);
+      const { ai, bot } = opponent(EQUIP.GATLING, { z: 20, opts: { range: 20, ace } });
+      const target = player();
+      ai.firing = false;                    // i.e. between bursts
+      bot.body.reset(V(0, bot.body.rideHeight, 20));
+      ai.update(target.position, 1 / 60, { target, projectiles: null, targets: [] });
+      return ai.input.move.z;
+    };
+    expect(wants(true), 'it comes forward').toBeGreaterThan(wants(false));
+  });
+
+  it('and it holds its ground when it is hurt', () => {
+    const { ai, bot } = opponent(EQUIP.GATLING, { z: 20, opts: { range: 20, ace: true } });
+    const target = player();
+    const drive = () => {
+      ai.update(target.position, 1 / 60, { target, projectiles: null, targets: [] });
+      return ai.input.move.z;
+    };
+    bot.body.reset(V(0, bot.body.rideHeight, 20));
+    const whole = drive();
+    bot.hp = bot.maxHp * 0.1;
+    expect(drive(), 'no free retreat out of this one').toBeCloseTo(whole, 1);
+  });
+});
+
+describe('a held trigger loosens up', () => {
+  beforeEach(() => _resetIds(0));
+
+  it('warms while it is held and settles when it is not', () => {
+    // The opponents were given burst discipline and the player was not,
+    // which left holding the trigger down as the strictly best thing to do.
+    const p = player();
+    const a = stripEquips(PRESETS.biped.build());
+    a.addEquipOnFace(a.core.id, 4, EQUIP.GATLING, { size: 0.7 });
+    const bot = new Robot(a, world, { isPlayer: true, random: new Random(3) });
+    const slot = bot.weapons.slots[0];
+    const proj = pool(120);
+    const hold = (firing, seconds) => {
+      for (let i = 0; i < Math.round(seconds * 60); i++) {
+        bot.weapons.update({ firing, projectiles: proj, targets: [p] }, 1 / 60);
+        proj.update(1 / 60, []);
+      }
+    };
+    expect(slot.warmth, 'cold to start with').toBe(0);
+    hold(true, 2.5);
+    expect(slot.warmth, 'held down, it opens up').toBeGreaterThan(0.9);
+    hold(false, 1.5);
+    expect(slot.warmth, 'and closes again when you let go').toBe(0);
+  });
+
+  it('a tap costs nothing', () => {
+    const a = stripEquips(PRESETS.biped.build());
+    a.addEquipOnFace(a.core.id, 4, EQUIP.GATLING, { size: 0.7 });
+    const bot = new Robot(a, world, { isPlayer: true, random: new Random(3) });
+    const slot = bot.weapons.slots[0];
+    const proj = pool(120);
+    for (let i = 0; i < 6; i++) {
+      bot.weapons.update({ firing: true, projectiles: proj, targets: [] }, 1 / 60);
+    }
+    expect(slot.warmth, 'a tenth of a second is not a burst').toBeLessThan(0.1);
+  });
+
+  it('a magnum has nothing to settle down from', () => {
+    const a = stripEquips(PRESETS.biped.build());
+    a.addEquipOnFace(a.core.id, 4, EQUIP.MAGNUM, { size: 0.7 });
+    const bot = new Robot(a, world, { isPlayer: true, random: new Random(3) });
+    const slot = bot.weapons.slots[0];
+    const proj = pool(120);
+    for (let i = 0; i < 180; i++) {
+      bot.weapons.update({ firing: true, projectiles: proj, targets: [] }, 1 / 60);
+      proj.update(1 / 60, []);
+    }
+    expect(slot.warmth, 'one shot per press, so nothing to hold').toBe(0);
+  });
+});

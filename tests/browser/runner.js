@@ -145,7 +145,9 @@ function yieldToLoop() {
  * whole pass.
  */
 export async function run(onProgress = () => {}, only = null) {
-  const results = { passed: 0, failed: 0, total: 0, failures: [], suites: [] };
+  const results = {
+    passed: 0, failed: 0, total: 0, failures: [], suites: [], slowest: [],
+  };
   const wanted = (suite, test) => !only || only.test(`${suite.name} > ${test.name}`);
 
   for (const suite of suites) {
@@ -155,6 +157,10 @@ export async function run(onProgress = () => {}, only = null) {
     for (const test of suite.tests) {
       if (!wanted(suite, test)) continue;
       results.total++;
+      // Timed. A suite this slow is a suite nobody runs, and the only
+      // way to make it quicker is to know which of four hundred tests is
+      // spending the minutes.
+      const began = performance.now();
       try {
         await test.fn();
         results.passed++;
@@ -166,6 +172,11 @@ export async function run(onProgress = () => {}, only = null) {
         entry.tests.push({ name: test.name, ok: false, error: failure.error });
         console.error(`FAIL ${suite.name} > ${test.name}\n  ${failure.error}`);
       }
+      const ms = performance.now() - began;
+      entry.tests[entry.tests.length - 1].ms = ms;
+      results.slowest.push({ suite: suite.name, name: test.name, ms });
+      results.slowest.sort((a, b) => b.ms - a.ms);
+      if (results.slowest.length > 20) results.slowest.length = 20;
       onProgress(results);
       await yieldToLoop();
     }

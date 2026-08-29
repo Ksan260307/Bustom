@@ -5,7 +5,7 @@ import {
   BONE_LENGTH_MIN, BONE_LENGTH_MAX, BONE_RADIUS_MIN, BONE_RADIUS_MAX,
   EQUIP, EQUIP_META, EQUIP_SIZE_DEFAULT, snapEquipSize,
   CIRCLE_RADIUS_DEFAULT, snapCircleRadius,
-  SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, SIZE_STEP, SIZE_MAX,
+  SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, SIZE_STEP, SIZE_MAX, WEAPON_SLOTS,
   BONE_GAIN_MAX, BONE_LAG_MAX, BONE_MOTION_DEFAULT,
 } from './constants.js';
 import { VoxelBlock } from './VoxelBlock.js';
@@ -384,10 +384,20 @@ export class Assembly {
     const meta = EQUIP_META[type];
     if (!meta) return 'unknown';
     if (meta.unique && this.countEquip(type) >= 1) return 'unique';
+    if (meta.category === 'weapon' && this.weaponCount() >= WEAPON_SLOTS) return 'rack';
     for (const other of meta.conflicts ?? []) {
       if (this.countEquip(other) > 0) return other;
     }
     return null;
+  }
+
+  /** How many weapon plates are fitted. Systems do not use the rack. */
+  weaponCount() {
+    let n = 0;
+    this.walk((p) => {
+      if (p.kind === 'equip' && EQUIP_META[p.equipType]?.category === 'weapon') n++;
+    });
+    return n;
   }
 
   /** Every equip plate, in stable tree order. */
@@ -1073,8 +1083,16 @@ export function computeStats(assembly, rig = null) {
     gait: gaitFor(limbs),
     /** Effective edge of the core cube, 0.25..4. */
     coreScale,
-    /** Hit points, before the equipment bonus that `loadout` carries. */
-    durability: Math.round(40 + coreScale * coreScale * 60 + mass * 5),
+    /**
+     * Hit points, before the equipment bonus that `loadout` carries.
+     *
+     * The core term was SQUARED, which made one slider worth more than
+     * every other decision in the editor put together: a four-metre core
+     * bought eight times the hit points of a normal machine, and the only
+     * price was agility — which does not matter much when the thing you are
+     * buying is ninety seconds of standing still and winning.
+     */
+    durability: Math.round(40 + coreScale ** 1.4 * 60 + mass * 5),
     // 0 = feather, 1 = tank. Drives ZMF drag, spool and camera weight.
     weightClass: clamp01((mass - 2) / 26),
     agility: clamp01((thrustToMass - 18) / 42),
@@ -1107,6 +1125,7 @@ export function summariseEquipment(equips) {
     if (p.equipType === EQUIP.CIRCLE) circlePlates++;
   }
 
+  const tankPlates = equips.filter((p) => p.equipType === EQUIP.TANK).length;
   const gravity = gravityPlates > 0;
   // Gravity and float are mutually exclusive when fitted, but a build loaded
   // from an older file could still carry both. Gravity is the one that says
@@ -1120,6 +1139,15 @@ export function summariseEquipment(equips) {
     gravityPlates: Math.min(1, gravityPlates),
     /** Dash impulse multiplier. Each plate is a small step, and they stack. */
     dashBonus: boostPlates * EQUIP_META[EQUIP.BOOST].dashBonus,
+    tankPlates,
+    /**
+     * How big the energy tank is, as a multiple of the standard one.
+     *
+     * Everything that spends energy spends the same amount; a larger tank
+     * just means each spend is a smaller share of it — and so is each
+     * second of recharging.
+     */
+    energyCapacity: 1 + tankPlates * EQUIP_META[EQUIP.TANK].energyBonus,
     /** Sustained flight is off while a gravity plate is fitted. */
     noFly: gravity,
     /** Extra durability, as a fraction of base HP. */

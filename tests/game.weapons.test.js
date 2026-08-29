@@ -3,7 +3,9 @@ import * as THREE from 'three';
 import { Projectiles, WeaponSystem } from '../src/game/Weapons.js';
 import { Robot, SyntheticInput } from '../src/game/Robot.js';
 import { Assembly, PRESETS, computeStats, _resetIds } from '../src/core/Assembly.js';
-import { EQUIP, EQUIP_META, WEAPON_TYPES, weaponLead } from '../src/core/constants.js';
+import {
+  EQUIP, EQUIP_META, WEAPON_TYPES, WEAPON_SLOTS, weaponLead,
+} from '../src/core/constants.js';
 import { testWorld, stripEquips } from './helpers/dom.js';
 
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -824,8 +826,12 @@ describe('the new weapons', () => {
     expect(m.damage).toBeGreaterThan(EQUIP_META.shot.damage * 3);
     const reach = m.speed * m.life;
     expect(reach, 'a short-range weapon').toBeLessThan(45);
+    // Three times, not four: the rifle's range came in to about the width of
+    // the arena, because at two hundred and fifty metres it reached further
+    // than anything could ever be — which made the sniper's one advantage
+    // over it imaginary.
     expect(EQUIP_META.beam.speed * EQUIP_META.beam.life, 'the rifle reaches much further')
-      .toBeGreaterThan(reach * 4);
+      .toBeGreaterThan(reach * 3);
   });
 
   it('a grenade arcs, and goes off where it lands', () => {
@@ -927,17 +933,34 @@ describe('the new weapons', () => {
   });
 
   it('the HUD gets a row it can draw for every one of them', () => {
-    const r = machine(...WEAPON_TYPES);
-    const rows = r.weapons.readout();
-    expect(rows).toHaveLength(WEAPON_TYPES.length);
-    for (const row of rows) {
-      expect(typeof row.label).toBe('string');
-      expect(Number.isFinite(row.ammo)).toBe(true);
-      expect(Number.isFinite(row.reloadFrac)).toBe(true);
+    // One machine per weapon, because a rack only holds four now: fitting
+    // all eleven at once is a build the game no longer allows.
+    for (const type of WEAPON_TYPES) {
+      const rows = machine(type).weapons.readout();
+      expect(rows, type).toHaveLength(1);
+      const [row] = rows;
+      expect(typeof row.label, type).toBe('string');
+      expect(Number.isFinite(row.ammo), type).toBe(true);
+      expect(Number.isFinite(row.reloadFrac), type).toBe(true);
     }
     // The laser has no magazine, so it reports a heat gauge instead.
-    const laser = rows[WEAPON_TYPES.indexOf(EQUIP.LASER)];
+    const [laser] = machine(EQUIP.LASER).weapons.readout();
     expect(laser.gauge).toBeGreaterThan(0);
+  });
+
+  it('a rack holds four, and says which rule refused the fifth', () => {
+    // There used to be no limit, and a plate weighs under a tenth of what a
+    // machine does — so carrying all ten and cycling beat choosing, and ten
+    // different cost structures never became a question.
+    const a = PRESETS.core.build();
+    for (let i = 0; i < WEAPON_SLOTS; i++) {
+      expect(a.addEquipOnFace(a.rootId, i, WEAPON_TYPES[i]), `plate ${i}`).toBeTruthy();
+    }
+    expect(a.weaponCount()).toBe(WEAPON_SLOTS);
+    expect(a.blockedBy(WEAPON_TYPES[4]), 'the fifth is refused').toBe('rack');
+    expect(a.addEquipOnFace(a.rootId, 4, WEAPON_TYPES[4])).toBe(null);
+    // Systems are not weapons and do not touch the rack.
+    expect(a.blockedBy(EQUIP.BOOST), 'a thruster still fits').toBe(null);
   });
 });
 

@@ -12,7 +12,11 @@ import { SoloRun, SOLO_RULES, OPPONENTS } from '../src/game/SoloRun.js';
 /** An arena on paper: it hands out machines and remembers what was asked. */
 function paperField() {
   const field = {
-    player: { alive: true, hp: 100, maxHp: 100, rearmed: 0, rearm() { this.rearmed++; } },
+    player: {
+      alive: true, hp: 100, maxHp: 100, rearmed: 0, shotsLanded: 0,
+      weapons: { shotsFired: 0 },
+      rearm() { this.rearmed++; },
+    },
     spawned: [],
     retired: 0,
     respawned: 0,
@@ -106,7 +110,10 @@ describe('a solo run', () => {
     expect(run.score).toBe(before + SoloRun.killScore(run.wave));
   });
 
-  it('hands out a wave bonus and patches you up between waves', () => {
+  it('hands out a wave bonus, and puts a choice on the table', () => {
+    // The break used to be three and a half seconds of banner while the
+    // supply came back for free — no moment in a run asked you to give
+    // anything up. Now the breather is the decision.
     const field = paperField();
     const run = new SoloRun(field).begin();
     tick(run, 3);
@@ -117,9 +124,109 @@ describe('a solo run', () => {
     tick(run, 0.1);
 
     expect(run.score, 'clearing is worth something on its own').toBeGreaterThan(killScore);
-    expect(field.player.hp, 'some hull back').toBeGreaterThan(10);
-    expect(field.player.hp, 'but not a full heal').toBeLessThan(field.player.maxHp);
-    expect(field.player.rearmed, 'and a full rack').toBe(1);
+    expect(run.offer, 'and something to spend the breather on').toBeTruthy();
+    expect(run.offer.choices.length).toBe(3);
+    expect(field.player.hp, 'nothing is handed over until it is asked for').toBe(10);
+
+    run.choose(0);
+    expect(field.player.hp, 'armour, then').toBeGreaterThan(10);
+    expect(field.player.hp, 'but never a full heal').toBeLessThan(field.player.maxHp);
+    expect(run.offer, 'and the table is cleared').toBe(null);
+  });
+
+  it('taking the ammunition is a different answer from taking the armour', () => {
+    const field = paperField();
+    const run = new SoloRun(field).begin();
+    tick(run, 3);
+    field.player.hp = 10;
+    for (const m of run.members) { m.alive = false; run.onDown(m); }
+    tick(run, 0.1);
+
+    run.choose(1);
+    expect(field.player.rearmed, 'a full rack').toBe(1);
+    expect(field.player.hp, 'and a lot less hull than the armour would have been')
+      .toBeLessThan(10 + field.player.maxHp * 0.45);
+  });
+
+  it('and holding on buys a life back', () => {
+    const field = paperField();
+    const run = new SoloRun(field).begin();
+    tick(run, 3);
+    const lives = run.lives;
+    for (const m of run.members) { m.alive = false; run.onDown(m); }
+    tick(run, 0.1);
+    run.choose(2);
+    expect(run.lives).toBe(lives + 1);
+  });
+
+  it('saying nothing takes the first, rather than stalling the run', () => {
+    const field = paperField();
+    const run = new SoloRun(field).begin();
+    tick(run, 3);
+    field.player.hp = 10;
+    for (const m of run.members) { m.alive = false; run.onDown(m); }
+    tick(run, 6);                        // straight through the break
+    expect(run.wave, 'the next wave came anyway').toBe(2);
+    expect(run.offer).toBe(null);
+    expect(field.player.hp, 'and something was taken').toBeGreaterThan(10);
+  });
+
+  it('a clean, quick wave is worth more than a slow, bloody one', () => {
+    // Score used to be kills plus a flat sum for clearing, which measured
+    // how long you sat there and nothing else.
+    const play = ({ hit, slow }) => {
+      const field = paperField();
+      const run = new SoloRun(field).begin();
+      tick(run, 3);
+      if (slow) tick(run, SOLO_RULES.quickWithin + 2);
+      if (hit) run.tookHits = true;
+      const before = run.score;
+      for (const m of run.members) { m.alive = false; run.onDown(m); }
+      const kills = run.score - before;
+      tick(run, 0.1);
+      return { total: run.score - before - kills, bonus: run.lastBonus };
+    };
+    const best = play({ hit: false, slow: false });
+    const worst = play({ hit: true, slow: true });
+    expect(best.bonus.clean, 'untouched pays').toBeGreaterThan(0);
+    expect(best.bonus.quick, 'and so does being quick about it').toBeGreaterThan(0);
+    expect(worst.bonus.clean, 'taking hits does not').toBe(0);
+    expect(worst.bonus.quick, 'nor does dragging it out').toBe(0);
+    expect(best.total).toBeGreaterThan(worst.total);
+  });
+
+  it('aim is worth something, and missing everything is worth nothing', () => {
+    const shoot = (fired, landed) => {
+      const field = paperField();
+      const run = new SoloRun(field).begin();
+      tick(run, 3);
+      field.player.weapons.shotsFired = fired;
+      field.player.shotsLanded = landed;
+      for (const m of run.members) { m.alive = false; run.onDown(m); }
+      tick(run, 0.1);
+      return run.lastBonus.aim;
+    };
+    expect(shoot(100, 100), 'every round home').toBe(SOLO_RULES.aimBonus);
+    expect(shoot(100, 0), 'and none of them').toBe(0);
+    expect(shoot(100, 50)).toBeGreaterThan(0);
+    expect(shoot(0, 0), 'a blade run is not punished, it just pays nothing').toBe(0);
+  });
+
+  it('a life buys a machine, not a fresh one', () => {
+    // Being shot down used to restore the hull completely while clearing a
+    // wave gave 35% back, so at low health dying was the better move. A
+    // life is meant to be the expensive way out of trouble.
+    const field = paperField();
+    const run = new SoloRun(field).begin();
+    tick(run, 3);
+    field.player.hp = 4;
+    field.player.alive = false;
+    run.onDown(field.player);
+    tick(run, 3.5);
+    expect(field.player.alive, 'back on the field').toBe(true);
+    expect(field.player.hp, 'with less than all of it')
+      .toBeLessThan(field.player.maxHp);
+    expect(field.player.hp, 'and more than you had').toBeGreaterThan(4);
   });
 
   it('costs a life when you go down, and puts you back', () => {

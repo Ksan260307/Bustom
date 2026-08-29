@@ -127,6 +127,15 @@ export class ZMFBody {
      * no BOOST plate has nothing to light.
      */
     this.canBoost = (stats.boostPlates ?? 0) > 0;
+    /**
+     * How big the energy tank is, as a multiple of the standard one.
+     *
+     * Energy stays a 0..1 gauge, because that is what the read-out draws and
+     * what everything else reasons about. What a tank changes is what one
+     * second of flight, or one dash, COSTS as a share of it — and, in the
+     * same proportion, what one second on the ground puts back.
+     */
+    this.energyCapacity = Math.max(1, stats.energyCapacity ?? 1);
     this.boosting = false;
     /** 0..1 smoothed, for the flare on the plates. */
     this.boostOutput = 0;
@@ -353,7 +362,9 @@ export class ZMFBody {
     this.boostOutput = damp(this.boostOutput, boosting ? 1 : 0, boosting ? 0.018 : 0.09, dt);
     const burn = this.hover * 0.30 + this.inertia.thrustOutput * 0.11 + (boosting ? 0.34 : 0);
     const regen = groundedNow > 0.5 ? 0.55 : 0.10;
-    this.energy = clamp01(this.energy + (regen - burn) * dt);
+    // Both sides divided by the tank: a bigger one lasts longer AND takes
+    // longer to fill, which is what makes it a choice rather than a bonus.
+    this.energy = clamp01(this.energy + (regen - burn) / this.energyCapacity * dt);
     this.strain = smoothstep(0.28, 0.02, this.energy);
 
     // ---------------------------------------------- dash
@@ -369,7 +380,7 @@ export class ZMFBody {
         this.inertia.applyImpulse(_tmp.normalize().multiplyScalar(this.dashSpeed * back));
         this.dashCooldown = 0.26;
         this.dashFlash = 1;
-        this.energy = clamp01(this.energy - 0.12);
+        this.energy = clamp01(this.energy - 0.12 / this.energyCapacity);
         input.dash = null;
       }
     }
@@ -535,6 +546,7 @@ export class ZMFBody {
       mass: this.inertia.baseMass * this.layers.mass,
       layer: this.layers.layer,
       energy: this.energy,
+      energyCapacity: this.energyCapacity,
       strain: this.strain,
       grounded: this.env.grounded,
       airborne: this.airborneTime,

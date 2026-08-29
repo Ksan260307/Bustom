@@ -64,6 +64,13 @@ const AI = {
   rest: [1.0, 2.2],
   /** How much longer the gaps are at the gentlest setting. */
   restEase: 2.1,
+  /**
+   * The one that leads every fifth wave: longer bursts, and it CLOSES on
+   * its reload instead of backing off it. Toughness alone made the same
+   * fight last longer; this makes it a different fight.
+   */
+  aceBurst: 1.6,
+  aceClose: 0.72,
 };
 
 /**
@@ -501,6 +508,29 @@ export class SyntheticInput {
 //  Its job is to give the assist controller something worth predicting.
 // ============================================================
 
+/**
+ * How a machine uses its guns, as distinct from where it stands.
+ *
+ * Four opponents that differ only in preferred range are one opponent seen
+ * from four distances: the shooting is identical, so nothing about them has
+ * to be learned separately. A habit is a rule the player can WATCH and
+ * answer — and each of these is one line of gate on the same trigger.
+ *
+ *   steady  fires whenever it is facing you and you are in reach
+ *   closer  will not fire until it is right on top of you
+ *   salvo   winds up long, then empties for a long time
+ *   peak    only at the top of its hop, when it is not climbing or falling
+ */
+export const HABITS = {
+  steady: {},
+  /** Comes in first. Its answer to being shot at on the way is to keep coming. */
+  closer: { within: 1.15 },
+  /** Long gaps, long bursts. Get behind something or take all of it. */
+  salvo: { burst: 2.1, rest: 1.5 },
+  /** Fires at the top, so its rhythm is visible from across the arena. */
+  peak: { atPeak: 3.5 },
+};
+
 export class SimpleAI {
   constructor(robot, opts = {}) {
     this.robot = robot;
@@ -508,6 +538,19 @@ export class SimpleAI {
     this.random = robot.random ?? null;
     this.preferredRange = opts.range ?? 26;
     this.style = opts.style ?? 'orbit';   // orbit | rusher | flyer
+    /** How it shoots, as opposed to where it stands. See HABITS. */
+    this.habit = HABITS[opts.habit] ? opts.habit : 'steady';
+    /**
+     * The one that leads every fifth wave.
+     *
+     * It used to be an ordinary machine with 2.4x the hit points, which
+     * makes the same fight last longer rather than making it a different
+     * fight. Toughness is the weakest axis there is. What this one has
+     * instead is a habit worth reading: it does NOT give you the free
+     * window every other machine gives you while it reloads — it uses that
+     * time to close.
+     */
+    this.ace = !!opts.ace;
     /**
      * How hard it presses, 0..1. Only the GAPS between bursts move with it.
      *
@@ -532,6 +575,7 @@ export class SimpleAI {
     this.jinkDir = 1;
     this.burstTimer = 0;
     this.firing = false;
+    this.aiming = false;
     this.input.move.set(0, 0, 0);
     this.input.intensity = 0;
     return this;
@@ -580,8 +624,12 @@ export class SimpleAI {
     //   hurt       -> back off, and mean it
     const reloading = r.weapons.active?.reloadT > 0 || this.firing === false;
     const hurt = r.hp < r.maxHp * AI.hurtAt;
-    const wants = this.preferredRange * (reloading ? AI.reloadBackoff : 1)
-      * (hurt ? AI.hurtBackoff : 1);
+    // The ace closes on its reload instead of backing off it. Every other
+    // machine hands you a window there; this one turns the window into the
+    // reason it is suddenly much nearer than it was.
+    const backoff = this.ace ? AI.aceClose : AI.reloadBackoff;
+    const wants = this.preferredRange * (reloading ? backoff : 1)
+      * (hurt && !this.ace ? AI.hurtBackoff : 1);
 
     const err = (range - wants) / Math.max(1, wants);
     const drive = THREE.MathUtils.clamp(err * 1.6, -1, 1);
@@ -635,7 +683,18 @@ export class SimpleAI {
     // running away reads as a bug however correct the maths is.
     const facing = r.body.forward.dot(toTarget);
     const reach = this._reach();
-    const able = facing > AI.facing && range < reach;
+    const habit = HABITS[this.habit] ?? HABITS.steady;
+
+    // Where the habit gates the trigger. Each of these is something a
+    // player can see happening and answer, rather than a hidden number.
+    let allowed = range < reach;
+    // A machine that will not shoot until it is on top of you: crossing the
+    // ground between you is its whole plan, and interrupting that is yours.
+    if (allowed && habit.within) allowed = range < this.preferredRange * habit.within;
+    // And one that only fires at the top of its arc, so its rhythm can be
+    // read from the other side of the arena.
+    if (allowed && habit.atPeak) allowed = Math.abs(r.body.velocity.y) < habit.atPeak;
+    const able = facing > AI.facing && allowed;
 
     // On the trigger, then off it. See AI.burst.
     this.burstTimer -= dt;
@@ -643,9 +702,16 @@ export class SimpleAI {
       this.firing = !this.firing;
       const [lo, hi] = this.firing ? AI.burst : AI.rest;
       const ease = this.firing ? 1 : lerpN(AI.restEase, 1, this.aggression);
-      this.burstTimer = (this.random ? this.random.range(lo, hi) : (lo + hi) / 2) * ease;
+      // A long wind-up and a long burst is a different problem from a
+      // steady patter, even at the same rounds per minute.
+      const shape = this.firing
+        ? (habit.burst ?? 1) * (this.ace ? AI.aceBurst : 1)
+        : (habit.rest ?? 1) * (this.ace ? 1 / AI.aceBurst : 1);
+      this.burstTimer = (this.random ? this.random.range(lo, hi) : (lo + hi) / 2) * ease * shape;
     }
     const firing = able && this.firing;
+    /** True while this machine is actually shooting at you — the HUD reads it. */
+    this.aiming = firing;
 
     r.weapons.update({
       firing,

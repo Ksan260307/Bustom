@@ -23,6 +23,18 @@ const _lead = new THREE.Vector3();
 const _prev = new THREE.Vector3();
 const _seg = new THREE.Vector3();
 const _near = new THREE.Vector3();
+
+/**
+ * How a held trigger loosens up, in seconds to reach full bloom, seconds to
+ * settle back, and how much wider the cone gets at the top.
+ *
+ * The point is a reason to let go, not a punishment for shooting: a long
+ * burst still lands, it just stops being precise. Settling is faster than
+ * warming so a short tap costs nothing at all.
+ */
+const WARM_UP = 1.6;
+const WARM_DOWN = 0.7;
+const WARM_BLOOM = 1.5;
 const _near2 = new THREE.Vector3();
 const _hitAt = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
@@ -486,7 +498,13 @@ export class Projectiles {
       // ---- terrain
       const p = s.mesh.position;
       const groundY = this.world?.groundHeight?.(p.x, p.z) ?? 0;
-      if (p.y <= groundY + 0.05 || Math.hypot(p.x, p.z) > r + 8) {
+      // Cover stops rounds, and wears out. The pillars have stood there
+      // since the first build and only ever broke a lock — you could hide
+      // behind one and still be shot through it, which is worse than having
+      // no cover at all, because it looks like it should work.
+      const inCover = this.world?.blocksAt?.(p) ?? false;
+      if (inCover) this.world.damageCover(p, s.damage);
+      if (inCover || p.y <= groundY + 0.05 || Math.hypot(p.x, p.z) > r + 8) {
         // A plain round reports where it struck; one with a blast reports
         // the blast instead, which is the bigger event and the one worth
         // drawing.
@@ -635,6 +653,14 @@ export class WeaponSystem {
      */
     this.random = robot.random ?? null;
     this.slots = [];
+    /**
+     * Rounds this rack has put in the air since it was last zeroed.
+     *
+     * Counted per ROUND, not per press, so a shotgun's nine pellets are
+     * nine — which is what makes it comparable with the nine hits they
+     * might land, and lets a run say something about aim.
+     */
+    this.shotsFired = 0;
     /** Which plate the trigger is wired to. */
     this.activeIndex = 0;
     /** 0..1 — how lit the blades are, exported for the rig. */
@@ -661,6 +687,16 @@ export class WeaponSystem {
         armed: true,
         /** Continuous weapons overheat instead of running out of rounds. */
         heat: 0,
+        /**
+         * How long the trigger has been held, as 0..1.
+         *
+         * The opponents were given burst discipline and the player was not,
+         * which left holding the trigger down the strictly best thing to do
+         * — the gaps are where the fight is, and only one side had any.
+         * This does not reduce damage or refuse to fire: it widens the cone,
+         * so a long burst is still a choice and still lands, just loosely.
+         */
+        warmth: 0,
       });
     }
     this.activeIndex = Math.min(this.activeIndex, Math.max(0, this.slots.length - 1));
@@ -690,6 +726,7 @@ export class WeaponSystem {
       s.reloadT = 0;
       s.cooldown = 0;
       s.armed = true;
+      s.warmth = 0;
     }
     this.bladeGlow = 0;
     this.scoped = false;
@@ -757,6 +794,11 @@ export class WeaponSystem {
       // Cooldowns and reloads run on EVERY plate, selected or not. Switching
       // away to let something reload is the point of having a set.
       s.cooldown = Math.max(0, s.cooldown - dt);
+      // Only weapons that CAN be held matter here: a magnum fires once per
+      // press and has nothing to settle down from.
+      const auto = !s.meta.semi && (s.meta.interval ?? 1) < 0.25;
+      const heating = auto && firing && s === this.active;
+      s.warmth = clamp01(s.warmth + (heating ? dt / WARM_UP : -dt / WARM_DOWN));
       // Heat bleeds off whenever the plate is not the one being held down.
       if (s.meta.beam && (s !== live || !firing)) {
         s.heat = Math.max(0, s.heat - dt / Math.max(0.2, s.meta.reload));
@@ -877,19 +919,21 @@ export class WeaponSystem {
     _right.normalize();
     _localUp.crossVectors(_right, direction).normalize();
 
+    const bloom = 1 + (slot?.warmth ?? 0) * WARM_BLOOM;
     for (let i = 0; i < shots; i++) {
       _dir.copy(direction);
       if (meta.spread) {
         if (shots > 1) {
           // A deliberate fan: odd counts keep one pellet dead centre.
-          _dir.applyAxisAngle(_localUp, (i - (shots - 1) / 2) * meta.spread);
+          _dir.applyAxisAngle(_localUp, (i - (shots - 1) / 2) * meta.spread * bloom);
         } else {
           // Scatter in both axes, so held fire reads as a stream not a line.
           const rng = this.random;
-          _dir.applyAxisAngle(_localUp, (rng ? rng.signed() * 0.5 : 0) * meta.spread);
-          _dir.applyAxisAngle(_right, (rng ? rng.signed() * 0.5 : 0) * meta.spread);
+          _dir.applyAxisAngle(_localUp, (rng ? rng.signed() * 0.5 : 0) * meta.spread * bloom);
+          _dir.applyAxisAngle(_right, (rng ? rng.signed() * 0.5 : 0) * meta.spread * bloom);
         }
       }
+      this.shotsFired++;
       // A salvo is thrown WIDE and then homes back in. Without the scatter
       // five homing missiles fly as one missile with five sprites in it.
       let speed = meta.speed;

@@ -67,12 +67,29 @@ function partName(p) {
   return p.label;
 }
 
+/**
+ * Below this window width the editor's panels fold to the edge.
+ *
+ * At 900 they were taking 48% of the screen between them, leaving the
+ * machine less room than the controls for shaping it.
+ */
+const PANEL_FOLD_BELOW = 1024;
+
 export class EditorUI {
   /** @param {HTMLElement} root  @param {object} app */
   constructor(root, app) {
     this.root = root;
     this.app = app;
+    this._wasNarrow = null;
     this._build();
+    this.syncPanelWidth();
+    window.addEventListener('resize', () => this.syncPanelWidth());
+  }
+
+  /** Keep the free-placement height read-out in step with the scene. */
+  showWorkPlane(y) {
+    if (this.planeReadout) this.planeReadout.textContent = Number(y).toFixed(2);
+    return this;
   }
 
   /** Set the size the next block will be placed at, sliders and all. */
@@ -93,7 +110,14 @@ export class EditorUI {
     const el = this.placeHint;
     if (!el) return;
     if (!hint) { el.classList.add('hidden'); return; }
-    el.textContent = hint.text;
+    el.replaceChildren();
+    if (typeof hint.tint === 'number') {
+      el.append(h('span', {
+        class: 'tintchip',
+        style: `background:${hexToCss(hint.tint)}`,
+      }));
+    }
+    el.append(hint.text);
     el.classList.toggle('blocked', !!hint.blocked);
     el.classList.remove('hidden');
     el.style.left = `${hint.x + 16}px`;
@@ -222,6 +246,23 @@ export class EditorUI {
         h('button', { onClick: () => app.editor.duplicateSelected() }, '複製'),
       ),
       h('div', { class: 'row tight' },
+        h('button', {
+          title: '選択したパーツを、機体の中心線の反対側にコピーします',
+          onClick: () => app.editor.mirrorSelected(),
+        }, '左右反転コピー'),
+      ),
+      h('h3', { class: 'inline' }, 'ならべる'),
+      h('div', { class: 'note' }, '2つ以上えらんでから。同じパーツにつながっているもの同士で働きます。'),
+      ...['x', 'y', 'z'].map((axis) => h('div', { class: 'row tight' },
+        h('span', { class: 'k', style: 'width:14px' }, axis.toUpperCase()),
+        h('button', { onClick: () => app.editor.arrangeSelected(axis, 'align') }, '揃える'),
+        h('button', { onClick: () => app.editor.arrangeSelected(axis, 'spread') }, '均等'),
+        h('button', {
+          title: 'この向きに、自分の幅ぶんずつ繰り返します',
+          onClick: () => app.editor.repeatSelected(axis, 3),
+        }, '×4'),
+      )),
+      h('div', { class: 'row tight' },
         h('button', { onClick: () => app.copySelected() }, 'コピー'),
         h('button', { onClick: () => app.copySelected({ cut: true }) }, '切取'),
         h('button', { onClick: () => app.pasteClipboard() }, '貼付'),
@@ -249,6 +290,8 @@ export class EditorUI {
       if (this.sizeLinked.checked) this._setNewSize([v, v, v]);
     }));
 
+    this.planeReadout = h('span', { class: 'val', style: 'min-width:52px;text-align:center' }, '0.00');
+
     this.newShapeButtons = new Map();
     this.blockBox = h('div', {},
       h('h3', { class: 'inline' }, '形'),
@@ -264,6 +307,20 @@ export class EditorUI {
         h('br'), h('b', {}, 'R'), 'で向きを90°回す。', h('b', {}, 'ドラッグ'), 'で連続配置。',
         h('br'), h('b', {}, 'Alt+クリック'), 'でその部品の形・寸法・色を写す。',
         h('b', {}, '右クリック'), 'で削除。'),
+      h('h3', { class: 'inline' }, '空中の高さ'),
+      // Reachable by tapping.
+      //
+      // The height of the free-placement plane was on Shift+wheel, the
+      // eyedropper on Alt+click and deleting on the right button — three
+      // things a touch screen simply cannot do, which left a tablet unable
+      // to place anything above the floor or take anything back off.
+      h('div', { class: 'row tight' },
+        h('button', { onClick: () => app.editor.liftWorkPlane(-1) }, '−'),
+        this.planeReadout,
+        h('button', { onClick: () => app.editor.liftWorkPlane(1) }, '＋'),
+      ),
+      h('div', { class: 'note' },
+        'Shift+ホイールでも変えられます。0 は床の上。'),
       h('h3', { class: 'inline' }, '寸法'),
       h('label', { class: 'checkline' }, this.sizeLinked, '縦横高さを揃える'),
       h('div', { class: 'row tight' },
@@ -502,6 +559,16 @@ export class EditorUI {
       style: 'color:var(--accent);font-family:var(--mono);letter-spacing:.14em',
     }, 'DEBUG FIELD');
 
+    // The tab that brings a folded panel back.
+    this.leftTab = h('button', {
+      class: 'panelfold', title: 'パネルを開く / たたむ',
+      onClick: () => this.leftPanel.classList.toggle('folded'),
+    }, '▸');
+    this.rightTab = h('button', {
+      class: 'panelfold right', title: 'パネルを開く / たたむ',
+      onClick: () => this.rightPanel.classList.toggle('folded'),
+    }, '◂');
+
     this.fieldBar = h('div', { id: 'fieldbar', class: 'hidden' },
       this.fieldLabel,
       h('div', { class: 'sep' }),
@@ -512,6 +579,8 @@ export class EditorUI {
       h('button', { onClick: () => this.keyConfig.show() }, 'キー設定'),
       h('button', { onClick: () => this.help.show('field') }, '使い方'),
     );
+    /** Counts down while the control legend is still on screen. */
+    this._fieldBarFor = 0;
 
     this.pauseRestartBtn = h('button', {
       class: 'wide', onClick: () => app.restartField(),
@@ -542,6 +611,7 @@ export class EditorUI {
 
     this.root.append(
       this.topbar, this.partBar, this.leftPanel, this.rightPanel, this.hint,
+      this.leftTab, this.rightTab,
       this.fieldBar, this.pauseMenu, this.keyConfig.el, this.share.el,
       this.help.el, this.title.el, this.result.el, this.toast,
     );
@@ -659,6 +729,89 @@ export class EditorUI {
     }
   }
 
+  /**
+   * Keep the machine bigger than the tools that shape it.
+   *
+   * The panels are a fixed width, so on a 1440-wide window they take 30% of
+   * it and on a 900-wide one they take 48% — the thing being built ends up
+   * with less room than the controls for building it. Under that width they
+   * fold to their edge, and the button on each edge brings them back.
+   */
+  syncPanelWidth() {
+    // The legend wraps to more lines in a narrower window, so its height is
+    // one of the things a resize changes.
+    this._forgetFieldHintHeight();
+    const narrow = window.innerWidth < PANEL_FOLD_BELOW;
+    if (narrow === this._wasNarrow) return this;
+    this._wasNarrow = narrow;
+    // Only ever folds them ON THE WAY DOWN. Someone who opened a panel in a
+    // narrow window meant it, and having it shut again on the next resize
+    // tick would be the window arguing with them.
+    if (narrow) {
+      this.leftPanel.classList.add('folded');
+      this.rightPanel.classList.add('folded');
+    } else {
+      this.leftPanel.classList.remove('folded');
+      this.rightPanel.classList.remove('folded');
+    }
+    return this;
+  }
+
+  /**
+   * Put the control legend up for a few seconds.
+   *
+   * Called when the field opens, and by ? / F1. Kept as a method rather
+   * than a timer inside the show/hide so that asking for it again while it
+   * is already up simply restarts the clock.
+   */
+  showFieldHint(seconds = 6) {
+    this._fieldBarFor = seconds;
+    this.fieldBar.classList.remove('folded');
+    this._forgetFieldHintHeight();
+    return this;
+  }
+
+  /**
+   * How much of the top of the screen the control legend is covering, in
+   * layout pixels. Zero when it is folded or not up at all.
+   */
+  fieldHintHeight() {
+    const bar = this.fieldBar;
+    if (!bar || bar.classList.contains('hidden') || bar.classList.contains('folded')) return 0;
+    // Remembered, not measured.
+    //
+    // This is read once a frame, and `offsetHeight` forces the browser to
+    // recompute layout to answer it — which doubled the running time of
+    // everything in the app. It only changes when the legend appears or the
+    // window resizes, so it is measured there instead.
+    if (!this._fieldHintH) this._fieldHintH = bar.offsetTop + bar.offsetHeight;
+    return this._fieldHintH;
+  }
+
+  /** Forget the remembered height, so the next read measures again. */
+  _forgetFieldHintHeight() {
+    this._fieldHintH = 0;
+    return this;
+  }
+
+  /** Fold it away now. */
+  hideFieldHint() {
+    this._fieldBarFor = 0;
+    this.fieldBar.classList.add('folded');
+    return this;
+  }
+
+  /**
+   * Run the legend's clock. Driven from the app's frame, in real seconds:
+   * this is a piece of screen furniture, not part of the fight.
+   */
+  tickFieldHint(dt) {
+    if (this._fieldBarFor <= 0) return this;
+    this._fieldBarFor -= dt;
+    if (this._fieldBarFor <= 0) this.fieldBar.classList.add('folded');
+    return this;
+  }
+
   /** Enable / disable the undo buttons and say what they would reverse. */
   syncHistory() {
     const hist = this.app.history;
@@ -765,7 +918,17 @@ export class EditorUI {
     }
     this.topbar.classList.toggle('hidden', mode !== 'edit');
     this.partBar.classList.toggle('hidden', !isPart);
-    this.fieldBar.classList.toggle('hidden', editing || isTitle);
+    // The control legend is a greeting, not furniture.
+    //
+    // It is 98% of the screen wide and sits across the top — which is where
+    // the run's own read-out is drawn, so for the whole of solo play the
+    // wave, the count of what is left, the score and the LIVES were behind
+    // it. It says its piece for a few seconds now and folds away; ? or F1
+    // brings it back, and so does pausing.
+    const wantBar = !editing && !isTitle;
+    this.fieldBar.classList.toggle('hidden', !wantBar);
+    if (wantBar && !this._fieldBarWasOn) this.showFieldHint();
+    this._fieldBarWasOn = wantBar;
 
     // The title owns the whole screen; a run keeps its own read-out.
     this.title.setOpen(isTitle);
@@ -1402,6 +1565,10 @@ export class EditorUI {
         stats.agility > 0.55 ? 'good' : stats.agility < 0.22 ? 'warn' : ''),
       cell('耐久', String(Math.round(stats.durability * (1 + (stats.hpBonus ?? 0))))),
       cell('脚', String(stats.legs)),
+      // Only when there is something to say. A row reading "x1.0" on every
+      // machine that has never fitted a tank is a row nobody reads.
+      ...((stats.energyCapacity ?? 1) > 1
+        ? [cell('EN', `x${stats.energyCapacity.toFixed(2)}`, 'good')] : []),
     );
 
     this.statsEl.replaceChildren(

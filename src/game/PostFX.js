@@ -289,11 +289,19 @@ export class PostFX {
     if (v.dir) this.uniforms.uDir.value.copy(v.dir);
   }
 
-  render(scene, camera) {
+  /**
+   * @param {THREE.WebGLRenderTarget|null} out where the finished frame goes.
+   *   Null is the screen, which is what the game wants. A target is what a
+   *   TEST wants: the contents of the canvas are not readable once the
+   *   browser has composited them — and in a window nobody is looking at,
+   *   the browser may not have drawn them at all.
+   */
+  render(scene, camera, out = null) {
     const r = this.renderer;
     if (!this.enabled) {
-      r.setRenderTarget(null);
+      r.setRenderTarget(out);
       r.render(scene, camera);
+      r.setRenderTarget(null);
       return;
     }
     r.setRenderTarget(this.target);
@@ -303,8 +311,9 @@ export class PostFX {
     this._bloom();
 
     this.quad.material = this.material;
-    r.setRenderTarget(null);
+    r.setRenderTarget(out);
     r.render(this.scene, this.camera);
+    if (out) r.setRenderTarget(null);
   }
 
   dispose() {

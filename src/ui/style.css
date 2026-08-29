@@ -1226,3 +1226,99 @@ button:disabled:hover { background: rgba(255, 255, 255, 0.045); border-color: va
 }
 
 .placehint.hidden { display: none; }
+
+
+/* ------------------------------------------------------------------
+   The field's control legend, folded.
+
+   It is as wide as the screen and sits across the top, which is exactly
+   where the run's own read-out is drawn — so while it was up, the wave, the
+   count of what is left, the score and the lives were all behind it. It
+   says its piece and gets out of the way; ? or F1 brings it back.
+   ------------------------------------------------------------------ */
+#fieldbar {
+  transition: opacity 0.45s ease, transform 0.45s ease;
+}
+
+#fieldbar.folded {
+  opacity: 0;
+  transform: translateY(-8px);
+  pointer-events: none;
+}
+
+/* A key cap never breaks in the middle of its own name. */
+#fieldbar .fieldkeys b,
+#hint b,
+.keycap {
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------
+   The editor's bottom hint strip.
+
+   It was a fixed 1198px wide whatever the window was, so under about
+   1200 it ran off both edges and the first line began mid-word.
+   ------------------------------------------------------------------ */
+#hint {
+  max-width: calc(100vw - 28px);
+  flex-wrap: wrap;
+  justify-content: center;
+  row-gap: 4px;
+}
+
+/* Narrow enough that the strip would wrap to three lines: keep the first
+   few, which are the ones somebody who has just arrived needs. */
+@media (max-width: 900px) {
+  #hint > *:nth-child(n+7) { display: none; }
+}
+
+
+/* ------------------------------------------------------------------
+   Folded panels, and the tabs that bring them back.
+   ------------------------------------------------------------------ */
+#leftpanel.folded,
+#rightpanel.folded {
+  transform: translateX(-110%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+#rightpanel.folded { transform: translateX(110%); }
+
+#leftpanel,
+#rightpanel {
+  transition: transform 0.22s ease, opacity 0.22s ease;
+}
+
+.panelfold {
+  position: absolute;
+  top: 96px;
+  left: 0;
+  z-index: 6;
+  width: 18px;
+  padding: 10px 0;
+  font-size: 11px;
+  line-height: 1;
+  border-radius: 0 6px 6px 0;
+  opacity: 0.55;
+}
+
+.panelfold.right {
+  left: auto;
+  right: 0;
+  border-radius: 6px 0 0 6px;
+}
+
+.panelfold:hover { opacity: 1; }
+
+
+/* The colour the next block will be, in the read-out beside the cursor. */
+.tintchip {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 5px;
+  vertical-align: baseline;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
