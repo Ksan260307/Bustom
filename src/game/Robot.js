@@ -15,6 +15,12 @@ const _v = new THREE.Vector3();
 const _aim = new THREE.Vector3();
 const _flat = new THREE.Vector3();
 const _knock = new THREE.Vector3();
+const _wear = new THREE.Vector3();
+
+/** How near a round has to land to count as hitting a joint, in metres. */
+const WEAR_REACH = 2.2;
+/** A joint never seizes completely, however much it is shot. */
+const WEAR_CAP = 0.8;
 
 /**
  * How much fatter the hit column is than an equal-volume cylinder.
@@ -157,6 +163,10 @@ export class Robot {
     this.wrecked = false;
     /** The barrier a SHIELD plate puts up, while it lasts. */
     this.shield = null;
+    /** How hard this machine's shots land. One unless a run says otherwise. */
+    this.damageScale = 1;
+    /** How much it was hurt this frame, 0..1 of its own hull. For the bones. */
+    this.hurtThisFrame = 0;
     /**
      * Damage this machine has taken in the last moment, kept just long
      * enough for a volley to land as one blow. See `_takeShock`.
@@ -279,6 +289,14 @@ export class Robot {
     // own full traversal of ~200 objects, several times per machine per
     // frame, all recomputing the same matrices.
     this.object3D.updateMatrixWorld(true);
+
+    // Feet last, on fresh transforms. Only for machines posed every step:
+    // one that is far enough away to pose every third step is far enough
+    // away that nobody can see where its feet are.
+    if (this.poseInterval <= 1 && this.body.env?.world?.surfaceAt) {
+      this._surface ??= (x, z, y) => this.body.env.world.surfaceAt(x, z, y);
+      this.animator.plantFeet(this._surface, this.body.env.grounded, dt);
+    }
   }
 
   /** Bring world transforms up to date if nothing has this step. */
@@ -320,7 +338,19 @@ export class Robot {
       landing: b.landing,
       dashSpeed: b.dashSpeed,
       walkCap: b.groundSpeedCap,
+      // What the machine is DOING, as opposed to where it is going. None of
+      // this used to reach the animator, so no bone could react to a fight.
+      boost: b.boostOutput,
+      hp: this.maxHp > 0 ? this.hp / this.maxHp : 1,
+      energy: b.energy,
+      activeWeapon: this.weapons.active?.type ?? null,
+      fired: this.weapons.firedThisFrame,
+      hurt: this.hurtThisFrame,
     });
+    // Read once and cleared: these are instants, and an instant that stays
+    // true for two frames is a bone that fires twice for one event.
+    this.weapons.firedThisFrame = false;
+    this.hurtThisFrame = 0;
 
     this.rig.updateRollers(dt);
 
@@ -359,6 +389,18 @@ export class Robot {
    * whatever it was set to last time: applied to the current figure, a
    * machine reused across ten waves would end up ten multipliers tough.
    */
+  /**
+   * How hard this machine's shots land, as a multiplier.
+   *
+   * Only ever moved for opponents, and only by a run's difficulty. The
+   * player's stays at one: a setting is meant to say what you are up
+   * against, not to quietly re-tune the guns you built.
+   */
+  setDamageScale(scale = 1) {
+    this.damageScale = Math.max(0, scale);
+    return this;
+  }
+
   setToughness(scale = 1) {
     this.baseMaxHp = this.baseMaxHp ?? this.maxHp;
     this.maxHp = Math.max(1, Math.round(this.baseMaxHp * scale));
@@ -368,6 +410,11 @@ export class Robot {
 
   damage(n, from = null) {
     if (!this.alive) return;
+    // Remembered for one frame so a bone can flinch. Measured against this
+    // machine's own hull, so a graze on a siege frame is a graze.
+    if (n > 0 && this.maxHp > 0) {
+      this.hurtThisFrame = Math.max(this.hurtThisFrame, Math.min(1, (n / this.maxHp) * 6));
+    }
     // A raised barrier takes the hit first, and only what it cannot absorb
     // reaches the machine. It breaks when it runs out rather than lingering
     // at zero, so "the shield is up" always means it is doing something.
@@ -394,6 +441,7 @@ export class Robot {
       this.blows.push({ damage: n, from: from ? from.clone() : null, fatal: this.hp <= 0 });
     }
     if (this.hp > 0) this._takeShock(n, from);
+    this._wearJoint(n, from);
     if (this.hp <= 0) {
       this.alive = false;
       // The wreck is produced by the caller, which owns the debris pool; all
@@ -451,8 +499,38 @@ export class Robot {
     return this;
   }
 
+  /**
+   * Mark the joint a round landed on.
+   *
+   * Bones have always had a hitbox and it has always meant nothing: a leg
+   * could be shot to pieces and the machine walked exactly as it had. A worn
+   * joint drives less hard and travels less far, so "aim for the legs" is
+   * finally a thing a player can do on purpose.
+   *
+   * Nearest joint to the impact, within a bone's length or so. A round into
+   * the middle of the torso wears nothing, which is right — that is armour,
+   * and armour is what hit points are for.
+   */
+  _wearJoint(n, from) {
+    if (!from || !(n > 0) || this.maxHp <= 0) return this;
+    const joints = this.rig?.joints;
+    if (!joints?.length) return this;
+    let best = null;
+    let bestD = WEAR_REACH * WEAR_REACH;
+    for (const node of joints) {
+      const d = node.joint.getWorldPosition(_wear).distanceToSquared(from);
+      if (d < bestD) { bestD = d; best = node; }
+    }
+    if (!best) return this;
+    // Capped short of seized: a joint that stops entirely reads as a broken
+    // game rather than as a damaged machine.
+    best.wear = Math.min(WEAR_CAP, (best.wear ?? 0) + (n / this.maxHp) * 2.4);
+    return this;
+  }
+
   /** Put it back together at `position`, whole and reloaded. */
   revive(position) {
+    for (const node of this.rig?.joints ?? []) node.wear = 0;
     this.hp = this.maxHp;
     this.alive = true;
     this.wrecked = false;
@@ -676,6 +754,10 @@ export class SimpleAI {
   _shoot(ctx, range, toTarget, dt) {
     const r = this.robot;
     if (!ctx?.projectiles || !r.weapons.hasWeapons || !r.alive) return;
+    // Free play can switch the shooting off: trying out a walk cycle while
+    // being shot at is two jobs at once. Everything else about the machine
+    // carries on — it still closes, still circles, still takes cover.
+    if (ctx.enemyFire === false) { this.firing = false; this.aiming = false; return; }
     const target = ctx.target;
     if (!target?.alive) return;
 

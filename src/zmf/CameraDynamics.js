@@ -109,11 +109,27 @@ export class CameraDynamics {
     this._framed = false;
   }
 
-  /** Rescale the boom for the size of the machine. */
-  fitTo(stats) {
-    const s = clamp(stats.extent / 2.8, 0.7, 1.8);
-    this.config.distance = 4.6 * s + 3.4;
-    this.config.height = 1.25 * s + 1.0;
+  /**
+   * Rescale the boom for the size of the machine.
+   *
+   * This was `4.6 × clamp(extent/2.8, 0.7, 1.8) + 3.4`, which put the camera
+   * 10.9 metres behind a machine 19.7 metres tall — barely half its own
+   * height, so a siege frame filled the whole frame and you could not see
+   * the fight it was in. Three things were wrong: the clamp ran out, the
+   * relationship was mostly a constant with a small size term added, and
+   * `extent` is a core-relative half-size rather than a height (that same
+   * nineteen-metre machine reports 4.6).
+   *
+   * Proportional to the machine's REAL height, with a floor so small
+   * machines are not pushed away from the camera.
+   *
+   * @param {object} stats
+   * @param {number} [height] the built machine's height, when it is known
+   */
+  fitTo(stats, height = 0) {
+    const size = height > 0 ? height : stats.extent * 3.2;
+    this.config.distance = clamp(size * 1.55, 6.4, 46);
+    this.config.height = clamp(size * 0.34, 1.7, 11);
     this.baseFov = 60 + stats.agility * 8;
   }
 

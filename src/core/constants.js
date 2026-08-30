@@ -69,6 +69,7 @@ export const BONE = {
   ARM: 'arm',
   FACE: 'face',
   CUSTOM: 'custom',
+  WEAPON: 'weapon',
 };
 
 export const BONE_META = {
@@ -88,6 +89,26 @@ export const BONE_META = {
     label: 'カスタムボーン', color: 0xb98cff, mass: 0.9, torque: 15,
     blurb: '自作の動き。軸・波形・速さ・何で駆動するかを自分で決めます',
   },
+  [BONE.WEAPON]: {
+    label: 'ウェポンボーン', color: 0x8effc9, mass: 0.9, torque: 15,
+    blurb: '決めた武器を選んでいる間だけ構えます。切り替えた瞬間だけ動きます',
+  },
+};
+
+/**
+ * A weapon bone's two poses, and how it moves between them.
+ *
+ * Bound to a weapon TYPE rather than to a rack index: an index shifts the
+ * moment another plate is fitted, so every bone on the machine would change
+ * meaning. "The arm that raises for the sniper" stays that arm for ever.
+ */
+export const WEAPON_BONE_DEFAULT = {
+  when: 'any',        // an EQUIP id, or 'any' for "something is selected"
+  axis: 'x',
+  stowed: 0,
+  deployed: -60,
+  speed: 3.2,
+  overshoot: 0.18,
 };
 
 /**
@@ -99,17 +120,62 @@ export const CUSTOM_WAVES = {
   sine: { label: '波（なめらか）' },
   tri: { label: '往復（一定速）' },
   square: { label: 'パタパタ' },
+  pulse: { label: '打つ（鋭く出て、ゆるく戻る）' },
+  noise: { label: 'ゆらぎ（不規則）' },
   saw: { label: '回転（ぐるぐる）', spins: true },
 };
 
+/**
+ * What a bone can listen to.
+ *
+ * The first six are all about MOVING. Nothing here was about fighting, which
+ * is why a machine looked the same whether it was full of holes and out of
+ * ammunition or fresh off the bench.
+ */
 export const CUSTOM_SOURCES = [
   ['time', '常時'], ['stride', '歩調'], ['speed', '速度'],
   ['thrust', '推力'], ['jerk', '衝撃'], ['aim', 'ロックオン'],
+  ['boost', 'ブースト'], ['landing', '着地'],
+  ['recoil', '発砲'], ['damage', '被弾'],
+  ['hp', '損傷'], ['energy', 'EN残量'], ['weapon', '武器切替'],
 ];
 
 /** Default motion for a freshly placed custom bone. */
 export const CUSTOM_DEFAULT = {
   axis: 'x', amp: 30, freq: 1.0, phase: 0, offset: 0, wave: 'sine', source: 'time',
+  /**
+   * A second wave, added on top of the first.
+   *
+   * One wave can be slow and wide or quick and small, never both — so
+   * "sways heavily while trembling" was not expressible at all. Zero
+   * amplitude means it costs nothing and does nothing, which is the default.
+   */
+  amp2: 0, freq2: 4, wave2: 'sine',
+  /**
+   * Whether a continuous rotation still respects the joint's travel.
+   *
+   * `saw` ignores the limit outright, because a propeller that stops at 70°
+   * is not a propeller. But that left no way to build a fast, wide SWEEP
+   * that still stops — a radar head, a turret ring with end stops.
+   */
+  bounded: false,
+  /** How much the resting angle itself moves with the drive. */
+  offsetGain: 0,
+};
+
+/**
+ * How a bone follows the pose being asked of it.
+ *
+ * Every joint used to be slerped at one global rate, so a two-tonne arm and
+ * a whip aerial settled at exactly the same speed. `damping` under 1 lets a
+ * joint overshoot and come back, which is most of what makes a light part
+ * read as light.
+ */
+export const BONE_FOLLOW_DEFAULT = {
+  /** Half-life towards the target, in seconds. 0 uses the global rate. */
+  ease: 0,
+  /** 1 = settles straight onto it, below 1 = overshoots and returns. */
+  damping: 1,
 };
 
 /**
@@ -127,6 +193,25 @@ export const CUSTOM_DEFAULT = {
 export const BONE_GAIN_MAX = 2;
 export const BONE_LAG_MAX = 1;
 export const BONE_MOTION_DEFAULT = { gain: 1, lag: 0 };
+
+/**
+ * How far a chained bone takes of what its root is doing.
+ *
+ * Hard-wired at 0.55 per link, which puts a third link at 0.166 — fine for
+ * a forearm and useless for a tentacle, where every segment should take
+ * nearly all of it.
+ */
+export const CHAIN_FALLOFF_DEFAULT = 0.55;
+
+/**
+ * What happens when a bone is asked for more travel than it has.
+ *
+ * It always stopped. A joint that stops dead is right for a hard end stop
+ * and wrong for a sprung one, and there was no way to ask for the other.
+ */
+export const LIMIT_MODES = [
+  ['clamp', '止まる'], ['bounce', '跳ね返る'], ['wrap', '回り込む'],
+];
 
 /** Named thickness presets. The radius itself stays freely adjustable. */
 export const BONE_GAUGE = {
@@ -204,7 +289,7 @@ export const snapEquipSize = (v) => Math.min(
  */
 export const EQUIP_META = {
   [EQUIP.BEAM]: {
-    label: 'ビーム', category: 'weapon', plate: 0x2b3a49, accent: 0x7fd4ff,
+    label: 'ビーム', en: 'BEAM', category: 'weapon', plate: 0x2b3a49, accent: 0x7fd4ff,
     colorable: true, bullet: 0x7fd4ff,
     // A rifle: one heavy shot at a time, drawn as a long thin line. The slow
     // interval is the price of the damage, and it is what stops the beam
@@ -219,7 +304,7 @@ export const EQUIP_META = {
     blurb: '長く細い一線を撃つビームライフル。連射は効かない',
   },
   [EQUIP.GATLING]: {
-    label: 'ガトリング', category: 'weapon', plate: 0x2b3a49, accent: 0xffd166,
+    label: 'ガトリング', en: 'GATLING', category: 'weapon', plate: 0x2b3a49, accent: 0xffd166,
     colorable: true, bullet: 0xffd166,
     // 2.4 a round made this the worst weapon in the game by a wide margin:
     // 14 sustained where the next worst was 20 and the best was 56, on the
@@ -232,7 +317,7 @@ export const EQUIP_META = {
     blurb: '押しっぱなしで連射。30発でリロード3秒',
   },
   [EQUIP.SHOT]: {
-    label: 'ショット', category: 'weapon', plate: 0x2b3a49, accent: 0xff9f5c,
+    label: 'ショット', en: 'SHOT', category: 'weapon', plate: 0x2b3a49, accent: 0xff9f5c,
     colorable: true, bullet: 0xff9f5c,
     // The tight one. It used to be the spread gun with a third of the
     // throughput and a slightly narrower cone, which is not a niche — so
@@ -244,14 +329,14 @@ export const EQUIP_META = {
     blurb: '3発をまとめて撃つ。中距離向き。6発でリロード3秒',
   },
   [EQUIP.BLADE]: {
-    label: 'ブレード', category: 'weapon', plate: 0x2b3a49, accent: 0xff5c7a,
+    label: 'ブレード', en: 'BLADE', category: 'weapon', plate: 0x2b3a49, accent: 0xff5c7a,
     colorable: false, bullet: 0xff5c7a,
     ammo: 0, reload: 0, interval: 0, auto: true,
     dps: 42, reach: 1.35, mass: 0.5,
     blurb: '押している間ブロックが光り、触れた敵にダメージ',
   },
   [EQUIP.MISSILE]: {
-    label: 'ミサイル', category: 'weapon', plate: 0x2b3a49, accent: 0xb98cff,
+    label: 'ミサイル', en: 'MISSILE', category: 'weapon', plate: 0x2b3a49, accent: 0xb98cff,
     colorable: false, bullet: 0xe8e2ff,
     // Five small ones thrown wide, each homing back in: the spread is what
     // makes a salvo read as a salvo rather than one fat round.
@@ -263,19 +348,41 @@ export const EQUIP_META = {
     blurb: '小型ミサイルを5発ばらまく。白い航跡を引いて追尾する',
   },
   [EQUIP.SNIPER]: {
-    label: 'スナイパー', category: 'weapon', plate: 0x2b3a49, accent: 0x9fffe0,
+    label: 'スナイパー', en: 'SNIPER', category: 'weapon', plate: 0x2b3a49, accent: 0x9fffe0,
     colorable: true, bullet: 0x9fffe0,
     // The heaviest single round there is. It has to be: everything else it
     // could claim — reach — stopped being a distinction once the arena
     // turned out to be smaller than the shots.
-    ammo: 3, reload: 2.6, interval: 1.1, auto: false,
-    shots: 1, spread: 0, speed: 180, damage: 68, life: 3.2, radius: 0.1, mass: 0.9,
-    lead: 0.6,                     // the aimed shot, and the closest to right
-    shape: 'beam', streak: 14, scope: 0.42,      // FOV multiplier while scoped
-    blurb: '超長射程の一撃。スコープ（Q）で狙える',
+    // Rebuilt around the one thing it is for: the shot that lands.
+    //
+    // On paper it was already competitive — thirty-five sustained, the same
+    // as a SHOT plate. In a fight it was not, and the reason was that every
+    // part of it punished a miss: 1.1s between shots, a third of the
+    // magazine gone, a round slow enough (180 m/s) that a moving target had
+    // a second to not be there, and an aim assist told to lead only 60% of
+    // the intercept. Four separate taxes on the same event.
+    //
+    // So: a faster round, a better lead, a shorter gate between shots, and
+    // a hit that is worth having waited for. The commitment stays — three
+    // rounds, a long reload — because that IS the weapon.
+    //
+    // Two limits are NOT crossed, and the suite holds both:
+    //
+    //   - 25m must take more than a tenth of a second, or the round cannot
+    //     be seen crossing the gap, let alone avoided. That caps the speed
+    //     at 250 and it sits at 240.
+    //   - lead must stay under 1, or the lock solves the intercept exactly
+    //     and the shot goes where the target is going to be whatever the
+    //     target does. 0.9 is as close as it is allowed to get, and it is a
+    //     long way from the 0.6 it had.
+    ammo: 3, reload: 2.6, interval: 1.0, auto: false,
+    shots: 1, spread: 0, speed: 240, damage: 96, life: 3.2, radius: 0.14, mass: 0.9,
+    lead: 0.9,                     // the best-aimed shot there is, still dodgeable
+    shape: 'beam', streak: 20,
+    blurb: '超長射程の一撃。当てれば大きい',
   },
   [EQUIP.LASER]: {
-    label: 'レーザー', category: 'weapon', plate: 0x2b3a49, accent: 0xff5ce0,
+    label: 'レーザー', en: 'LASER', category: 'weapon', plate: 0x2b3a49, accent: 0xff5ce0,
     colorable: true, bullet: 0xff5ce0,
     // No magazine: it burns a charge while held, and needs to cool down.
     ammo: 0, reload: 2.2, interval: 0, auto: true,
@@ -284,7 +391,7 @@ export const EQUIP_META = {
     blurb: '押している間、太いレーザーを撃ち続ける。撃ち続けると過熱する',
   },
   [EQUIP.SPREAD]: {
-    label: 'スプレッド', category: 'weapon', plate: 0x2b3a49, accent: 0xffe066,
+    label: 'スプレッド', en: 'SPREAD', category: 'weapon', plate: 0x2b3a49, accent: 0xffe066,
     colorable: true, bullet: 0xffe066,
     // The highest sustained damage in the game, so it pays for it in
     // range: the pellets stop existing at fifty metres. Walk in or do
@@ -296,7 +403,7 @@ export const EQUIP_META = {
     blurb: '9発を大きく拡散。至近距離なら全弾当たるが、遠くには届かない',
   },
   [EQUIP.MAGNUM]: {
-    label: 'マグナム', category: 'weapon', plate: 0x2b3a49, accent: 0xff8a3d,
+    label: 'マグナム', en: 'MAGNUM', category: 'weapon', plate: 0x2b3a49, accent: 0xff8a3d,
     colorable: true, bullet: 0xff8a3d,
     // Short life is the range limit: the round simply stops existing.
     ammo: 4, reload: 2.0, interval: 0.7, auto: false,
@@ -306,7 +413,7 @@ export const EQUIP_META = {
     blurb: '至近距離用の一撃。射程は短いが非常に重い',
   },
   [EQUIP.GRENADE]: {
-    label: 'グレネード', category: 'weapon', plate: 0x2b3a49, accent: 0x8effc9,
+    label: 'グレネード', en: 'GRENADE', category: 'weapon', plate: 0x2b3a49, accent: 0x8effc9,
     colorable: true, bullet: 0x8effc9,
     ammo: 3, reload: 2.8, interval: 0.8, auto: false,
     shots: 1, spread: 0.02, speed: 40, damage: 16, life: 4, radius: 0.3, mass: 0.95,
@@ -315,7 +422,7 @@ export const EQUIP_META = {
     blurb: '山なりに飛ぶ爆弾。着弾点で小爆発を起こす',
   },
   [EQUIP.SHIELD]: {
-    label: 'シールド', category: 'weapon', plate: 0x2b3a49, accent: 0x6fb7ff,
+    label: 'シールド', en: 'SHIELD', category: 'weapon', plate: 0x2b3a49, accent: 0x6fb7ff,
     colorable: true, bullet: 0x6fb7ff,
     ammo: 2, reload: 5.0, interval: 1.2, auto: false,
     speed: 0, mass: 1.2,
@@ -324,13 +431,13 @@ export const EQUIP_META = {
   },
 
   [EQUIP.BOOST]: {
-    label: 'ブースト', category: 'system', plate: 0x243a34, accent: 0x8effc9,
+    label: 'ブースト', en: 'BOOST', category: 'system', plate: 0x243a34, accent: 0x8effc9,
     colorable: false,
     dashBonus: 0.14, mass: 0.35,
     blurb: 'ブーストが使えるようになる。ダッシュの効果も小アップ',
   },
   [EQUIP.TANK]: {
-    label: 'エナジータンク', category: 'system', plate: 0x243a34, accent: 0xffd166,
+    label: 'エナジータンク', en: 'E-TANK', category: 'system', plate: 0x243a34, accent: 0xffd166,
     colorable: false,
     /**
      * A bigger tank, and a slower one to fill.
@@ -349,25 +456,25 @@ export const EQUIP_META = {
     blurb: 'ブーストゲージが増える。長く飛べるが、満タンに戻るのも遅くなる。重い',
   },
   [EQUIP.ROLLING]: {
-    label: 'ローリング', category: 'system', plate: 0x24303a, accent: 0x6fe3ff,
+    label: 'ローリング', en: 'ROLL', category: 'system', plate: 0x24303a, accent: 0x6fe3ff,
     colorable: false, spins: true,
     rpm: 60, mass: 0.5,
     blurb: '貼りついたブロックを回し続ける。向きと速さを選べる',
   },
   [EQUIP.GRAVITY]: {
-    label: 'グラビティ', category: 'system', plate: 0x3a2a24, accent: 0xff7043,
+    label: 'グラビティ', en: 'GRAVITY', category: 'system', plate: 0x3a2a24, accent: 0xff7043,
     colorable: false, unique: true, conflicts: [EQUIP.FLOAT],
     hpBonus: 0.45, noFly: true, mass: 1.6,
     blurb: '空中浮遊不可、その代わり耐久アップ（1枚のみ）',
   },
   [EQUIP.FLOAT]: {
-    label: 'フロート', category: 'system', plate: 0x243044, accent: 0xa8c8ff,
+    label: 'フロート', en: 'FLOAT', category: 'system', plate: 0x243044, accent: 0xa8c8ff,
     colorable: false, unique: true, conflicts: [EQUIP.GRAVITY],
     hover: 1.4, mass: 1.1,
     blurb: '常に地面から少し浮く。脚は接地しない（1枚のみ）',
   },
   [EQUIP.CIRCLE]: {
-    label: 'サークル', category: 'system', plate: 0x223a34, accent: 0x7fffd4,
+    label: 'サークル', en: 'CIRCLE', category: 'system', plate: 0x223a34, accent: 0x7fffd4,
     colorable: false, spins: true, ring: true,
     rpm: 40, mass: 0.7,
     blurb: '貼った場所を中心に円線を引き、その線の上のパーツを線に沿って回す',
@@ -424,6 +531,13 @@ export const weaponLead = (meta) =>
  * held fire is supposed to whittle, not to stunlock.
  */
 export const STAGGER = {
+  /**
+   * How much of a blow a machine's own weight absorbs.
+   *
+   * The same shell knocked a two-hundred-tonne siege frame exactly as far
+   * off its feet as a four-tonne drone. Weight is what a blow has to move.
+   */
+  brace: 1.6,
   /** Damage inside one window that starts a stagger, as a fraction of max HP. */
   threshold: 0.08,
   /** This much again on top of it is a full one. */
@@ -514,7 +628,71 @@ export const SLIDE = {
  * light frame touches down and a heavy one arrives. A skirmisher that
  * braced every time it hopped would just feel sluggish.
  */
+/**
+ * How a machine settles where there is no gravity to settle it.
+ *
+ * Every other arena stops a machine with the floor. Weightless, nothing is
+ * in the way, so a tap of the thruster is a one-way trip to the ceiling
+ * unless the machine holds itself steady when nobody is asking it to move.
+ * This is per second, applied as a fraction of the velocity.
+ */
+export const DRIFT = {
+  /** Hands off the controls: it comes to a stop in a couple of seconds. */
+  idle: 1.15,
+  /** Under thrust: almost none, so a burn still goes somewhere. */
+  thrusting: 0.16,
+};
+
+/**
+ * What the air does to a machine that is not flying through it.
+ *
+ * The drag model is tuned for thrust, and applied to a free drop it pinned
+ * the descent at 13.5 m/s — a twenty-metre machine took eight seconds to
+ * come down off a rooftop and never once looked like it was falling.
+ */
+export const FALL = {
+  /** Below this the drag model has it, and nothing here applies. */
+  softFrom: 12,
+  /** Where the extra pull is at full strength. */
+  terminal: 46,
+  /** How hard, in m/s². Enough to feel, not enough to be a second gravity. */
+  pull: 26,
+};
+
+/**
+ * How much of its sideways push a machine keeps once its feet are off the
+ * ground.
+ *
+ * Uncapped, strafing while hovering reached 20.8 m/s against 9.9 running —
+ * flying sideways was twice as good at everything and the floor became a
+ * place you left and never came back to.
+ */
+export const AIR = {
+  lateral: 0.45,
+};
+
+/**
+ * How firmly a hovering machine holds its own position.
+ *
+ * With its feet off the ground there is no friction, so a light hover build
+ * took 2.1 seconds to come to rest — LONGER than a two-hundred-tonne frame
+ * on its feet, which is exactly backwards. Thrusters that can hold a machine
+ * up can hold it still; per second, and only while nothing is being asked
+ * of them, so a deliberate drift still drifts.
+ */
+export const HOVER = {
+  hold: 2.6,
+};
+
 export const LANDING = {
+  /**
+   * How much of its speed a hard landing takes.
+   *
+   * A machine used to touch down at any speed and carry all of it through,
+   * which made a drop from a rooftop a free way to cross ground: the
+   * landing played and none of it was true.
+   */
+  scrub: 0.55,
   /** Below this weight class a machine only ever touches down... */
   weight: 0.22,
   /** ...and at this one it plants itself as hard as it gets. */

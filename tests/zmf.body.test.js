@@ -5,7 +5,7 @@ import { SyntheticInput, Robot, SimpleAI } from '../src/game/Robot.js';
 import { Assembly, PRESETS, computeStats } from '../src/core/Assembly.js';
 import { Rig } from '../src/core/Rig.js';
 import { testWorld, stripEquips } from './helpers/dom.js';
-import { EQUIP_META, STAGGER, LANDING } from '../src/core/constants.js';
+import { EQUIP, EQUIP_META, STAGGER, LANDING } from '../src/core/constants.js';
 
 const STATS = computeStats(stripEquips(PRESETS.biped.build()));
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -225,22 +225,45 @@ describe('dash', () => {
     expect(b.speed).toBeLessThan(after + 1);
   });
 
-  it('costs energy and will not fire on an empty tank', () => {
+  it('costs no energy, and still works on an empty tank', () => {
+    // The cooldown is what limits a dash. Charging energy for it too meant
+    // a machine that had spent its tank could neither boost nor dodge —
+    // the two things you want most at exactly that moment.
     const b = makeBody();
     const i = new SyntheticInput();
     run(b, i, 0.3);
     const before = b.energy;
     i.dash = dash(0, 0, 1);
     b.update(i, 1 / 60);
-    expect(b.energy).toBeLessThan(before);
+    expect(b.energy).toBe(before);
+    expect(i.dash, 'consumed').toBeNull();
 
     b.energy = 0;
     b.dashCooldown = 0;
     const still = b.speed;
-    i.dash = dash(0, 0, -1);
+    i.dash = dash(0, 0, 1);
     b.update(i, 1 / 60);
-    expect(i.dash).toBeTruthy();          // not consumed
-    expect(b.speed).toBeLessThan(still + 0.5);
+    expect(i.dash, 'an empty tank does not stop a dash').toBeNull();
+    expect(b.speed, 'and it is a real one').toBeGreaterThan(still + 1);
+  });
+
+  it('the tank actually empties on the ground, which it did not', () => {
+    // Ground regeneration was 0.55 a second against a maximum burn of 0.45,
+    // so holding the boost down on the ground moved the gauge by nothing at
+    // all. Energy looked like a general resource and was a flight-only one.
+    // With a boost plate on it: a machine that cannot boost cannot burn.
+    const b = makeBody(platedStats(EQUIP.BOOST));
+    const i = new SyntheticInput();
+    i.move.set(0, 0, 1);
+    i.hold('boost', true);
+    run(b, i, 4);
+    expect(b.energy, 'a ground boost costs').toBeLessThan(0.2);
+
+    // And walking pays it back, which is what makes spending it a decision.
+    const j = new SyntheticInput();
+    j.move.set(0, 0, 1);
+    run(b, j, 4);
+    expect(b.energy, 'walking recovers').toBeGreaterThan(0.9);
   });
 
   it('stays in the horizontal plane while grounded', () => {
@@ -417,7 +440,15 @@ describe('ground lock-on', () => {
     expect(b.grounded).toBeLessThan(0.2);
     expect(Math.abs(b.forward.y - b.aimForward.y),
       'off the floor, the chassis is the aim again').toBeLessThan(0.12);
-    expect(Math.abs(b.forward.y), 'and no longer pinned flat').toBeGreaterThan(0.3);
+    // Only that it has come off flat — while planted it is held under 0.05,
+    // and the assertion above is the one that says it follows the aim.
+    //
+    // This used to demand 0.3, which passed for the wrong reason: the
+    // machine flew PAST the target and ended up pitched steeply DOWN at it
+    // (-0.87), and the magnitude happened to clear the bar. A lighter
+    // machine climbs less far in the same two seconds and sits gently nose
+    // up instead, which is the behaviour the test is named for.
+    expect(Math.abs(b.forward.y), 'and no longer pinned flat').toBeGreaterThan(0.1);
   });
 
   it('mouse pitch is remembered on the ground and honoured in the air', () => {
@@ -689,6 +720,186 @@ describe('equipment on the body', () => {
   });
 });
 
+/**
+ * A blow big enough to be a full stagger FOR THIS MACHINE.
+ *
+ * Weight now absorbs part of a shove — a two-hundred-tonne frame is not
+ * knocked as far off its feet as a four-tonne drone by the same shell — so
+ * "one full stagger" is no longer one number for every machine. These tests
+ * are about the mechanism, so they scale the blow and leave the weighing to
+ * its own test below.
+ */
+const fullFor = (body, staggers = 1) =>
+  staggers * (1 + (body.stats.weightClass ?? 0) * STAGGER.brace);
+
+describe('a heavy machine feels heavy', () => {
+  const of = (id) => computeStats(PRESETS[id].build());
+
+  it('weight class spans the machines that exist', () => {
+    // It was `(mass - 2) / 26`, which saturates at 28 tonnes — written when
+    // the heaviest machine weighed twenty. Across the whole top half of the
+    // roster it was pinned at 1.00, so a TITAN and a COLOSSUS three and a
+    // half times its weight told every system downstream the same thing.
+    const light = of('gnat').weightClass;
+    const mid = of('biped').weightClass;
+    const heavy = of('titan').weightClass;
+    const huge = of('colossus').weightClass;
+    expect(light).toBeLessThan(mid);
+    expect(mid).toBeLessThan(heavy);
+    expect(heavy, 'and the top end still has room in it').toBeLessThan(huge);
+    expect(huge).toBeLessThanOrEqual(1);
+  });
+
+  it('takes longer to get going, in real seconds', () => {
+    const toSpeed = (id, want) => {
+      const b = new ZMFBody(of(id), testWorld(), { rideHeight: 2 });
+      b.reset(V(0, 2, 0));
+      const i = new SyntheticInput();
+      i.move.set(0, 0, 1);
+      i.intensity = 1;
+      for (let n = 0; n < 900; n++) {
+        b.update(i, 1 / 60);
+        i.endFrame?.();
+        if (b.speed >= want) return n / 60;
+      }
+      return 99;
+    };
+    // Measured against a FIXED speed, not against each machine's own top:
+    // relative to itself a slow machine reaches 90% of a small number just
+    // as quickly, which is how this went unnoticed.
+    expect(toSpeed('colossus', 5)).toBeGreaterThan(toSpeed('gnat', 5) * 1.8);
+  });
+
+  it('leans less into a turn', () => {
+    const bank = (id) => new ZMFBody(of(id), testWorld(), { rideHeight: 2 }).angular.maxBankHigh;
+    expect(bank('colossus')).toBeLessThan(bank('gnat') * 0.6);
+  });
+
+  it('cannot dodge as often', () => {
+    const cd = (id) => {
+      const b = new ZMFBody(of(id), testWorld(), { rideHeight: 2 });
+      b.reset(V(0, 2, 0));
+      const i = new SyntheticInput();
+      i.dash = { dir: new THREE.Vector3(0, 0, 1) };
+      b.update(i, 1 / 60);
+      return b.dashCooldown;
+    };
+    expect(cd('colossus')).toBeGreaterThan(cd('gnat') * 1.4);
+  });
+});
+
+describe('the air is a different place', () => {
+  const horizontalTop = (fn, secs = 4) => {
+    const b = new ZMFBody(STATS, testWorld([], { ceiling: 400 }), { rideHeight: 2 });
+    b.reset(V(0, 2, 0));
+    const i = new SyntheticInput();
+    let top = 0;
+    for (let n = 0; n < secs * 60; n++) {
+      fn(i, n);
+      b.update(i, 1 / 60);
+      i.endFrame?.();
+      const v = b.velocity;
+      top = Math.max(top, Math.hypot(v.x, v.z));
+    }
+    return top;
+  };
+
+  it('flying sideways is not better than running sideways', () => {
+    // Air lateral authority was uncapped: strafing while hovering reached
+    // 21 m/s against 11 on the ground, so the floor was strictly worse and
+    // became a place you left and never came back to.
+    const ground = horizontalTop((i) => i.move.set(1, 0, 0));
+    const air = horizontalTop((i) => { i.hold('up', true); i.move.set(1, 0, 0); });
+    expect(air).toBeLessThan(ground * 1.35);
+  });
+
+  it('but flying forward still is', () => {
+    // Flight has to be worth having. It buys going over things, not fencing.
+    const ground = horizontalTop((i) => i.move.set(0, 0, 1));
+    const air = horizontalTop((i) => { i.hold('up', true); i.move.set(0, 0, 1); });
+    expect(air).toBeGreaterThan(ground);
+  });
+
+  it('a fall reads as a fall', () => {
+    // The drag model is tuned for thrust; applied to a free drop it pinned
+    // the descent at 13.5 m/s, and a twenty-metre machine took eight seconds
+    // to come off a rooftop without ever looking like it was falling.
+    const b = new ZMFBody(STATS, testWorld([], { ceiling: 500 }), { rideHeight: 2 });
+    b.reset(V(0, 400, 0));
+    const i = new SyntheticInput();
+    let fastest = 0;
+    for (let n = 0; n < 600; n++) {
+      b.update(i, 1 / 60);
+      i.endFrame?.();
+      fastest = Math.min(fastest, b.velocity.y);
+    }
+    expect(-fastest).toBeGreaterThan(18);
+  });
+});
+
+describe('landing and stepping', () => {
+  const of = (id) => computeStats(PRESETS[id].build());
+
+  it('a hard landing costs speed, and costs a heavy machine more', () => {
+    // Asked of the rule directly. Driving a machine off a ledge and reading
+    // the speed either side of the touchdown measures the drop as much as
+    // the landing — how fast it was going, how far it fell, and how much of
+    // it the drag model had already taken.
+    const plantOf = (id, fall, speed) => {
+      const b = new ZMFBody(computeStats(PRESETS[id].build()), testWorld(), { rideHeight: 2 });
+      b.reset(V(0, 2, 0));
+      b.velocity.set(0, 0, speed);
+      b._plant(fall);
+      return b.velocity.z / speed;
+    };
+    // A gentle touchdown costs nothing at all.
+    expect(plantOf('biped', LANDING.speed * 0.9, 20)).toBe(1);
+    // A hard one costs, and costs a heavy machine more.
+    const light = plantOf('mite', 24, 20);
+    const heavy = plantOf('colossus', 24, 20);
+    expect(light).toBeLessThan(1);
+    expect(heavy).toBeLessThan(light * 0.75);
+  });
+
+  it('a big machine steps over what a small one has to go round', () => {
+    // A flat 0.75m allowance meant a twenty-metre siege frame was stopped
+    // by a kerb it could not see over its own foot.
+    // The rig hands the body its ride height; the body hands it to the
+    // probe, which is where the allowance is worked out.
+    const stepOf = (rideHeight) => Math.max(0.75, rideHeight * 0.42);
+    expect(stepOf(9), 'a siege frame walks onto a crate')
+      .toBeGreaterThan(stepOf(1.2) * 3);
+    expect(stepOf(1.2), 'and a drone is no worse off than before').toBe(0.75);
+  });
+});
+
+describe('weight absorbs a blow', () => {
+  it('the same shell rocks a heavy machine less', () => {
+    // The same shell used to knock a siege frame exactly as far off its
+    // feet as a drone, which reads as "everything feels the same" rather
+    // than as a bug.
+    const light = new ZMFBody(platedStats(EQUIP.BOOST), testWorld(), { rideHeight: 2 });
+    const heavy = new ZMFBody(
+      computeStats(PRESETS.colossus.build()), testWorld(), { rideHeight: 2 },
+    );
+    light.reset(V(0, 2, 0));
+    heavy.reset(V(0, 2, 0));
+    light.applyStagger(1, V(1, 0, 0));
+    heavy.applyStagger(1, V(1, 0, 0));
+    expect(heavy.stagger).toBeLessThan(light.stagger * 0.7);
+    expect(heavy.stats.weightClass).toBeGreaterThan(light.stats.weightClass);
+  });
+
+  it('but a big enough blow still puts anything on its back', () => {
+    const heavy = new ZMFBody(
+      computeStats(PRESETS.colossus.build()), testWorld(), { rideHeight: 2 },
+    );
+    heavy.reset(V(0, 2, 0));
+    heavy.applyStagger(fullFor(heavy, STAGGER.launchFull), V(1, 0, 0));
+    expect(heavy.downed).toBeGreaterThan(0.85);
+  });
+});
+
 describe('being knocked about', () => {
   it('a stagger throws the machine and takes its drive away', () => {
     const b = makeBody();
@@ -697,7 +908,7 @@ describe('being knocked about', () => {
     run(b, input, 1.5);
     const cruise = b.speed;
 
-    b.applyStagger(1, V(-1, 0, 0));           // shoved to the left
+    b.applyStagger(fullFor(b), V(-1, 0, 0));  // shoved to the left
     expect(b.stagger, 'rocked').toBeCloseTo(1, 6);
     expect(b.velocity.x, 'and thrown that way').toBeLessThan(-4);
 
@@ -711,7 +922,7 @@ describe('being knocked about', () => {
 
   it('and then lets go of it', () => {
     const b = makeBody();
-    b.applyStagger(1, V(0, 0, -1));
+    b.applyStagger(fullFor(b), V(0, 0, -1));
     run(b, input, 1.2);
     expect(b.stagger, 'it wears off on its own').toBe(0);
 
@@ -726,8 +937,8 @@ describe('being knocked about', () => {
     // by the heavy one. Taking the newest figure would let a stream of
     // pinpricks talk a machine out of the stagger it had just earned.
     const b = makeBody();
-    b.applyStagger(0.9, V(1, 0, 0));
-    b.applyStagger(0.1, V(1, 0, 0));
+    b.applyStagger(fullFor(b, 0.9), V(1, 0, 0));
+    b.applyStagger(fullFor(b, 0.1), V(1, 0, 0));
     expect(b.stagger).toBeCloseTo(0.9, 6);
   });
 
@@ -737,7 +948,7 @@ describe('being knocked about', () => {
     // puts it off its feet, and neither of those is a thing feet do.
     const b = makeBody();
     const up = b.velocity.y;
-    b.applyStagger(1, V(0, 1, 0));
+    b.applyStagger(fullFor(b), V(0, 1, 0));
     expect(b.velocity.y, 'nothing vertical came out of it').toBeCloseTo(up, 6);
     expect(Math.hypot(b.velocity.x, b.velocity.z), 'it went over instead')
       .toBeGreaterThan(STAGGER.knockback * 0.5);
@@ -745,7 +956,7 @@ describe('being knocked about', () => {
 
   it('nothing carries over into the next life', () => {
     const b = makeBody();
-    b.applyStagger(1, V(1, 0, 0));
+    b.applyStagger(fullFor(b), V(1, 0, 0));
     b.reset(V(0, 2, 0));
     expect(b.stagger).toBe(0);
   });
@@ -757,9 +968,9 @@ describe('being blown away', () => {
     // through the chest both just wobbled you. Past a full one the shove
     // grows and some of it turns upward.
     const rocked = makeBody();
-    rocked.applyStagger(1, V(0, 0, -1));
+    rocked.applyStagger(fullFor(rocked), V(0, 0, -1));
     const thrown = makeBody();
-    thrown.applyStagger(STAGGER.launchFull, V(0, 0, -1));
+    thrown.applyStagger(fullFor(thrown, STAGGER.launchFull), V(0, 0, -1));
 
     expect(thrown.knockback.length(), 'shoved harder')
       .toBeGreaterThan(rocked.knockback.length() * 1.8);
@@ -772,7 +983,7 @@ describe('being blown away', () => {
 
   it('and it really leaves the floor', () => {
     const b = makeBody();
-    b.applyStagger(STAGGER.launchFull, V(1, 0, 0));
+    b.applyStagger(fullFor(b, STAGGER.launchFull), V(1, 0, 0));
     let highest = 0;
     let furthest = 0;
     for (let i = 0; i < 90; i++) {
@@ -789,7 +1000,7 @@ describe('being blown away', () => {
     // Being thrown is not on a clock. It lasts as long as the machine has
     // nothing to stand on, which is what makes it different from a stagger.
     const b = makeBody();
-    b.applyStagger(STAGGER.launchFull, V(1, 0, 0));
+    b.applyStagger(fullFor(b, STAGGER.launchFull), V(1, 0, 0));
     for (let i = 0; i < 12; i++) { b.update(input, 1 / 60); input.endFrame(); }
     const mid = b.downed;
     expect(b.grounded, 'off the floor').toBeLessThan(0.5);
@@ -798,7 +1009,7 @@ describe('being blown away', () => {
 
   it('once it lands it gets up on its own', () => {
     const b = makeBody();
-    b.applyStagger(STAGGER.launchFull, V(1, 0, 0));
+    b.applyStagger(fullFor(b, STAGGER.launchFull), V(1, 0, 0));
     run(b, input, 3);
     expect(b.downed).toBe(0);
     input.move.set(0, 0, 1);
@@ -831,7 +1042,7 @@ describe('being blown away', () => {
 
   it('nothing carries over into the next life', () => {
     const b = makeBody();
-    b.applyStagger(STAGGER.launchFull, V(1, 0, 0));
+    b.applyStagger(fullFor(b, STAGGER.launchFull), V(1, 0, 0));
     b.reset(V(0, 2, 0));
     expect(b.downed).toBe(0);
     expect(b.launched).toBe(0);

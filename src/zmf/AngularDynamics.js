@@ -49,10 +49,18 @@ export class AngularDynamics {
 
   setStats(stats) {
     this.stats = stats;
-    // Rotational authority falls off with inertia — big builds turn like they look.
-    this.turnAuthority = clamp(4.6 * (1 - stats.weightClass * 0.55) + stats.agility * 1.8, 1.1, 7.5);
-    this.maxBankLow = 15 * DEG;
-    this.maxBankHigh = 30 * DEG;
+    // Rotational authority falls off with inertia — big builds turn like
+    // they look. The weight term is stronger than it was: with the old
+    // saturating weight class this could only ever span half its range, so
+    // it was written timidly. Now that the class actually spreads across the
+    // roster, a siege frame can be allowed to turn like one.
+    this.turnAuthority = clamp(4.9 * (1 - stats.weightClass * 0.72) + stats.agility * 1.8, 0.9, 7.5);
+    // How far it leans into a turn. A siege frame that banks like a drone
+    // reads as weightless whatever else it does — leaning is the clearest
+    // single thing a silhouette says about its own mass.
+    const heft = 1 - (stats.weightClass ?? 0) * 0.62;
+    this.maxBankLow = 15 * DEG * heft;
+    this.maxBankHigh = 30 * DEG * heft;
   }
 
   reset(forward = new THREE.Vector3(0, 0, 1)) {

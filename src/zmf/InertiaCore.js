@@ -62,6 +62,20 @@ export class InertiaCore {
     // when there is no ground to push against.
     this.zetaViscous = 0.85 + stats.weightClass * 1.65;
     this.zetaQuad = 0.016 + stats.weightClass * 0.030;
+    /**
+     * How fast this machine's thrusters spool, as a fraction of the profile.
+     *
+     * The profile was a fixed constant, so a two-hundred-tonne frame reached
+     * full thrust in the same fraction of a second as a four-tonne drone —
+     * the only thing mass changed was the top speed it eventually got to.
+     * Every machine therefore FELT the same to start and to stop; they just
+     * arrived at different numbers.
+     *
+     * Slower to release matters as much as slower to build: a machine that
+     * stops pushing instantly can be parked on a coin however much it
+     * weighs.
+     */
+    this.spoolScale = 1 / (1 + (stats.weightClass ?? 0) * 1.15);
     this.vKnee = 14 + stats.agility * 12;
   }
 
@@ -106,7 +120,8 @@ export class InertiaCore {
 
     this.command.set(tx, ty, tz);
 
-    const j = jerkScale;
+    // The machine's own weight, on top of whatever the ABC layer asked for.
+    const j = jerkScale * this.spoolScale;
     this.spool.x = slew(this.spool.x, tx, SPOOL_PROFILE.lateral.rise * j, SPOOL_PROFILE.lateral.fall * j, dt);
     this.spool.y = slew(this.spool.y, ty, SPOOL_PROFILE.vertical.rise * j, SPOOL_PROFILE.vertical.fall * j, dt);
     this.spool.z = slew(this.spool.z, tz, zProf.rise * j, zProf.fall * j, dt);

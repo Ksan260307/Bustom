@@ -387,7 +387,16 @@ export class Projectiles {
     s.trailColor = trail ?? 0xffffff;
     s.life = life;
     s.maxLife = life;
-    s.damage = damage;
+    // Whatever the machine that fired it is worth.
+    //
+    // Applied once, here, rather than at every place a hit is counted: a
+    // direct hit, a blast, a beam and the number the read-out shows all
+    // come off this, so scaling it here is the only way they can agree.
+    // One for the player, always: a run's difficulty is what the OPPOSITION
+    // is, not a discount on your own guns.
+    const scale = owner?.damageScale ?? 1;
+    s.damage = damage * scale;
+    if (blast) s.blast = { ...blast, damage: blast.damage * scale };
     s.radius = radius;
     s.speed = speed;
     s.turn = turn;
@@ -661,12 +670,19 @@ export class WeaponSystem {
      * might land, and lets a run say something about aim.
      */
     this.shotsFired = 0;
+    /**
+     * True on any frame a round left a barrel, cleared by whoever reads it.
+     *
+     * Firing was the one thing a machine did that nothing else on it could
+     * see: hits were reported and feedback was driven, but the act of
+     * shooting reached neither the rig nor the animator, so nothing on a
+     * machine could recoil.
+     */
+    this.firedThisFrame = false;
     /** Which plate the trigger is wired to. */
     this.activeIndex = 0;
     /** 0..1 — how lit the blades are, exported for the rig. */
     this.bladeGlow = 0;
-    /** True while a scoped weapon is selected and the scope key is held. */
-    this.scoped = false;
     this.build();
   }
 
@@ -729,22 +745,19 @@ export class WeaponSystem {
       s.warmth = 0;
     }
     this.bladeGlow = 0;
-    this.scoped = false;
     for (const s of this.slots) s.heat = 0;
     this.robot.shield = null;
     return this;
-  }
-
-  /** The plate's own zoom factor while scoped, or 1 for everything else. */
-  get scopeZoom() {
-    return this.scoped ? (this.active?.meta.scope ?? 1) : 1;
   }
 
   /** What the HUD draws: one row per plate, with the live one marked. */
   readout() {
     return this.slots.map((s, i) => ({
       active: i === this.activeIndex,
-      label: s.meta.label,
+      // The battle read-out's own name for it. One language on that screen:
+      // a katakana word in a strip of monospaced numerals reads as two
+      // designs sharing a panel. The editor keeps the Japanese labels.
+      label: s.meta.en ?? s.meta.label,
       color: s.part.bulletColor ?? s.meta.accent,
       melee: !!s.meta.dps,
       // A laser has no magazine, so its bar shows how far from overheating
@@ -771,7 +784,7 @@ export class WeaponSystem {
     } = ctx;
     const {
       aimPoint = null, projectiles = null, targets = [],
-      lockTarget = null, scoping = false, effects = null, feedback = null,
+      lockTarget = null, effects = null, feedback = null,
     } = ctx;
     let blade = 0;
 
@@ -781,7 +794,6 @@ export class WeaponSystem {
     // traversal here only recomputed matrices that were already correct.
 
     const live = this.active;
-    this.scoped = !!scoping && !!live?.meta.scope;
     this._shieldTick(targets, dt);
 
     // A machine that has just been rocked cannot shoot back for a moment.
@@ -934,6 +946,7 @@ export class WeaponSystem {
         }
       }
       this.shotsFired++;
+      this.firedThisFrame = true;
       // A salvo is thrown WIDE and then homes back in. Without the scatter
       // five homing missiles fly as one missile with five sprites in it.
       let speed = meta.speed;

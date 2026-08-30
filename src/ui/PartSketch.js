@@ -34,15 +34,34 @@ function boxes(json) {
 }
 
 /**
- * @param {object} json a stored part document
- * @param {number} px how big the picture should be
+ * A portrait of a whole machine, for choosing one by.
+ *
+ * The same projection as `partSketch` and the same reason for existing — a
+ * name is a poor way to tell six machines apart — but bigger, and shaded:
+ * a face-on picture at forty pixels is a smudge, and a flat fill at a
+ * hundred and twenty has no depth in it at all. The shading is fake and
+ * cheap (nearer is lighter) and it is enough to read a silhouette.
+ *
+ * @param {object} json a stored machine document
+ * @param {number} px
  * @returns {HTMLCanvasElement}
  */
-export function partSketch(json, px = 40) {
+export function machinePortrait(json, px = 116) {
+  return partSketch(json, px, { shade: true, className: 'portrait', pad: 0.1 });
+}
+
+/**
+ * @param {object} json a stored part document
+ * @param {number} px how big the picture should be
+ * @param {object} [opts]
+ * @returns {HTMLCanvasElement}
+ */
+export function partSketch(json, px = 40, opts = {}) {
+  const { shade = false, className = 'libsketch', pad: padFrac = 0.12 } = opts;
   const cv = document.createElement('canvas');
   cv.width = px;
   cv.height = px;
-  cv.className = 'libsketch';
+  cv.className = className;
   const g = cv.getContext('2d');
   if (!g || !json?.parts?.length) return cv;
 
@@ -54,7 +73,7 @@ export function partSketch(json, px = 40) {
     minY = Math.min(minY, b.y - b.h / 2); maxY = Math.max(maxY, b.y + b.h / 2);
   }
   const span = Math.max(maxX - minX, maxY - minY, 0.001);
-  const pad = px * 0.12;
+  const pad = px * padFrac;
   const k = (px - pad * 2) / span;
   const cx = (minX + maxX) / 2;
   const cy = (minY + maxY) / 2;
@@ -67,16 +86,38 @@ export function partSketch(json, px = 40) {
 
   // Far parts first, so the near ones sit on top the way they would in life.
   items.sort((a, b) => a.z - b.z);
+  const zLo = Math.min(...items.map((b) => b.z));
+  const zHi = Math.max(...items.map((b) => b.z));
+  const zSpan = Math.max(0.001, zHi - zLo);
   for (const b of items) {
     const w = Math.max(1.5, b.w * k);
     const h = Math.max(1.5, b.h * k);
     g.fillStyle = b.kind === 'bone' ? '#5c6473' : hex(b.color);
     g.globalAlpha = b.kind === 'bone' ? 0.7 : 1;
+    // Nearer is lighter. Not lighting — a flat fill simply has no depth in
+    // it, and a machine drawn as one silhouette-coloured mass is unreadable
+    // whatever size it is drawn at.
+    if (shade) {
+      const near = (b.z - zLo) / zSpan;
+      g.globalAlpha *= 0.55 + near * 0.45;
+    }
     g.fillRect(
       px / 2 + (b.x - cx) * k - w / 2,
       px / 2 - (b.y - cy) * k - h / 2,          // screen y grows downwards
       w, h,
     );
+    if (shade) {
+      // A hairline on the near edge, which is what separates two blocks of
+      // the same colour sitting one behind the other.
+      g.globalAlpha = 0.28;
+      g.strokeStyle = '#000';
+      g.lineWidth = 1;
+      g.strokeRect(
+        px / 2 + (b.x - cx) * k - w / 2,
+        px / 2 - (b.y - cy) * k - h / 2,
+        w, h,
+      );
+    }
   }
   g.globalAlpha = 1;
   return cv;

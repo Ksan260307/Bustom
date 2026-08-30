@@ -47,11 +47,11 @@ export function installFakeDom() {
 }
 
 /** A minimal flat world, matching the interface EnvironmentInterference wants. */
-export function testWorld(colliders = []) {
+export function testWorld(colliders = [], { gravity = 22, ceiling = 95 } = {}) {
   return {
-    gravity: 22,
+    gravity,
     arenaRadius: 120,
-    ceiling: 95,
+    ceiling,
     colliders,
     groundHeight: () => 0,
   };

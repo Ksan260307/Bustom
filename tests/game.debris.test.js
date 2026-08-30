@@ -44,7 +44,9 @@ describe('durability', () => {
   });
 
   it('weight helps too, but only gently', () => {
-    const light = computeStats(PRESETS.bits.build());
+    // A tiny drone against a walker: the old pair was FUNNEL and STRIDER,
+    // and FUNNEL grew when the size classes were made to mean something.
+    const light = computeStats(PRESETS.gnat.build());
     const heavy = computeStats(PRESETS.biped.build());
     expect(heavy.mass).toBeGreaterThan(light.mass * 2);
     expect(heavy.durability).toBeGreaterThan(light.durability);

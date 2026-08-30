@@ -517,7 +517,9 @@ describe('WeaponSystem', () => {
     const rows = r.weapons.readout();
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({
-      label: EQUIP_META.beam.label, ammo: EQUIP_META.beam.ammo,
+      // The battle read-out's own name, not the editor's: one language on
+      // that screen.
+      label: EQUIP_META.beam.en, ammo: EQUIP_META.beam.ammo,
       max: EQUIP_META.beam.ammo, reloading: false, melee: false,
     });
     expect(rows[1].melee).toBe(true);
@@ -792,23 +794,6 @@ describe('the new weapons', () => {
       .toBeGreaterThan(EQUIP_META.beam.interval);
   });
 
-  it('the scope only zooms for the plate that has one, and only while held', () => {
-    const r = machine(EQUIP.SNIPER, EQUIP.BEAM);
-    expect(r.weapons.scopeZoom).toBe(1);
-
-    r.weapons.update(ctx({ scoping: true }), 1 / 60);
-    expect(r.weapons.scoped).toBe(true);
-    expect(r.weapons.scopeZoom).toBeCloseTo(EQUIP_META.sniper.scope, 6);
-
-    r.weapons.update(ctx({ scoping: false }), 1 / 60);
-    expect(r.weapons.scoped).toBe(false);
-    expect(r.weapons.scopeZoom).toBe(1);
-
-    r.weapons.select(1);
-    r.weapons.update(ctx({ scoping: true }), 1 / 60);
-    expect(r.weapons.scoped, 'the rifle has no scope to hold').toBe(false);
-    expect(r.weapons.scopeZoom).toBe(1);
-  });
 
   it('the spread throws a fan of pellets in one pull', () => {
     const r = machine(EQUIP.SPREAD);

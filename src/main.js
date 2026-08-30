@@ -1,10 +1,13 @@
 import * as THREE from 'three';
-import { Assembly, PRESETS, starterParts } from './core/Assembly.js';
+import { Assembly, PRESETS, PRESET_LIST, starterParts } from './core/Assembly.js';
 import { EditorScene, TOOL, PART_TOOLS } from './editor/EditorScene.js';
 import { History } from './editor/History.js';
 import { PartLibrary } from './editor/PartLibrary.js';
 import { FieldScene } from './game/FieldScene.js';
-import { SoloRun } from './game/SoloRun.js';
+import { ARENAS, DEFAULT_ARENA, getArena } from './game/Arenas.js';
+import {
+  SoloRun, SOLO_STAGES, DIFFICULTIES, DEFAULT_DIFFICULTY,
+} from './game/SoloRun.js';
 import { TitleScene } from './game/TitleScene.js';
 import { PostFX } from './game/PostFX.js';
 import { seedFromClock } from './core/Random.js';
@@ -69,6 +72,11 @@ const DRAFT_BACKOFF = 20;
 
 /** Named slots, so more than one machine can be kept. */
 const SLOTS_KEY = 'blostom.slots.v1';
+/** Where the player last chose to fight, and whether the guns were cold. */
+const ARENA_KEY = 'blostom.arena.v1';
+/** Which setting a run is fought at. */
+const DIFFICULTY_KEY = 'blostom.difficulty.v1';
+const FIRE_KEY = 'blostom.enemyfire.v1';
 export const SLOT_LIMIT = 8;
 
 const TOOL_KEYS = {
@@ -79,6 +87,7 @@ const TOOL_KEYS = {
   KeyA: TOOL.BONE_ARM,
   KeyF: TOOL.BONE_FACE,
   KeyC: TOOL.BONE_CUSTOM,
+  KeyW: TOOL.BONE_WEAPON,
   KeyX: TOOL.CARVE,
   KeyZ: TOOL.ADD,
   KeyP: TOOL.PAINT,
@@ -130,6 +139,20 @@ export class App {
 
     this.input = new InputManager(this.canvas, { bindings: loadBindings() });
     this.feedback = new KineticFeedback();
+    /** How hard a run is. Chosen on the title, and remembered. */
+    this.difficulty = (() => {
+      try {
+        const id = localStorage.getItem(DIFFICULTY_KEY);
+        return DIFFICULTIES[id] ? id : DEFAULT_DIFFICULTY;
+      } catch { return DEFAULT_DIFFICULTY; }
+    })();
+
+    /** Exposed so the smoke test can ask every preset to stand up. */
+    this.PRESET_LIST = PRESET_LIST;
+
+    /** The machine a run is being fought with, when it is not the bench's. */
+    this.soloMachine = null;
+
     this.library = new PartLibrary();
     // A shelf that starts empty is invisible to anyone who has not already
     // built something worth saving, so it starts with a few limbs on it.
@@ -318,6 +341,61 @@ export class App {
     this._restore(entry.snapshot);
     this.ui.toastMsg(`やり直し: ${entry.label}`);
     return true;
+  }
+
+  // ------------------------------------------------------------- field
+
+  /**
+   * Move the fight somewhere else.
+   *
+   * Remembered, because a place is a preference: somebody who wants to try
+   * everything on the Moon should not have to say so every time.
+   */
+  _savedArena() {
+    try {
+      const id = localStorage.getItem(ARENA_KEY);
+      return ARENAS[id] ? id : DEFAULT_ARENA;
+    } catch { return DEFAULT_ARENA; }
+  }
+
+  /**
+   * Whether the opponents shoot, in the test field.
+   *
+   * Off until somebody says otherwise. The test field is where a machine
+   * gets tried out, and the first thing anybody does with a machine they
+   * just built is watch it walk — which is a poor time to be shot at. Solo
+   * play is where the fighting is, and it ignores this entirely.
+   */
+  _savedFire() {
+    try { return localStorage.getItem(FIRE_KEY) === '1'; } catch { return false; }
+  }
+
+  setArena(arenaId) {
+    this.field.setArena(arenaId);
+    try { localStorage.setItem(ARENA_KEY, arenaId); } catch { /* private mode */ }
+    this.ui.syncArena(arenaId, this.field.enemyFire, !this.field.director);
+    this.ui.toastMsg(`${getArena(arenaId).label} に移動しました`);
+    return this;
+  }
+
+  /**
+   * Turn the opponents' guns on or off.
+   *
+   * Free play only. Under a set of rules the request is refused rather than
+   * silently ignored — a run where nothing shoots is not a run, and it
+   * should say so rather than quietly leaving the box ticked.
+   */
+  setEnemyFire(on) {
+    if (this.field.director && !on) {
+      this.ui.toastMsg('ソロランでは撃たせないようにはできません');
+      this.ui.syncArena(this.field.world.arenaId, true, false);
+      return this;
+    }
+    this.field.setEnemyFire(on);
+    try { localStorage.setItem(FIRE_KEY, on ? '1' : '0'); } catch { /* private mode */ }
+    this.ui.syncArena(this.field.world.arenaId, this.field.enemyFire, !this.field.director);
+    this.ui.toastMsg(on ? '敵が撃ってきます' : '敵は撃ってきません');
+    return this;
   }
 
   // ---------------------------------------------------------- clipboard
@@ -930,14 +1008,26 @@ export class App {
 
     if (FIELD_MODES.has(mode)) {
       this.hudCanvas.classList.remove('hidden');
-      this.field.load(this.mainAssembly);
+      // A run may be fought with a machine other than the one on the bench.
+      this.field.load(mode === 'solo' && this.soloMachine
+        ? this.soloMachine : this.mainAssembly);
+      // Where they last chose to fight, and whether they had the guns off.
+      // A solo run is the director's to arrange, so it gets neither.
+      const solo = mode === 'solo';
+      // A run sets its own place, stage by stage; free play remembers where
+      // the player last chose to be.
+      this.field.setArena(solo ? SOLO_STAGES[0].arena : this._savedArena());
+      this.field.setEnemyFire(solo ? true : this._savedFire());
       // Free play has no rules in charge; a solo run does, and it is the
       // rules that decide who turns up and when the run is over.
-      this.field.setDirector(mode === 'solo' ? new SoloRun(this.field) : null);
+      this.field.setDirector(
+        mode === 'solo' ? new SoloRun(this.field, { difficulty: this.difficulty }) : null,
+      );
       // A fresh draw per run, so two runs are not the same fight — the run
       // is still decided by its seed, it is just a different one each time.
       if (mode === 'solo') this.field.restart(seedFromClock());
       this.field.enter();
+      this.ui.syncArena(this.field.world.arenaId, this.field.enemyFire, !solo);
       // Straight into the action — the pause menu is for Esc, not for entry.
       this.resumeField();
     } else if (mode === 'title') {
@@ -996,9 +1086,45 @@ export class App {
   }
 
   /** Start a solo run, or start this one over if you are already in it. */
+  /**
+   * Start a run.
+   *
+   * No asking where: a run is a ladder of places now, taken in order, and
+   * choosing the first one would only be choosing which of them to skip.
+   */
+  /** Choose how hard a run is. Takes effect on the next one, not this one. */
+  setDifficulty(id) {
+    if (!DIFFICULTIES[id]) return this;
+    this.difficulty = id;
+    try { localStorage.setItem(DIFFICULTY_KEY, id); } catch { /* private mode */ }
+    return this;
+  }
+
+  /**
+   * Open the check before the door.
+   *
+   * A run used to start the instant the menu was pressed, so a machine with
+   * no weapons on it found that out in wave one — and the difficulty, which
+   * decides the whole run, was set on a menu row and then never seen again.
+   */
   startSolo() {
     if (this.mode === 'solo') { this.restartField(); return this; }
     this.ui.result.close();
+    this.ui.title.close();
+    this.ui.sortie.show();
+    return this;
+  }
+
+  /**
+   * Actually go. Called by the sortie screen, and by nothing else.
+   *
+   * @param {object|null} machine a machine document to fight with, or null
+   *   for whatever is on the bench. Taken as a copy either way: a run must
+   *   never be a reason to lose what you were building.
+   */
+  beginSolo(machine = null) {
+    this.ui.result.close();
+    this.soloMachine = machine ? Assembly.fromJSON(machine) : null;
     this.setMode('solo');
     return this;
   }
@@ -1034,10 +1160,17 @@ export class App {
 
   goTitle() {
     this.ui.result.close();
+    this.ui.sortie.close();
     // Whatever the fight was doing, it is not doing it any more.
     this.field.setPaused(false);
     this.feedback.suspend();
+    // The sortie screen opens over the title WITHOUT leaving title mode, so
+    // backing out of it is a return to a mode we never left: setMode saw no
+    // change, did nothing, and the front page stayed as a lit backdrop with
+    // no menu on it. The panels are told where they are either way.
+    const already = this.mode === 'title';
     this.setMode('title');
+    if (already) this.ui.syncMode('title');
     return this;
   }
 
@@ -1270,6 +1403,13 @@ export class App {
 
     // Screen furniture runs on real seconds, not on the fight's clock.
     this.ui?.tickFieldHint?.(elapsed);
+    // Where the fight IS, not where it was last put by hand. A run walks a
+    // ladder of places and moves itself, so a label written only when the
+    // player changes the arena goes stale the first time a stage clears.
+    if (FIELD_MODES.has(this.mode) && this.field.world.arenaId !== this._shownArena) {
+      this._shownArena = this.field.world.arenaId;
+      this.ui?.syncArena?.(this._shownArena, this.field.enemyFire, !this.field.director);
+    }
     // And the read-out is told how much of the top is spoken for, so it
     // never ends up underneath the legend at any window width.
     this.field.topInset = this.ui?.fieldHintHeight?.() ?? 0;

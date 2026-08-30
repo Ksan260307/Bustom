@@ -70,7 +70,18 @@ export class EnvironmentInterference {
     for (const box of this.world.colliders) {
       if (position.x < box.min.x - foot || position.x > box.max.x + foot) continue;
       if (position.z < box.min.z - foot || position.z > box.max.z + foot) continue;
-      if (box.max.y > groundY && box.max.y <= feetY + 0.75) groundY = box.max.y;
+      // How high a step this machine can simply walk onto.
+      //
+      // A flat 0.75m for everything meant a twenty-metre siege frame was
+      // stopped dead by a kerb it could not see over its own foot, while a
+      // two-metre drone had the same allowance.
+      //
+      // Scaled by `rideHeight` — how far the feet sit below the middle —
+      // rather than by `radius`, which is a horizontal proxy and barely
+      // moves for a machine that is tall rather than wide. The old number
+      // is the floor, so nothing gets worse.
+      const step = Math.max(0.75, rideHeight * 0.42);
+      if (box.max.y > groundY && box.max.y <= feetY + step) groundY = box.max.y;
     }
     this.groundY = groundY;
     const feet = position.y - rideHeight;

@@ -65,6 +65,7 @@ export const TOOL = {
   BONE_ARM: 'arm',
   BONE_FACE: 'face',
   BONE_CUSTOM: 'custom',
+  BONE_WEAPON: 'weapon',
   CARVE: 'carve',
   ADD: 'add',
   PAINT: 'paint',
@@ -73,9 +74,11 @@ export const TOOL = {
 const SCULPT_TOOLS = new Set([TOOL.CARVE, TOOL.ADD, TOOL.PAINT]);
 const PART_TOOLS = new Set([
   TOOL.BLOCK, TOOL.BONE_LEG, TOOL.BONE_ARM, TOOL.BONE_FACE, TOOL.BONE_CUSTOM,
-  TOOL.STAMP, TOOL.EQUIP,
+  TOOL.BONE_WEAPON, TOOL.STAMP, TOOL.EQUIP,
 ]);
-const BONE_TOOLS = new Set([TOOL.BONE_LEG, TOOL.BONE_ARM, TOOL.BONE_FACE, TOOL.BONE_CUSTOM]);
+const BONE_TOOLS = new Set([
+  TOOL.BONE_LEG, TOOL.BONE_ARM, TOOL.BONE_FACE, TOOL.BONE_CUSTOM, TOOL.BONE_WEAPON,
+]);
 
 export { SCULPT_TOOLS, PART_TOOLS, BONE_TOOLS };
 
@@ -171,6 +174,17 @@ export class EditorScene {
      * by hand is not.
      */
     this.symmetry = true;
+
+    /**
+     * What the workbench pretends is happening, so a bone can be tuned.
+     *
+     * On the bench the machine stands still with full hit points, full
+     * energy and nothing in its hands, so every drive except the clock read
+     * zero — which meant a bone set to move with speed, with boost or with
+     * damage did not move at all while you set it up. `run` is one dial
+     * across all of them; `solo` keeps the rest of the machine still.
+     */
+    this.bonePreview = { run: 0, weapon: null, solo: true, fire: false };
 
     this.onChange = () => {};
     this.onSelect = () => {};
@@ -2199,6 +2213,161 @@ export class EditorScene {
   }
 
   /** How much of their attribute's motion the selected bones take, and when. */
+  /**
+   * Everything about how a bone moves that is not its size.
+   *
+   * Kept apart from `setBoneShapeSelected` because none of it changes the
+   * geometry: a joint limit, an easing or a linkage is a number the animator
+   * reads, and rebuilding two hundred meshes to change one is why the panel
+   * used to stutter under a slider.
+   */
+  /**
+   * Which bones the bench should move: the picked ones, or all of them.
+   *
+   * The "all of them" answer is a walk of the whole document, and this is
+   * called on every frame the panel is open — so it is worked out when the
+   * selection changes and not again.
+   */
+  _previewIds(moving) {
+    if (this.bonePreview.solo) return moving.map((p) => p.id);
+    const stamp = `${this.assembly.parts.size}:${this.rig?.joints.length ?? 0}`;
+    if (this._allMovingStamp !== stamp) {
+      const out = [];
+      this.assembly.walk((p) => {
+        if (p.kind === 'bone'
+          && (p.boneType === 'custom' || p.boneType === BONE.WEAPON || p.link?.to)) out.push(p.id);
+      });
+      this._allMoving = out;
+      this._allMovingStamp = stamp;
+    }
+    return this._allMoving;
+  }
+
+  /**
+   * The panel's dial, turned into the signals a fight would send.
+   *
+   * One number driving all of them: a bone is normally set up against one
+   * source, and asking a builder to set eight sliders to see any of it move
+   * is asking them not to bother.
+   */
+  _previewSignals() {
+    const run = this.bonePreview.run ?? 0;
+    const fire = this.bonePreview.fire;
+    this.bonePreview.fire = false;      // read once: a shot is an instant
+    return {
+      planarSpeed: run * 18,
+      speed: run * 18,
+      thrust: run,
+      boost: run,
+      jerk: run * 240,
+      gaitFreq: run * 1.6,
+      locked: run,
+      // These read as "how far gone", so they run the other way.
+      hp: 1 - run,
+      energy: 1 - run,
+      landing: fire ? 20 : 0,
+      fired: fire,
+      hurt: fire ? 1 : 0,
+      activeWeapon: this.bonePreview.weapon,
+    };
+  }
+
+  /** How far a bone has actually swung on the bench, in degrees. */
+  boneReach(id) {
+    return Math.round(this.rig?.nodes?.get(id)?.reach ?? 0);
+  }
+
+  /** What the bench is pretending, for the panel to draw. */
+  setBonePreview(patch) {
+    Object.assign(this.bonePreview, patch);
+    return this;
+  }
+
+  setBoneTravelSelected(patch) {
+    const ids = this._withTwins(this.selection)
+      .filter((id) => this.assembly.get(id)?.kind === 'bone');
+    if (!ids.length) return false;
+    this.onBeforeChange('ボーンの動き');
+    for (const id of ids) this.assembly.setBoneShape(id, patch);
+    this.refreshStats();
+    return true;
+  }
+
+  /** A weapon bone's two poses. */
+  setWeaponMotionSelected(patch) {
+    const ids = this._withTwins(this.selection)
+      .filter((id) => this.assembly.get(id)?.boneType === BONE.WEAPON);
+    if (!ids.length) return false;
+    this.onBeforeChange('武器の構え');
+    for (const id of ids) this.assembly.setWeaponMotion(id, patch);
+    this.refreshStats();
+    return true;
+  }
+
+  /**
+   * Put this bone's settings onto its opposite number.
+   *
+   * Symmetry places both sides, and then every later change lands on one of
+   * them: a machine built symmetrically walks lopsided because the left hip
+   * was tuned and the right one was not.
+   */
+  copyBoneSettingsToTwin() {
+    const from = this.assembly.get(this.anchorId);
+    if (from?.kind !== 'bone') {
+      this.onReject?.('もとにするボーンを最後に選んでください');
+      return false;
+    }
+    const twinId = this._twinOf(from.id);
+    const twin = twinId ? this.assembly.get(twinId) : null;
+    if (!twin || twin.kind !== 'bone') {
+      this.onReject?.('反対側のボーンが見つかりません');
+      return false;
+    }
+    this.onBeforeChange('反対側へコピー');
+    this.assembly.setBoneShape(twin.id, {
+      limit: from.limit,
+      limitBack: from.limitBack,
+      limitMode: from.limitMode,
+      hinge: from.hinge,
+      gain: from.gain,
+      lag: from.lag,
+      chain: from.chain,
+      follow: { ...from.follow },
+    });
+    twin.custom = { ...from.custom };
+    twin.weapon = { ...from.weapon };
+    // The swing is mirrored, not copied: a left arm that swings forward
+    // when the right one does is a machine marching, not walking.
+    twin.invert = !from.invert;
+    this.refreshStats();
+    return true;
+  }
+
+  /**
+   * Multiply the effect of every bone from here to the tip.
+   *
+   * Toning down a five-segment leg was five visits to the same slider, and
+   * getting the proportions between them back afterwards was guesswork.
+   */
+  scaleChainGainSelected(factor) {
+    const roots = [...this.selection].filter((id) => this.assembly.get(id)?.kind === 'bone');
+    if (!roots.length) return false;
+    const seen = new Set();
+    const walk = (id) => {
+      const part = this.assembly.get(id);
+      if (!part || seen.has(id)) return;
+      seen.add(id);
+      if (part.kind === 'bone') {
+        this.assembly.setBoneMotion(id, { gain: (part.gain ?? 1) * factor });
+      }
+      for (const child of part.children) walk(child.id ?? child);
+    };
+    this.onBeforeChange('先まとめて効き');
+    for (const id of this._withTwins(roots)) walk(id);
+    this.refreshStats();
+    return true;
+  }
+
   setBoneMotionSelected(motion) {
     const ids = [...this.selection].filter((id) => this.assembly.get(id)?.kind === 'bone');
     if (!ids.length) return false;
@@ -4265,18 +4434,35 @@ export class EditorScene {
       });
       this.rig.root.position.y = this.groundOffset + this.animator.bodyBob;
     } else if (this.animator) {
-      // Idle: settle to rest so the silhouette is honest — except that
-      // selecting a custom bone runs its motion, because every slider in
-      // that panel is meaningless until you can see what it does.
-      const previewCustom = this.selectedParts().some(
-        (p) => p.kind === 'bone' && p.boneType === 'custom',
+      // Idle: settle to rest so the silhouette is honest — except that a
+      // moving bone that is selected runs, because every slider in that
+      // panel is meaningless until you can see what it does.
+      //
+      // Only the bones being worked on, unless the panel says otherwise: a
+      // machine where every bone is running at once tells you nothing about
+      // the one you are tuning.
+      const moving = this.selectedParts().filter(
+        (p) => p.kind === 'bone'
+          && (p.boneType === 'custom' || p.boneType === BONE.WEAPON || p.link?.to),
       );
+      // Rebuilt only when the answer can have changed: this runs 60 times a
+      // second for as long as the panel is open.
+      let live = null;
+      if (moving.length) {
+        const key = `${this.bonePreview.solo}|${this.assembly.parts.size}`
+          + `|${moving.map((p) => p.id).join(',')}`;
+        if (this._liveKey !== key) {
+          this._liveKey = key;
+          this._liveSet = new Set(this._previewIds(moving));
+        }
+        live = this._liveSet;
+      }
       const k = 1 - Math.pow(0.001, dt);
       for (const j of this.rig.joints) {
-        if (previewCustom && j.part.boneType === 'custom') continue;
+        if (live?.has(j.part.id)) continue;
         j.joint.quaternion.slerp(_q.identity(), k);
       }
-      if (previewCustom) this.animator.updateCustomsOnly(dt);
+      if (live) this.animator.previewBones(dt, this._previewSignals(), live);
       this.rig.root.position.y = this.groundOffset;
       this.rig.root.rotation.set(0, 0, 0);
     }

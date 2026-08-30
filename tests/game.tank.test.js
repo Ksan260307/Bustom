@@ -91,7 +91,10 @@ describe('the energy tank', () => {
     expect(refill(1), 'but it does come back').toBeGreaterThan(0);
   });
 
-  it('a dash is a smaller bite out of a bigger tank', () => {
+  it('a dash is free, tank or no tank', () => {
+    // It used to cost a bite of the tank, which meant a machine that had
+    // spent its energy could neither boost nor dodge. The cooldown is the
+    // limit; a bigger tank buys endurance, not more dodges.
     const take = (n) => {
       const bot = machine(n);
       bot.body.energy = 1;
@@ -101,8 +104,8 @@ describe('the energy tank', () => {
       bot.body.update(input, 1 / 60);
       return 1 - bot.body.energy;
     };
-    expect(take(0), 'a dash costs energy').toBeGreaterThan(0);
-    expect(take(1), 'less of it with a tank').toBeLessThan(take(0));
+    expect(take(0)).toBe(0);
+    expect(take(1)).toBe(0);
   });
 
   it('does not stop a machine flying, or make it fly for free', () => {

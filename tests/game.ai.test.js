@@ -63,6 +63,26 @@ describe('an opponent shoots back', () => {
     expect(fireFor(ai, player(), pool(), 5), 'rounds spent').toBeGreaterThan(0);
   });
 
+  it('holds its fire when the field says to, and moves anyway', () => {
+    // A test field is where a machine gets tried out, and trying out a walk
+    // cycle while being shot at is two jobs at once. Everything else about
+    // an opponent has to carry on, or "no shooting" becomes "no opponent".
+    const { ai } = opponent(EQUIP.GATLING, { z: 18 });
+    const target = player();
+    const from = ai.robot.position.clone();
+    expect(fireFor(ai, target, pool(), 5, { enemyFire: false })).toBe(0);
+    expect(ai.aiming, 'and it does not claim to be aiming').toBe(false);
+    expect(ai.robot.position.distanceTo(from), 'still manoeuvring').toBeGreaterThan(1);
+  });
+
+  it('and picks the trigger straight back up when it is allowed to', () => {
+    const { ai } = opponent(EQUIP.GATLING, { z: 18 });
+    const target = player();
+    const p = pool();
+    expect(fireFor(ai, target, p, 3, { enemyFire: false })).toBe(0);
+    expect(fireFor(ai, target, p, 5, { enemyFire: true })).toBeGreaterThan(0);
+  });
+
   it('and not at something behind it', () => {
     // Asked of the rule directly: a machine left to itself turns to face
     // you within a second, which is the answer to a different question.

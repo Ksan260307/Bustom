@@ -1,12 +1,13 @@
 import * as THREE from 'three';
 import {
-  BONE, BONE_GAUGE, FACE_NORMAL, FACE_AXIS, DEFAULT_VOX, snapSize,
+  BONE, BONE_GAUGE, BONE_META, FACE_NORMAL, FACE_AXIS, DEFAULT_VOX, snapSize,
   RING_PLANE_DEFAULT, isRingPlane,
   BONE_LENGTH_MIN, BONE_LENGTH_MAX, BONE_RADIUS_MIN, BONE_RADIUS_MAX,
   EQUIP, EQUIP_META, EQUIP_SIZE_DEFAULT, snapEquipSize,
   CIRCLE_RADIUS_DEFAULT, snapCircleRadius,
   SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, SIZE_STEP, SIZE_MAX, WEAPON_SLOTS,
   BONE_GAIN_MAX, BONE_LAG_MAX, BONE_MOTION_DEFAULT,
+  WEAPON_BONE_DEFAULT, BONE_FOLLOW_DEFAULT, CHAIN_FALLOFF_DEFAULT,
 } from './constants.js';
 import { VoxelBlock } from './VoxelBlock.js';
 import { SHAPE, SHAPE_DEFAULT, isShape, surfaceAlong } from './Shapes.js';
@@ -296,12 +297,43 @@ export class Assembly {
       radius: clamp(opts.radius ?? gauge.radius, BONE_RADIUS_MIN, BONE_RADIUS_MAX),
       length: clamp(opts.length ?? 3, BONE_LENGTH_MIN, BONE_LENGTH_MAX),
       limit: opts.limit ?? 70,          // joint travel, degrees
+      /**
+       * How far it may travel the OTHER way.
+       *
+       * Null means "the same as `limit`", which is what every joint used to
+       * be: one cone, symmetrical. A knee bends one way, and there was no
+       * way to say so — so every knee could also bend backwards just as far.
+       */
+      limitBack: opts.limitBack ?? null,
+      /** What happens at the end stop. See LIMIT_MODES. */
+      limitMode: opts.limitMode ?? 'clamp',
+      /**
+       * One axis only, like a door hinge.
+       *
+       * A cone limit lets a joint wander off its axis, which is right for a
+       * shoulder and wrong for a knee. With this set, whatever the animator
+       * asks for is flattened onto the bone's own axis first.
+       */
+      hinge: opts.hinge ?? false,
       invert: opts.invert ?? false,     // mirror the animator's swing
       /** How strongly this bone follows its attribute's motion. */
       gain: clamp(opts.gain ?? 1, 0, BONE_GAIN_MAX),
       /** Where it sits in the gait cycle, 0..1 of a stride. */
       lag: clamp(opts.lag ?? 0, 0, BONE_LAG_MAX),
+      /** How much of its root's motion a chained bone takes, per link. */
+      chain: clamp(opts.chain ?? CHAIN_FALLOFF_DEFAULT, 0, 1),
+      /** How it settles onto the pose being asked of it. */
+      follow: { ...BONE_FOLLOW_DEFAULT, ...(opts.follow ?? {}) },
       custom: { ...CUSTOM_DEFAULT, ...(opts.custom ?? {}) },
+      /** A weapon bone's two poses. Ignored by every other attribute. */
+      weapon: { ...WEAPON_BONE_DEFAULT, ...(opts.weapon ?? {}) },
+      /**
+       * Another bone this one copies, as a fraction of its angle.
+       *
+       * A mechanical linkage: armour that opens as the joint under it bends,
+       * a counterweight that swings the other way. Null is no linkage.
+       */
+      link: opts.link ? { to: opts.link.to, ratio: opts.link.ratio ?? 1 } : null,
       label: 'BONE',
     };
     this.parts.set(part.id, part);
@@ -637,7 +669,9 @@ export class Assembly {
     return true;
   }
 
-  setBoneShape(id, { length, radius, limit, gain, lag } = {}) {
+  setBoneShape(id, {
+    length, radius, limit, limitBack, limitMode, hinge, gain, lag, chain, follow, link,
+  } = {}) {
     const part = this.parts.get(id);
     if (!part || part.kind !== 'bone') return false;
     if (length !== undefined) part.length = clamp(length, BONE_LENGTH_MIN, BONE_LENGTH_MAX);
@@ -646,8 +680,26 @@ export class Assembly {
     // from the panel directly, which meant it was the one bone property
     // that could not be undone.
     if (limit !== undefined) part.limit = clamp(limit, 1, 180);
+    if (limitBack !== undefined) {
+      part.limitBack = limitBack === null ? null : clamp(limitBack, 0, 180);
+    }
+    if (limitMode !== undefined) part.limitMode = limitMode;
+    if (hinge !== undefined) part.hinge = !!hinge;
     if (gain !== undefined) part.gain = clamp(gain, 0, BONE_GAIN_MAX);
     if (lag !== undefined) part.lag = clamp(lag, 0, BONE_LAG_MAX);
+    if (chain !== undefined) part.chain = clamp(chain, 0, 1);
+    if (follow) part.follow = { ...(part.follow ?? BONE_FOLLOW_DEFAULT), ...follow };
+    if (link !== undefined) {
+      part.link = link ? { to: link.to, ratio: link.ratio ?? 1 } : null;
+    }
+    return true;
+  }
+
+  /** Change a weapon bone's poses. */
+  setWeaponMotion(id, patch = {}) {
+    const part = this.parts.get(id);
+    if (!part || part.kind !== 'bone') return false;
+    part.weapon = { ...(part.weapon ?? WEAPON_BONE_DEFAULT), ...patch };
     return true;
   }
 
@@ -729,8 +781,10 @@ export class Assembly {
       if (p.kind === 'bone') {
         Object.assign(copy, {
           boneType: p.boneType, radius: p.radius, length: p.length,
-          limit: p.limit, invert: p.invert, gain: p.gain, lag: p.lag,
-          custom: { ...p.custom },
+          limit: p.limit, limitBack: p.limitBack, limitMode: p.limitMode, hinge: p.hinge,
+          invert: p.invert, gain: p.gain, lag: p.lag,
+          chain: p.chain, link: p.link ? { ...p.link } : null,
+          follow: { ...p.follow }, custom: { ...p.custom }, weapon: { ...p.weapon },
         });
       } else if (p.kind === 'equip') {
         Object.assign(copy, {
@@ -868,8 +922,10 @@ export class Assembly {
       if (p.kind === 'bone') {
         Object.assign(o, {
           boneType: p.boneType, radius: p.radius, length: p.length,
-          limit: p.limit, invert: p.invert, gain: p.gain, lag: p.lag,
-          custom: p.custom,
+          limit: p.limit, limitBack: p.limitBack, limitMode: p.limitMode, hinge: p.hinge,
+          invert: p.invert, gain: p.gain, lag: p.lag,
+          chain: p.chain, follow: p.follow, link: p.link,
+          custom: p.custom, weapon: p.weapon,
         });
       } else if (p.kind === 'equip') {
         Object.assign(o, {
@@ -920,8 +976,16 @@ export class Assembly {
         }
         delete part.gauge;
         part.custom = { ...CUSTOM_DEFAULT, ...(o.custom ?? {}) };
+        part.weapon = { ...WEAPON_BONE_DEFAULT, ...(o.weapon ?? {}) };
+        part.follow = { ...BONE_FOLLOW_DEFAULT, ...(o.follow ?? {}) };
         part.gain = clamp(o.gain ?? BONE_MOTION_DEFAULT.gain, 0, BONE_GAIN_MAX);
         part.lag = clamp(o.lag ?? BONE_MOTION_DEFAULT.lag, 0, BONE_LAG_MAX);
+        // Everything a save from before these existed simply does not have.
+        part.chain = clamp(o.chain ?? CHAIN_FALLOFF_DEFAULT, 0, 1);
+        part.limitBack = o.limitBack ?? null;
+        part.limitMode = o.limitMode ?? 'clamp';
+        part.hinge = o.hinge ?? false;
+        part.link = o.link ? { to: o.link.to, ratio: o.link.ratio ?? 1 } : null;
       } else if (o.kind === 'equip') {
         delete part.vox;
         const type = EQUIP_META[o.equipType] ? o.equipType : EQUIP.BEAM;
@@ -1017,6 +1081,7 @@ export function computeStats(assembly, rig = null) {
   let volume = 0;
   let solidVolume = 0;
   let boneMass = 0;
+  let legTorque = 0;
   let equipMass = 0;
   let thrust = 30;
   const bones = { leg: 0, arm: 0, face: 0, custom: 0 };
@@ -1033,6 +1098,15 @@ export function computeStats(assembly, rig = null) {
       // Thicker and longer bones weigh more, quadratically in radius.
       boneMass += p.length * 0.28 * Math.pow(p.radius / BONE_GAUGE.thick.radius, 1.6);
       bones[p.boneType] = (bones[p.boneType] ?? 0) + 1;
+      // What this bone can PUSH with. `torque` has sat in the bone table
+      // since bones existed and was read by nothing, so a machine standing
+      // on tree trunks walked exactly as well as one standing on wire: leg
+      // count was the whole of it. Longer and thicker is stronger, squared
+      // in the thickness because that is how a strut works.
+      if (p.boneType === 'leg') {
+        legTorque += (BONE_META.leg.torque ?? 20) * p.length
+          * Math.pow(p.radius / BONE_GAUGE.thick.radius, 2);
+      }
     } else {
       blockCount++;
       const vol = p.size[0] * p.size[1] * p.size[2];
@@ -1078,6 +1152,19 @@ export function computeStats(assembly, rig = null) {
   const inertia = mass * extent * extent * 0.42;
 
   /**
+   * How well the legs it has can drive the weight it is.
+   *
+   * Against its own mass, not in absolute terms — a siege frame's legs are
+   * enormous because they have to be, and it should not be rewarded twice
+   * for that. Square-rooted so the ends stay reachable: on the current
+   * roster this lands between 0.91 and 1.17, and the wider bounds are for
+   * machines built deliberately badly or deliberately well.
+   */
+  const legDrive = limbs && legTorque > 0
+    ? clamp(0.72 + 0.28 * Math.sqrt((legTorque / mass) / 4.2), 0.72, 1.35)
+    : 1;
+
+  /**
    * Where the weight sits, relative to where the machine stands.
    *
    * Mass was reported and its PLACE was not, so "why does this thing keep
@@ -1118,6 +1205,10 @@ export function computeStats(assembly, rig = null) {
     thrustToMass,
     legs: limbs,
     legBones: bones.leg,
+    /** Total push in the leg bones, before mass is taken off it. */
+    legTorque,
+    /** 0.72..1.35: how much of a leg's worth each leg is actually worth. */
+    legDrive,
     arms: bones.arm,
     faces: bones.face,
     customs: bones.custom,
@@ -1134,8 +1225,24 @@ export function computeStats(assembly, rig = null) {
      * buying is ninety seconds of standing still and winning.
      */
     durability: Math.round(40 + coreScale ** 1.4 * 60 + mass * 5),
-    // 0 = feather, 1 = tank. Drives ZMF drag, spool and camera weight.
-    weightClass: clamp01((mass - 2) / 26),
+    /**
+     * 0 = feather, 1 = siege frame. Drives drag, spool, turn rate and camera.
+     *
+     * This was `(mass - 2) / 26`, which SATURATES AT 28 TONNES — written when
+     * the heaviest machine in the game weighed twenty. The roster now runs
+     * from a four-tonne drone to a two-hundred-and-seventy-tonne siege
+     * frame, and across the whole top half of it this number was pinned at
+     * 1.00: a TITAN and a COLOSSUS three and a half times its weight were
+     * telling every system downstream that they weighed the same. That is
+     * why nothing big felt big.
+     *
+     * A cube root, not a line. Mass grows with the cube of size, so a linear
+     * read of it spends its whole range on the first few machines and has
+     * nothing left for the rest; the cube root turns mass back into
+     * something proportional to how large the thing LOOKS, which is what a
+     * player is actually judging it by.
+     */
+    weightClass: clamp01((Math.cbrt(mass) - 1.4) / (Math.cbrt(300) - 1.4)),
     agility: clamp01((thrustToMass - 18) / 42),
     ...loadout,
   };
@@ -1247,367 +1354,13 @@ function bentTip(bone, deg) {
 }
 
 /**
- * STRIDER — the two-legged one, and the shape most people picture when they
- * hear "robot".
+ * The machines that come with the game.
  *
- * Built to three rules the old one broke:
- *
- *  - **the arms hang clear of the body.** They are mounted wider than the
- *    pelvis and stop above it, so nothing intersects when the machine is at
- *    rest and nothing clips through when it walks.
- *  - **the limbs are round.** Capsules for the long segments and spheres at
- *    the joints, so a leg reads as a leg instead of a stack of boxes.
- *  - **it does not stand to attention.** Elbows and knees carry a resting
- *    bend, which is also what gives the walk something to work against.
+ * They live in `Presets.js` — twenty of them across five size classes, and
+ * a file of build recipes is a different kind of thing from the model they
+ * are built with. Re-exported here because everything already asks Assembly
+ * for them.
  */
-export function presetBiped() {
-  const a = new Assembly('STRIDER');
-  const core = a.addCore();
-
-  // ---- torso
-  // The waist is a CUSTOM bone twisting on Y off the STRIDE, not a new bone
-  // type: the torso counter-rotating against the pelvis is most of what makes
-  // a walk read as a walk.
-  //
-  // It carries the CHEST rather than sitting under the legs on purpose. A
-  // bone mounted on a downward face flips its whole frame, and everything
-  // built below it would then have to be built upside down.
-  const spine = a.addBoneOnFace(core.id, 2, BONE.CUSTOM, {
-    length: 0.4, gauge: 'thick', limit: 30,
-    custom: { axis: 'y', wave: 'sine', amp: 16, freq: 1, phase: 0, offset: 0, source: 'stride' },
-  });
-  const chest = a.addBlockOnBone(spine.id, 0.5, 1, {
-    size: [1.75, 1.25, 1.3], shape: SHAPE.BEVEL, label: 'CHEST',
-  });
-  // Intake vents, and the one bright thing on the front of the machine.
-  a.addBlockOnFace(chest.id, 4, 15, {
-    size: [0.5, 0.25, 0.25], shape: SHAPE.PRISM, label: 'VENT',
-  });
-
-  // A barrel around the core rather than a block under it. The core is a
-  // metre of bare silver in the middle of the machine, and every build that
-  // does not cover it ends up with a bright square in its stomach.
-  // A box AROUND the core, not one under it. The core is a metre of bare
-  // silver in the middle of the machine, and a rounded shape leaves its
-  // corners poking out — which reads as a bright square in its stomach.
-  const belly = a.addBlock(core.id, { pos: [0, -0.15, 0] }, 2, {
-    size: [1.15, 1.1, 1.15], label: 'BELLY',
-  });
-  // Narrow. The hips have to end well inside where the arms hang, or the
-  // forearms clip the hip balls every time the machine takes a step — which
-  // is the whole reason this build was drawn again.
-  const pelvis = a.addBlockOnFace(belly.id, 3, 1, {
-    size: [1, 0.6, 1.2], shape: SHAPE.BEVEL, label: 'PELVIS',
-  });
-
-  // ---- head
-  const neck = a.addBoneOnFace(chest.id, 2, BONE.FACE, { length: 0.4, gauge: 'thin' });
-  const skull = a.addBlockOnBone(neck.id, 0.35, 1, {
-    size: [0.9, 0.8, 1], shape: SHAPE.HEX, label: 'HEAD',
-  });
-  a.addBlockOnFace(skull.id, 4, 15, { size: [0.6, 0.25, 0.1] });
-  a.addBlockOnFace(skull.id, 2, 4, { size: [0.2, 0.2, 0.6], shape: SHAPE.WEDGE });
-
-  // ---- arms
-  // Mounted on the outside of the chest and stopping above the pelvis: the
-  // whole point of the rebuild. Anything narrower and the hands sit inside
-  // the hips, which is what the old build did.
-  for (const face of [0, 1]) {
-    const pauldron = a.addBlockOnFace(chest.id, face, 2, {
-      size: [0.65, 0.8, 1.15], shape: SHAPE.DOME, label: 'PAULDRON',
-    });
-    a.addBlockOnFace(pauldron.id, 2, 5, { size: [0.5, 0.2, 0.7], shape: SHAPE.BEVEL });
-
-    const upper = a.addBoneOnFace(pauldron.id, 3, BONE.ARM, {
-      length: 1.1, gauge: 'mid', gain: 0.85,
-    });
-    a.addBlockOnBone(upper.id, 0.55, 1, {
-      size: [0.5, 1.05, 0.5], shape: SHAPE.CAPSULE, label: 'UPPER ARM',
-    });
-
-    const elbow = a.addBone(upper.id, bentTip(upper, 12), BONE.ARM, {
-      length: 1.05, gauge: 'thin', gain: 1, lag: 0.06,
-    });
-    a.addBlockOnBone(elbow.id, 0, 5, { size: [0.45, 0.45, 0.45], shape: SHAPE.SPHERE });
-    a.addBlockOnBone(elbow.id, 0.5, 2, {
-      size: [0.45, 0.95, 0.45], shape: SHAPE.CAPSULE, label: 'FOREARM',
-    });
-    const hand = a.addBlockOnBone(elbow.id, 1, 1, {
-      size: [0.5, 0.5, 0.55], shape: SHAPE.BEVEL, label: 'HAND',
-    });
-    a.addEquipOnFace(hand.id, face, face === 0 ? EQUIP.BEAM : EQUIP.GATLING, { size: 0.6 });
-  }
-
-  // Weapon order is tree order, and the plate you deploy holding should be one
-  // you can actually shoot with, so nothing melee goes above the arms here.
-  a.addEquipOnFace(chest.id, 1, EQUIP.MISSILE, { size: 0.7 });
-  a.addEquipOnFace(chest.id, 5, EQUIP.BOOST, { size: 0.8 });
-
-  // ---- legs
-  for (const face of [0, 1]) {
-    const hip = a.addBlockOnFace(pelvis.id, face, 2, {
-      size: [0.25, 0.5, 0.5], shape: SHAPE.SPHERE, label: 'HIP',
-    });
-    // 股関節: the leg bone at the root of the chain, taking the full stride.
-    const thigh = a.addBoneOnFace(hip.id, 3, BONE.LEG, { length: 1.6, gauge: 'mid', gain: 1 });
-    a.addBlockOnBone(thigh.id, 0.8, 1, {
-      size: [0.65, 1.5, 0.7], shape: SHAPE.CAPSULE, label: 'THIGH',
-    });
-
-    // The knee runs a hair behind the thigh, so the shin whips through, and
-    // starts folded rather than locked straight.
-    const shin = a.addBone(thigh.id, bentTip(thigh, -14), BONE.LEG, {
-      length: 1.5, gauge: 'thin', gain: 1, lag: 0.07,
-    });
-    a.addBlockOnBone(shin.id, 0, 5, {
-      size: [0.55, 0.55, 0.55], shape: SHAPE.SPHERE, label: 'KNEE',
-    });
-    a.addBlockOnBone(shin.id, 0.75, 2, {
-      size: [0.55, 1.4, 0.6], shape: SHAPE.CAPSULE, label: 'SHIN',
-    });
-
-    // Toes forward of the ankle, or the machine looks like it is standing on
-    // stilts rather than on feet.
-    const foot = a.addBlock(shin.id, { pos: [0, 1.45, 0.25] }, 1, {
-      size: [0.75, 0.35, 1.25], shape: SHAPE.BEVEL, label: 'FOOT',
-    });
-    a.addEquipOnFace(foot.id, 5, EQUIP.BOOST, { size: 0.45 });
-  }
-
-  return a;
-}
-
-/**
- * POGO — one leg and a lot of nerve.
- *
- * Round where STRIDER is square: the whole machine is a pod balanced on a
- * single sprung leg, so it reads as something that hops rather than
- * something that walks badly.
- */
-export function presetHopper() {
-  const a = new Assembly('POGO');
-  const core = a.addCore();
-
-  // The shell goes AROUND the core. Every build that hangs blocks off it
-  // instead ends up with a metre of bare silver showing between them.
-  const pod = a.addBlock(core.id, { pos: [0, 0.05, 0] }, 1, {
-    size: [1.5, 1.4, 1.6], shape: SHAPE.BEVEL,
-  });
-  const cap = a.addBlockOnFace(pod.id, 2, 2, { size: [1.1, 0.4, 1.2], shape: SHAPE.DOME });
-
-  // ---- the eye, on a face bone so it tracks where the machine is going
-  const eye = a.addBoneOnFace(pod.id, 4, BONE.FACE, { length: 0.6, gauge: 'thin' });
-  const lens = a.addBlockOnBone(eye.id, 0.4, 1, { size: [0.9, 0.6, 0.6], shape: SHAPE.DOME });
-  a.addBlockOnFace(lens.id, 4, 15, { size: [0.6, 0.3, 0.15], shape: SHAPE.DISH });
-  a.addEquipOnFace(lens.id, 2, EQUIP.SHOT, { size: 0.5 });
-
-  // ---- tail fins, for the look of the thing and somewhere to put the boost
-  for (const face of [0, 1]) {
-    const fin = a.addBlock(pod.id, {
-      pos: [(face === 0 ? -1 : 1) * 0.7, 0.1, -0.75],
-    }, 2, { size: [0.3, 0.9, 0.8], shape: SHAPE.WEDGE });
-    a.addEquipOnFace(fin.id, 5, EQUIP.BOOST, { size: 0.45 });
-  }
-
-  // ---- arms: short, fast and armed with blades
-  for (const face of [0, 1]) {
-    const shoulder = a.addBlockOnFace(pod.id, face, 2, {
-      size: [0.4, 0.5, 0.6], shape: SHAPE.SPHERE,
-    });
-    const arm = a.addBoneOnFace(shoulder.id, 3, BONE.ARM, {
-      length: 0.9, gauge: 'thin', gain: 1.3,
-    });
-    a.addBlockOnBone(arm.id, 0.45, 2, { size: [0.35, 0.85, 0.35], shape: SHAPE.CAPSULE });
-    const claw = a.addBlock(arm.id, bentTip(arm, 18), 5, {
-      size: [0.45, 0.5, 0.45], shape: SHAPE.OCTA,
-    });
-    a.addEquipOnFace(claw.id, face, EQUIP.BLADE, { size: 0.5 });
-  }
-
-  // ---- the leg: one, and wound tighter than standard
-  const thigh = a.addBoneOnFace(pod.id, 3, BONE.LEG, {
-    length: 1.5, gauge: 'thick', gain: 1.2,
-  });
-  a.addBlockOnBone(thigh.id, 0.75, 1, { size: [0.8, 1.4, 0.8], shape: SHAPE.CAPSULE });
-
-  const shank = a.addBone(thigh.id, bentTip(thigh, -20), BONE.LEG, {
-    length: 1.4, gauge: 'mid', gain: 1.1, lag: 0.06,
-  });
-  a.addBlockOnBone(shank.id, 0, 5, { size: [0.7, 0.7, 0.7], shape: SHAPE.SPHERE });
-  a.addBlockOnBone(shank.id, 0.7, 2, { size: [0.6, 1.3, 0.6], shape: SHAPE.CAPSULE });
-
-  const foot = a.addBlockOnBone(shank.id, 1.4, 1, {
-    size: [1.2, 0.4, 1.3], shape: SHAPE.FRUSTUM,
-  });
-  a.addEquipOnFace(foot.id, 5, EQUIP.BOOST, { size: 0.55 });
-
-  // ---- two bits, circling the cap
-  //
-  // The plate on the cap draws a line at 1.5m, level with the top of the
-  // cap; the bits sit on that line, one either side, and go round it. They
-  // used to just hang there in mid-air, which is a fair bit less convincing
-  // for something with no visible means of support.
-  const RING = 1.5;
-  a.addEquipOnFace(cap.id, 2, EQUIP.CIRCLE, {
-    size: 0.6, ringRadius: RING, spin: { dir: 1, rpm: 40 },
-  });
-  for (const side of [-1, 1]) {
-    const bit = a.addBlock(pod.id, { pos: [side * RING, 1.1, 0] }, 15, {
-      size: [0.4, 0.4, 0.8], shape: SHAPE.PRISM,
-    });
-    a.addEquipOnFace(bit.id, 4, EQUIP.BEAM, { size: 0.4 });
-  }
-  return a;
-}
-
-/**
- * CRAWLER — four legs, hung off a flat hull.
- *
- * A bone mount rotation is read in its parent's frame, so a knee chained off
- * a sideways hip would fold back into the body; the sideways stance comes
- * from the animator's splay instead.
- */
-export function presetMultileg() {
-  const a = new Assembly('CRAWLER');
-  const core = a.addCore();
-
-  // One hull, wrapped around the core and stretched back over the tail.
-  const hull = a.addBlock(core.id, { pos: [0, 0, -0.2] }, 1, {
-    size: [1.7, 1.3, 2.5], shape: SHAPE.BEVEL,
-  });
-  const deck = a.addBlockOnFace(hull.id, 2, 2, {
-    size: [1.2, 0.4, 1.8], shape: SHAPE.FRUSTUM,
-  });
-  a.addEquipOnFace(deck.id, 2, EQUIP.GRAVITY, { size: 0.9 });
-  a.addEquipOnFace(hull.id, 5, EQUIP.BOOST, { size: 0.7 });
-
-  // ---- turret, on a face bone so the gun leads the machine
-  const neck = a.addBoneOnFace(hull.id, 4, BONE.FACE, { length: 0.7, gauge: 'thin' });
-  const turret = a.addBlockOnBone(neck.id, 0.45, 11, {
-    size: [0.9, 0.7, 0.9], shape: SHAPE.DOME,
-  });
-  a.addBlockOnFace(turret.id, 4, 15, { size: [0.5, 0.25, 0.2], shape: SHAPE.DISH });
-  a.addEquipOnFace(turret.id, 4, EQUIP.GATLING, { size: 0.55 });
-
-  // ---- four legs, front pair and back pair
-  for (const z of [0.75, -0.75]) {
-    for (const face of [0, 1]) {
-      const side = face === 0 ? -1 : 1;
-      const outrigger = a.addBlock(hull.id, { pos: [side * 0.95, 0.1, z] }, 2, {
-        size: [0.6, 0.5, 0.6], shape: SHAPE.HEX,
-      });
-      if (z > 0) a.addEquipOnFace(outrigger.id, 2, EQUIP.MISSILE, { size: 0.5 });
-
-      const hip = a.addBoneOnFace(outrigger.id, 3, BONE.LEG, {
-        length: 1.1, gauge: 'mid', limit: 80, invert: face === 1, gain: 1,
-      });
-      a.addBlockOnBone(hip.id, 0.55, 1, { size: [0.4, 1, 0.4], shape: SHAPE.CAPSULE });
-
-      const knee = a.addBone(hip.id, bentTip(hip, -22), BONE.LEG, {
-        length: 1.5, gauge: 'thin', limit: 90, invert: face === 1, gain: 1, lag: 0.08,
-      });
-      a.addBlockOnBone(knee.id, 0, 8, { size: [0.45, 0.45, 0.45], shape: SHAPE.SPHERE });
-      a.addBlockOnBone(knee.id, 0.75, 2, { size: [0.35, 1.4, 0.35], shape: SHAPE.CAPSULE });
-      a.addBlockOnBone(knee.id, 1.45, 1, { size: [0.4, 0.4, 0.5], shape: SHAPE.CONE });
-    }
-  }
-
-  // ---- tail, swinging off the machine's own speed
-  const tail = a.addBoneOnFace(hull.id, 5, BONE.CUSTOM, {
-    length: 2.2, gauge: 'thin', custom: { axis: 'x', amp: 24, freq: 1.6, phase: 0, source: 'speed' },
-  });
-  a.addBlockOnBone(tail.id, 0.9, 2, { size: [0.3, 1.6, 0.3], shape: SHAPE.CAPSULE });
-  const tip = a.addBlockOnBone(tail.id, 1.9, 15, { size: [0.45, 0.6, 0.45], shape: SHAPE.OCTA });
-  a.addEquipOnFace(tip.id, 2, EQUIP.BEAM, { size: 0.45 });
-  return a;
-}
-
-/**
- * FUNNEL — a body that barely touches the ground and a ring of bits that
- * never do. Built to show off free placement: nothing in the ring is
- * attached to anything it looks attached to.
- */
-export function presetBits() {
-  const a = new Assembly('FUNNEL');
-  const core = a.addCore();
-
-  // A ball, and big enough to swallow the core whole. A shape that tapers —
-  // an octahedron, a cone — has to be much larger than the thing it covers
-  // before its faces clear the corners, and anything less leaves the bare
-  // silver of the core poking through in eight places.
-  const shell = a.addBlock(core.id, { pos: [0, 0, 0] }, 1, {
-    size: [1.8, 1.75, 1.8], shape: SHAPE.SPHERE,
-  });
-  const crown = a.addBlockOnFace(shell.id, 2, 9, {
-    size: [0.9, 0.5, 0.9], shape: SHAPE.DOME,
-  });
-  a.addBlockOnFace(crown.id, 4, 15, { size: [0.5, 0.25, 0.2], shape: SHAPE.DISH });
-  a.addEquipOnFace(crown.id, 4, EQUIP.BEAM, { size: 0.5 });
-  a.addEquipOnFace(shell.id, 5, EQUIP.BOOST, { size: 0.7 });
-
-  const ring = 6;
-  for (let i = 0; i < ring; i++) {
-    const t = (i / ring) * Math.PI * 2;
-    const bit = a.addBlock(core.id, {
-      pos: [Math.cos(t) * 1.9, 0.35 + Math.sin(t * 2) * 0.3, Math.sin(t) * 1.9],
-      rot: new THREE.Quaternion().setFromAxisAngle(UP, -t).toArray(),
-    }, 15, { size: [0.5, 0.3, 0.9], shape: SHAPE.PRISM });
-    // Every other bit spins on the spot; the rest carry the guns.
-    if (i % 2 === 0) {
-      a.addEquipOnFace(bit.id, 2, EQUIP.ROLLING, {
-        size: 0.4, spin: { dir: i % 4 === 0 ? 1 : -1, rpm: 90 },
-      });
-    } else {
-      a.addEquipOnFace(bit.id, 2, EQUIP.SHOT, { size: 0.4 });
-    }
-  }
-
-  // One leg, folded, with a dish for a foot: it lands rather than walks.
-  const leg = a.addBoneOnFace(shell.id, 3, BONE.LEG, {
-    length: 1.3, gauge: 'mid', gain: 1.1,
-  });
-  a.addBlockOnBone(leg.id, 0.65, 2, { size: [0.5, 1.2, 0.5], shape: SHAPE.CAPSULE });
-  const shank = a.addBone(leg.id, bentTip(leg, -16), BONE.LEG, {
-    length: 1, gauge: 'thin', gain: 1, lag: 0.06,
-  });
-  a.addBlockOnBone(shank.id, 0, 9, { size: [0.45, 0.45, 0.45], shape: SHAPE.SPHERE });
-  const pad = a.addBlockOnBone(shank.id, 1, 2, { size: [1.3, 0.35, 1.3], shape: SHAPE.DISH });
-  a.addEquipOnFace(pad.id, 3, EQUIP.MISSILE, { size: 0.45 });
-  return a;
-}
-
-/**
- * Whole limbs, lifted off the built-in machines.
- *
- * A machine preset answers "give me something that works" and a bare core
- * answers "let me start clean"; nothing answered "I have a torso, now I need
- * an arm" — which is the part of a build that takes longest and looks worst
- * when done in a hurry. These are ordinary part documents: graft one on and
- * cut it about like anything else.
- */
-export function starterParts() {
-  const out = [];
-  const take = (assembly, label, name) => {
-    let found = null;
-    assembly.walk((p) => { if (!found && p.label === label) found = p; });
-    const doc = found ? assembly.extract(found.id) : null;
-    if (doc) out.push({ name, json: doc.toJSON() });
-  };
-  const biped = presetBiped();
-  take(biped, 'PAULDRON', '腕 ARM');
-  take(biped, 'HIP', '脚 LEG');
-  take(biped, 'HEAD', '頭 HEAD');
-  take(biped, 'CHEST', '上半身 UPPER BODY');
-  return out;
-}
-
-export const PRESETS = {
-  // Named, not classified: how many legs a machine has is visible from
-  // looking at it, and putting the count in the name makes the list read as
-  // a menu of categories to pick from rather than as four machines.
-  biped: { label: 'STRIDER', build: presetBiped },
-  hopper: { label: 'POGO', build: presetHopper },
-  multileg: { label: 'CRAWLER', build: presetMultileg },
-  bits: { label: '浮遊ビット FUNNEL', build: presetBits },
-  core: { label: 'コアのみ', build: () => Assembly.createDefault() },
-};
+export {
+  PRESETS, PRESET_LIST, SIZE_CLASSES, presetsOfSize, starterParts,
+} from './Presets.js';

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { World } from './World.js';
+import { DEFAULT_ARENA, getArena } from './Arenas.js';
 import { Robot, SimpleAI, HABITS } from './Robot.js';
 import { Projectiles } from './Weapons.js';
 import { Debris } from './Debris.js';
@@ -37,14 +38,6 @@ const DUST_EVERY_METRES = 1.6;
 const HUD_INTERVAL = 1 / 30;
 
 /**
- * How long the target has to stay out of sight before the lock drops.
- *
- * Not instant. Clipping a pillar for a frame while both of you are moving
- * is not breaking line of sight, and a lock that flickered every time
- * something passed between you would be worse than no lock at all.
- */
-const LOCK_BREAK = 0.55;
-/**
  * How long it takes to get a lock, in seconds.
  *
  * Short enough that it never feels like a wait, long enough that switching
@@ -80,7 +73,15 @@ export class FieldScene {
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(62, 1, 0.1, 900);
-    this.world = new World(this.scene, renderer);
+    this.world = new World(this.scene, renderer, DEFAULT_ARENA);
+    /**
+     * Whether the opponents shoot back.
+     *
+     * Free play is where a machine gets tried out, and trying out a walk
+     * cycle while being shot at is two jobs at once. Under a set of rules
+     * this is not on offer — a run where nothing shoots is not a run.
+     */
+    this.enemyFire = true;
     this.cameraRig = new CameraDynamics(this.camera);
     this.hud = new Hud(hudCanvas);
     /** Shared with the editors when the app supplies one. */
@@ -93,6 +94,10 @@ export class FieldScene {
      * lock, the hit tests.
      */
     this.enemies = [];
+    /** Nobody is on the field until a machine is loaded onto it. */
+    this.player = null;
+    /** Which of the four corners the player starts from. */
+    this.playerCorner = 0;
     /**
      * Machines that have been built and are waiting to be used again.
      *
@@ -171,7 +176,7 @@ export class FieldScene {
       isPlayer: true, random: this.random,
     });
     this.scene.add(this.player.object3D);
-    this.cameraRig.fitTo(this.player.stats);
+    this.cameraRig.fitTo(this.player.stats, this.player.rig.restHeight);
     this.input.profile.massSensitivityScale = 1 / (1 + this.player.stats.weightClass * 0.5);
     this.respawn();
     if (!this.director && !this.enemies.length) this._spawnEnemies();
@@ -186,6 +191,44 @@ export class FieldScene {
    * Passing null puts it back the way the debug arena wants it: the three
    * regulars, respawning forever.
    */
+  /**
+   * Move the fight to a different place.
+   *
+   * The arena decides gravity, so this has to reach the machines: they hold
+   * a reference to the world and read `gravity` every step, which means a
+   * swap takes effect on the next frame with nothing else to do.
+   *
+   * @param {string} arenaId
+   */
+  setArena(arenaId) {
+    if (arenaId === this.world.arenaId) return this;
+    this.world.setArena(arenaId);
+    // Cover, wrecks and rounds all belonged to the old place.
+    this.projectiles.clear();
+    this.debris.clear();
+    this.effects.clear();
+    // The place can be chosen before there is a machine to put in it — the
+    // app restores the saved arena as part of entering the field, which
+    // happens either side of the machine being loaded depending on how the
+    // field was reached.
+    if (!this.player) return this;
+    this.respawn();
+    for (const e of this.enemies) {
+      if (e.wrecked) continue;
+      e.revive(this._enemySpawn(e));
+    }
+    return this;
+  }
+
+  /** Which place this is, and what it is like. */
+  get arena() { return getArena(this.world.arenaId); }
+
+  /** Whether the opponents shoot back. Only free play may turn this off. */
+  setEnemyFire(on) {
+    this.enemyFire = !!on || !!this.director;
+    return this;
+  }
+
   setDirector(director) {
     this.director = director ?? null;
     this.retireEnemies();
@@ -235,7 +278,7 @@ export class FieldScene {
    */
   spawnEnemy({
     preset = 'biped', style = 'orbit', range = 24, toughness = 1,
-    aggression = 1, habit = 'steady', ace = false, at = null,
+    aggression = 1, habit = 'steady', ace = false, at = null, hitting = 1,
   } = {}) {
     const shelved = this.retired.findIndex((e) => e.presetKey === preset);
     let bot = shelved >= 0 ? this.retired.splice(shelved, 1)[0] : null;
@@ -261,6 +304,10 @@ export class FieldScene {
     }
 
     bot.setToughness(toughness);
+    // What it can take, and what it does to you, move together: a run that
+    // only made opponents harder to kill would make the fight longer
+    // without making it harder.
+    bot.setDamageScale(hitting);
     bot.revive(at ?? this._enemySpawn(bot));
     bot.hp = bot.maxHp;
     return bot;
@@ -333,7 +380,10 @@ export class FieldScene {
     this.effects.clear();
     this._flushRespawns();
     this.player.wrecked = false;
-    this.player.revive(new THREE.Vector3(0, h + 0.2, -18));
+    // A corner, and a different one each time: coming back to exactly the
+    // spot you were shot in is how a bad position becomes a habit.
+    this.playerCorner = (this.playerCorner + 1) % 4;
+    this.player.revive(this.cornerSpawn(this.playerCorner, h + 0.2));
     // A respawn is a fresh view: whatever the player had the boom swung to,
     // they are looking at a new fight now. Their zoom is a preference, so it stays.
     this.cameraRig.recenter();
@@ -517,15 +567,14 @@ export class FieldScene {
         ? this.player.body.assist.aimPoint
         : this.lock.robot.position;
 
-      // Cover breaks a lock. The arena has been full of pillars from the
-      // start with nothing to make anyone use one — and a lock that is a
-      // free, permanent aim aid is a lock with no decision in it. Put
-      // something solid between you and the machine tracking you and it
-      // loses you, which gives the pillars their second job and gives
-      // running for one a point.
-      const blocked = this._blocked(this.player.position, this.lock.robot.position);
-      this.lock.hidden = blocked ? (this.lock.hidden ?? 0) + dt : 0;
-      if (this.lock.hidden > LOCK_BREAK) this._dropLock();
+      // Cover does NOT break the lock.
+      //
+      // It used to, on the reasoning that a permanent aim aid is a lock
+      // with no decision in it. In play it reads as the lock being broken:
+      // you are tracking something, it steps behind a crate for half a
+      // second, and the target you chose is gone — so you spend the fight
+      // re-acquiring rather than fighting. Cover already does its job by
+      // stopping the ROUNDS, which is the part the player can see.
     }
   }
 
@@ -614,7 +663,6 @@ export class FieldScene {
 
     p.weapons.update({
       firing,
-      scoping: this.input.isDown('scope'),
       aimPoint: this.lock && p.body.assist.hasTarget ? p.body.assist.aimPoint : null,
       projectiles: this.projectiles,
       targets: this.enemies,
@@ -626,17 +674,7 @@ export class FieldScene {
     if (!p.weapons.hasWeapons) this._fireDefault(dt);
   }
 
-  /**
-   * The scope. Narrowing the field of view IS the zoom — it magnifies what
-   * the sniper is pointed at without moving the camera, so the machine stays
-   * where the player left it.
-   */
-  _updateScope() {
-    this.cameraRig.scope = this.player.alive ? (this.player.weapons.scopeZoom ?? 1) : 1;
-    return this;
-  }
-
-  /** What the view is worth without a scope on it — the rig decides. */
+  /** What the view is worth — the rig decides. */
   get baseFov() { return this.cameraRig.baseFov; }
 
   /**
@@ -761,14 +799,46 @@ export class FieldScene {
 
   /** Somewhere well clear of the player, and inside the arena, to put an
    *  opponent back. */
+  /**
+   * The four places a machine can start from.
+   *
+   * Everybody used to appear within sixty metres of the player, at a random
+   * bearing — so a fight opened at knife range with no say in it, and on a
+   * hundred-and-fifty-metre flat the whole arena beyond that circle was
+   * scenery nobody visited. The corners put real ground between the
+   * machines and make crossing it the first decision of the fight.
+   *
+   * Measured off the arena rather than written down, so a wider place puts
+   * them wider apart with nothing else to change.
+   *
+   * @param {number} i    which corner; wraps
+   * @param {number} lift how far off the floor, for the machine's own feet
+   */
+  cornerSpawn(i, lift = 0.5) {
+    const r = this.world.arenaRadius * 0.66;
+    const a = (Math.PI / 4) + (((i % 4) + 4) % 4) * (Math.PI / 2);
+    // Somewhere weightless the floor is the far wall, so start out in the
+    // volume where the fight actually happens rather than parked on it.
+    const y = this.world.gravity <= 0 ? this.world.ceiling * 0.35 : lift;
+    return new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r);
+  }
+
+  /**
+   * Which corner an opponent gets: any but the player's.
+   *
+   * Numbered from the machine's place in the roster so two opponents do not
+   * pile into the same corner, and so a wave is spread rather than bunched.
+   */
   _enemySpawn(robot) {
-    const angle = this.random.unit() * Math.PI * 2;
-    const r = this.random.range(34, 60);
-    _v.set(
-      this.player.position.x + Math.cos(angle) * r,
-      Math.max(0.5, -robot.rig.restLowestY),
-      this.player.position.z + Math.sin(angle) * r,
-    );
+    const at = this.enemies.indexOf(robot);
+    const nth = at < 0 ? this.enemies.length : at;
+    const lift = Math.max(0.5, -robot.rig.restLowestY);
+    _v.copy(this.cornerSpawn(this.playerCorner + 1 + nth, lift));
+    // A nudge off dead centre of the corner, so three machines sharing one
+    // do not start inside each other.
+    const spread = this.world.arenaRadius * 0.09;
+    _v.x += this.random.range(-spread, spread);
+    _v.z += this.random.range(-spread, spread);
     const edge = this.world.arenaRadius - 8;
     const flat = Math.hypot(_v.x, _v.z);
     if (flat > edge) {
@@ -783,7 +853,7 @@ export class FieldScene {
     const w = this.player.weapons;
     if (w.slots.length < 2) return null;
     const slot = dir > 0 ? w.next() : w.prev();
-    this.hud.flashWeapon(slot?.meta.label ?? '');
+    this.hud.flashWeapon(slot?.meta.en ?? slot?.meta.label ?? '');
     return slot;
   }
 
@@ -995,6 +1065,9 @@ export class FieldScene {
       targets: this._machines(),
       effects: this.effects,
       feedback: this.feedback,
+      // Everything else about an opponent carries on: they still move, still
+      // close, still take cover. They just do not pull the trigger.
+      enemyFire: this.enemyFire,
     };
     for (const ai of this.ais) {
       if (!ai.robot.alive) continue;
@@ -1067,7 +1140,6 @@ export class FieldScene {
     const dt = Math.max(1e-4, Math.min(elapsed, 1 / 15));
     const p = this.player;
 
-    this._updateScope();
 
     // ---- camera
     const tel = p.body.telemetry();
@@ -1099,6 +1171,9 @@ export class FieldScene {
     // Output only, and per FRAME rather than per step: neither one is read
     // back by anything, and both are about where the camera is.
     this.world.focusShadows(p.position);
+    // The sky rides with the CAMERA, not with the machine: it is the camera
+    // whose far plane would otherwise cut it in half.
+    this.world.followSky(this.camera.position);
     this.effects.faceCamera(this.camera);
 
     // ---- feedback

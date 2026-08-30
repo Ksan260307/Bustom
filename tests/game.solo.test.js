@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { SoloRun, SOLO_RULES, OPPONENTS } from '../src/game/SoloRun.js';
+import {
+  SOLO_STAGES, SOLO_WAVES, SoloRun, SOLO_RULES, OPPONENTS,
+  DIFFICULTIES, DIFFICULTY_ORDER, DEFAULT_DIFFICULTY, powerAt,
+} from '../src/game/SoloRun.js';
 
 // ============================================================
 //  The rules of a run, with a paper arena underneath.
@@ -27,6 +30,9 @@ function paperField() {
       this.spawned.push(bot);
       return bot;
     },
+    /** Where the run has been, in order. */
+    arenas: [],
+    setArena(id) { this.arenas.push(id); },
   };
   return field;
 }
@@ -46,6 +52,172 @@ function toWave(run, n) {
   }
   return run;
 }
+
+describe('how hard a run is', () => {
+  it('offers five settings, hardest last', () => {
+    expect(DIFFICULTY_ORDER).toHaveLength(5);
+    const ramps = DIFFICULTY_ORDER.map((id) => DIFFICULTIES[id].ramp);
+    for (let i = 1; i < ramps.length; i++) {
+      expect(ramps[i], `${DIFFICULTY_ORDER[i]} climbs faster`).toBeGreaterThan(ramps[i - 1]);
+    }
+    // And every one of them is a real entry with a name.
+    for (const id of DIFFICULTY_ORDER) expect(DIFFICULTIES[id].label).toBeTruthy();
+  });
+
+  it('the buff climbs with the wave, which is the whole idea', () => {
+    for (const id of DIFFICULTY_ORDER) {
+      const first = powerAt(id, 1);
+      const last = powerAt(id, SOLO_WAVES);
+      expect(last, `${id} gets harder as it goes`).toBeGreaterThan(first);
+      expect(first, `${id} starts somewhere sane`).toBeGreaterThan(0.5);
+    }
+  });
+
+  it('and stops climbing, so a late wave is hard rather than long', () => {
+    // An uncapped ramp turns into a wall of hit points, and a wall is long,
+    // not hard.
+    for (const id of DIFFICULTY_ORDER) {
+      expect(powerAt(id, 500)).toBe(DIFFICULTIES[id].ceiling);
+    }
+  });
+
+  it('every setting is harder than the one below it, at every wave', () => {
+    for (let n = 1; n <= SOLO_WAVES; n++) {
+      for (let i = 1; i < DIFFICULTY_ORDER.length; i++) {
+        expect(
+          powerAt(DIFFICULTY_ORDER[i], n),
+          `${DIFFICULTY_ORDER[i]} over ${DIFFICULTY_ORDER[i - 1]} at wave ${n}`,
+        ).toBeGreaterThan(powerAt(DIFFICULTY_ORDER[i - 1], n));
+      }
+    }
+  });
+
+  it('moves what they can take AND what they hit for', () => {
+    // Only raising hit points would make the fight longer without making it
+    // harder; only raising damage would make it end in a second.
+    const easy = SoloRun.waveSpecs(10, 'easy')[1];
+    const hell = SoloRun.waveSpecs(10, 'hell')[1];
+    expect(hell.toughness).toBeGreaterThan(easy.toughness * 2);
+    expect(hell.hitting).toBeGreaterThan(easy.hitting);
+    // Damage moves LESS than toughness, or a late wave one-shots you.
+    expect(hell.hitting).toBeLessThan(hell.toughness);
+  });
+
+  it('gives the softer settings more tries and pays them less', () => {
+    expect(DIFFICULTIES.easy.lives).toBeGreaterThan(DIFFICULTIES.hell.lives);
+    expect(DIFFICULTIES.easy.score).toBeLessThan(DIFFICULTIES.hell.score);
+  });
+
+  it('takes its lives from the setting', () => {
+    const run = new SoloRun(paperField(), { difficulty: 'hell' });
+    run.begin();
+    expect(run.lives).toBe(DIFFICULTIES.hell.lives);
+  });
+
+  it('a harder run is worth more for the same fight', () => {
+    const play = (difficulty) => {
+      const field = paperField();
+      const run = new SoloRun(field, { difficulty, lives: 9 });
+      run.begin();
+      toWave(run, 4);
+      return run.score;
+    };
+    expect(play('hell')).toBeGreaterThan(play('easy'));
+  });
+
+  it('falls back rather than breaking on a setting that is not there', () => {
+    const run = new SoloRun(paperField(), { difficulty: 'nightmare' });
+    expect(run.difficulty).toBe(DEFAULT_DIFFICULTY);
+    expect(powerAt('nightmare', 5)).toBe(powerAt(DEFAULT_DIFFICULTY, 5));
+  });
+});
+
+describe('a run is a ladder of places', () => {
+  it('starts at the bottom of it', () => {
+    const field = paperField();
+    const run = new SoloRun(field);
+    run.begin();
+    expect(run.stage).toBe(0);
+    expect(field.arenas.at(-1)).toBe(SOLO_STAGES[0].arena);
+  });
+
+  it('moves on when a stage runs out of waves, not when a wave clears', () => {
+    const field = paperField();
+    const run = new SoloRun(field);
+    run.begin();
+    const first = SOLO_STAGES[0].waves;
+
+    // Every wave but the last on this rung is an ordinary break.
+    toWave(run, first);
+    expect(run.stage, 'still on the first rung').toBe(0);
+    const before = field.arenas.length;
+
+    // Clearing the last one is a stage clear, and the ground changes.
+    for (const m of run.members) m.alive = false;
+    for (const m of run.members) run.onDown(m);
+    tick(run, 0.1);
+    expect(run.state).toBe('stageclear');
+    tick(run, 6);
+    expect(run.stage).toBe(1);
+    expect(field.arenas.length, 'the arena was changed').toBe(before + 1);
+    expect(field.arenas.at(-1)).toBe(SOLO_STAGES[1].arena);
+  });
+
+  it('keeps climbing the wave count across the change', () => {
+    // Otherwise every stage restarts at wave one and the pressure resets
+    // with the scenery, which makes the ladder an anthology rather than a
+    // run.
+    const field = paperField();
+    const run = new SoloRun(field);
+    run.begin();
+    toWave(run, SOLO_STAGES[0].waves + 1);
+    expect(run.stage).toBe(1);
+    expect(run.wave).toBe(SOLO_STAGES[0].waves + 1);
+    expect(run.stageWave).toBe(0);
+  });
+
+  it('walks every place, once, in order', () => {
+    const field = paperField();
+    const run = new SoloRun(field);
+    run.begin();
+    for (let guard = 0; guard < 4000 && !run.cleared; guard++) {
+      tick(run, 0.5);
+      if (run.state === 'fighting') for (const m of run.members) m.alive = false;
+      for (const m of run.members) if (!m.alive) run.onDown(m);
+    }
+    expect(run.cleared, 'the ladder was walked to the top').toBe(true);
+    expect(field.arenas).toEqual(SOLO_STAGES.map((s) => s.arena));
+    expect(run.wave).toBe(SOLO_WAVES);
+  });
+
+  it('pays for finishing it, and then the run is over', () => {
+    const field = paperField();
+    const run = new SoloRun(field);
+    run.begin();
+    for (let guard = 0; guard < 4000 && !run.finished; guard++) {
+      tick(run, 0.5);
+      if (run.state === 'fighting') for (const m of run.members) m.alive = false;
+      for (const m of run.members) if (!m.alive) run.onDown(m);
+    }
+    expect(run.finished).toBe(true);
+    expect(run.result.cleared).toBe(true);
+    expect(run.score).toBeGreaterThan(SOLO_RULES.clearBonus);
+  });
+
+  it('a run that ends early did not clear it', () => {
+    const field = paperField();
+    const run = new SoloRun(field);
+    run.begin();
+    toWave(run, 2);
+    for (let i = 0; i < SOLO_RULES.lives; i++) {
+      field.player.alive = false;
+      run.onDown(field.player);
+      tick(run, 4);
+    }
+    expect(run.finished).toBe(true);
+    expect(run.result.cleared).toBe(false);
+  });
+});
 
 describe('a solo run', () => {
   it('starts quiet, then puts a wave on the field', () => {
@@ -300,10 +472,39 @@ describe('a solo run', () => {
     }
   });
 
-  it('mixes the opponents up rather than sending the same one every time', () => {
+  it('sends every machine it has, somewhere across the ladder', () => {
     const kinds = new Set();
-    for (let n = 1; n <= 6; n++) for (const s of SoloRun.waveSpecs(n)) kinds.add(s.preset);
-    expect(kinds.size, 'every kind turns up inside six waves').toBe(OPPONENTS.length);
+    for (let n = 1; n <= SOLO_WAVES; n++) {
+      for (const s of SoloRun.waveSpecs(n)) kinds.add(s.preset);
+    }
+    expect(kinds.size, 'nothing in the roster goes unused').toBe(OPPONENTS.length);
+  });
+
+  it('escalates by size, not only by number', () => {
+    // The whole reason there are twenty machines across five size classes.
+    // Numbers alone make a fight longer; a thing twice your height makes it
+    // a different fight.
+    const rank = { tiny: 0, small: 1, medium: 2, large: 3, huge: 4 };
+    const biggest = (n) => Math.max(...SoloRun.waveSpecs(n).map((x) => rank[x.size]));
+
+    expect(biggest(1), 'the first wave is drones').toBe(rank.tiny);
+    expect(biggest(SOLO_WAVES), 'the last is siege frames').toBe(rank.huge);
+    // And it only ever goes up.
+    let last = -1;
+    for (let n = 1; n <= SOLO_WAVES; n++) {
+      const b = biggest(n);
+      expect(b, `wave ${n} is not smaller than wave ${n - 1}`).toBeGreaterThanOrEqual(last);
+      last = b;
+    }
+  });
+
+  it('never sends a wave of one machine repeated', () => {
+    for (let n = 3; n <= SOLO_WAVES; n++) {
+      const specs = SoloRun.waveSpecs(n);
+      if (specs.length < 3) continue;
+      const kinds = new Set(specs.map((x) => x.preset));
+      expect(kinds.size, `wave ${n} has more than one kind in it`).toBeGreaterThan(1);
+    }
   });
 
   it('starting over is a clean sheet', () => {

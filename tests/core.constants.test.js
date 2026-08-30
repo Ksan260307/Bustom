@@ -2,8 +2,24 @@ import { describe, it, expect } from 'vitest';
 import {
   FACE, FACE_NORMAL, FACE_AXIS, FACE_OPPOSITE, FACE_NAME,
   VOX_LEVELS, DEFAULT_VOX, chunkSizeFor, snapSize,
-  SIZE_MIN, SIZE_MAX, BONE_GAUGE, BONE_META, BONE, GAITS,
+  SIZE_MIN, SIZE_MAX, BONE_GAUGE, BONE_META, BONE, GAITS, EQUIP_META,
 } from '../src/core/constants.js';
+
+describe('every plate has a name for both screens', () => {
+  it('the editor keeps Japanese, the fight speaks English', () => {
+    // A katakana word in a strip of monospaced numerals reads as two
+    // designs sharing a panel, and the read-out is the one screen where
+    // that matters most.
+    for (const [key, meta] of Object.entries(EQUIP_META)) {
+      expect(meta.label, `${key} has an editor name`).toBeTruthy();
+      expect(meta.en, `${key} has a read-out name`).toBeTruthy();
+      expect(/^[A-Z0-9-]+$/.test(meta.en), `${key}: ${meta.en} is plain caps`).toBe(true);
+    }
+    // And no two plates share one, or the rack cannot be read.
+    const names = Object.values(EQUIP_META).map((m) => m.en);
+    expect(new Set(names).size).toBe(names.length);
+  });
+});
 
 describe('face tables', () => {
   it('has six of everything, consistently indexed', () => {

@@ -154,7 +154,29 @@ describe('InertiaCore spool', () => {
     core.spoolTo(V(0, 0, 0), 1 / 60);
     const drop = held - core.spool.z;
     expect(drop).toBeGreaterThan(0);
-    expect(drop).toBeCloseTo(SPOOL_PROFILE.forward.fall / 60, 4);
+    // The profile, scaled by what the machine weighs. A heavy frame is
+    // slower to stop pushing as well as slower to start, which is most of
+    // what separates a siege frame from a drone by feel.
+    expect(drop).toBeCloseTo(SPOOL_PROFILE.forward.fall * core.spoolScale / 60, 4);
+  });
+
+  it('and how fast it spools is what the machine weighs', () => {
+    // The profile used to be a fixed constant, so a two-hundred-tonne frame
+    // reached full thrust in the same fraction of a second as a four-tonne
+    // drone — mass only changed the number it eventually arrived at.
+    const light = new InertiaCore({ ...STATS, weightClass: 0 });
+    const heavy = new InertiaCore({ ...STATS, weightClass: 1 });
+    expect(heavy.spoolScale).toBeLessThan(light.spoolScale * 0.6);
+
+    const upTo = (c, want) => {
+      for (let i = 0; i < 600; i++) {
+        c.spoolTo(V(0, 0, 1), 1 / 60);
+        if (c.spool.z >= want) return i / 60;
+      }
+      return 99;
+    };
+    expect(upTo(heavy, 0.9), 'the heavy one takes longer to get going')
+      .toBeGreaterThan(upTo(light, 0.9) * 1.5);
   });
 
   it('reports actual output, not the command', () => {

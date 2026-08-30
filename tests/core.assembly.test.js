@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import * as THREE from 'three';
 import {
   Assembly, computeStats, gaitFor, countLimbs, PRESETS,
+  PRESET_LIST, SIZE_CLASSES, presetsOfSize,
   defaultMount, faceAnchor, boneAnchor, alignYToFace, _resetIds,
 } from '../src/core/Assembly.js';
 import {
@@ -1124,6 +1125,43 @@ describe('which way a circle lies', () => {
     const roller = a.addEquipOnFace(a.rootId, 2, EQUIP.ROLLING, {});
     expect(roller.ringPlane).toBe(null);
     expect(a.setEquipRingPlane(roller.id, 'pitch')).toBe(false);
+  });
+});
+
+describe('the size classes are facts, not labels', () => {
+  it('has twenty machines across five classes', () => {
+    expect(PRESET_LIST).toHaveLength(20);
+    for (const size of SIZE_CLASSES) {
+      expect(presetsOfSize(size).length, `${size} has some`).toBeGreaterThanOrEqual(3);
+    }
+    // Every id unique, and every one actually in a listed class.
+    expect(new Set(PRESET_LIST.map((p) => p.id)).size).toBe(20);
+    for (const p of PRESET_LIST) expect(SIZE_CLASSES).toContain(p.size);
+  });
+
+  it('no class overlaps the one below it, by mass', () => {
+    // A class that overlaps its neighbour is a label rather than a fact —
+    // and a run that escalates by size would then be escalating by nothing.
+    let heaviestBelow = 0;
+    for (const size of SIZE_CLASSES) {
+      const masses = presetsOfSize(size).map((id) => computeStats(PRESETS[id].build()).mass);
+      expect(Math.min(...masses), `the lightest ${size} outweighs everything below it`)
+        .toBeGreaterThan(heaviestBelow);
+      heaviestBelow = Math.max(...masses);
+    }
+  });
+
+  it('spans a real range: the biggest is orders above the smallest', () => {
+    const masses = PRESET_LIST.map((p) => computeStats(p.build()).mass);
+    expect(Math.max(...masses)).toBeGreaterThan(Math.min(...masses) * 40);
+  });
+
+  it('every one of them is armed and can dash', () => {
+    for (const p of PRESET_LIST) {
+      const st = computeStats(p.build());
+      expect(st.weapons.length, `${p.id} comes armed`).toBeGreaterThan(0);
+      expect(st.dashBonus, `${p.id} carries a boost plate`).toBeGreaterThan(0);
+    }
   });
 });
 

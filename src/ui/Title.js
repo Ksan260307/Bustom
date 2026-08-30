@@ -1,5 +1,6 @@
 import { h } from './dom.js';
 import { onDesktop, quitGame, toggleFullscreen, steamStatus } from '../platform/desktop.js';
+import { DIFFICULTY_ORDER, SOLO_STAGES, getDifficulty } from '../game/SoloRun.js';
 
 // ============================================================
 //  The title screen and the result screen.
@@ -71,31 +72,41 @@ export class TitleScreen {
       {
         id: 'solo',
         label: 'ソロプレイ',
-        note: '押し寄せる敵をウェーブで迎え撃つ',
+        // The setting is part of the row rather than a screen of its own:
+        // it is one choice out of five, made once, and a whole page to make
+        // it would be a page you walk through without reading.
+        note: () => `${SOLO_STAGES.length} STAGES ・ ${getDifficulty(this.app.difficulty).label}`,
+        /** Left and right on this row change the setting instead of moving. */
+        cycle: (dir) => {
+          const at = DIFFICULTY_ORDER.indexOf(this.app.difficulty);
+          const n = DIFFICULTY_ORDER.length;
+          this.app.setDifficulty(DIFFICULTY_ORDER[(((at + dir) % n) + n) % n]);
+          this.render();
+        },
         run: () => this.app.startSolo(),
       },
       {
         id: 'edit',
         label: '機体を組む',
-        note: 'ブロックとボーンで自分の機体をつくる',
+        note: 'EDITOR',
         run: () => this.app.setMode('edit'),
       },
       {
         id: 'field',
         label: 'テストフィールド',
-        note: 'ルール無しの練習場。動きを確かめる',
+        note: 'FREE PLAY',
         run: () => this.app.setMode('field'),
       },
       {
         id: 'keys',
         label: 'キー設定',
-        note: '操作を割り当てなおす',
+        note: 'CONTROLS',
         run: () => this.app.ui.keyConfig.show(),
       },
       {
         id: 'help',
         label: '使い方',
-        note: 'はじめての人はこちら',
+        note: 'HELP',
         run: () => this.app.ui.help.show('start'),
       },
     ];
@@ -108,12 +119,12 @@ export class TitleScreen {
       h('div', { class: 'titleinner' },
         h('div', { class: 'titlebrand' },
           h('h1', {}, 'BLOSTOM'),
-          h('p', {}, 'ブロックで組んで、戦う'),
         ),
         this.listEl,
         this.bestEl,
         h('div', { class: 'titlefoot' },
           h('span', {}, h('kbd', {}, '↑'), h('kbd', {}, '↓'), ' 選択'),
+          h('span', {}, h('kbd', {}, '←'), h('kbd', {}, '→'), ' 難易度'),
           h('span', {}, h('kbd', {}, 'Enter'), ' 決定'),
           h('span', {}, h('kbd', {}, 'F11'), ' 全画面'),
           h('span', {}, h('kbd', {}, 'F1'), ' 使い方'),
@@ -137,14 +148,14 @@ export class TitleScreen {
     const extra = [{
       id: 'fullscreen',
       label: 'フルスクリーン',
-      note: '画面いっぱいに表示する（F11）',
+      note: 'F11',
       run: () => { toggleFullscreen(); },
     }];
     if (onDesktop()) {
       extra.push({
         id: 'quit',
         label: 'ゲームを終了',
-        note: 'ウインドウを閉じてゲームを終わる',
+        note: 'EXIT',
         run: () => quitGame(),
       });
     }
@@ -211,7 +222,16 @@ export class TitleScreen {
 
     if (e.code === 'ArrowUp' || e.code === 'KeyW') { take(); this.move(-1); }
     else if (e.code === 'ArrowDown' || e.code === 'KeyS') { take(); this.move(1); }
+    else if (e.code === 'ArrowLeft' || e.code === 'KeyA') { take(); this._cycle(-1); }
+    else if (e.code === 'ArrowRight' || e.code === 'KeyD') { take(); this._cycle(1); }
     else if (e.code === 'Enter' || e.code === 'Space') { take(); this.choose(); }
+  }
+
+  /** Left / right on a row that offers a choice. */
+  _cycle(dir) {
+    const item = this.items[this.index];
+    if (item?.cycle) item.cycle(dir);
+    return this;
   }
 
   render() {
@@ -221,7 +241,10 @@ export class TitleScreen {
       onMouseEnter: () => this.highlight(i),
     },
       h('span', { class: 'ti-label' }, item.label),
-      h('span', { class: 'ti-note' }, item.note),
+      h('span', { class: 'ti-note' }, typeof item.note === 'function' ? item.note() : item.note),
+      // Only where there is something to turn. An arrow on every row would
+      // promise a choice that four of them do not have.
+      item.cycle ? h('span', { class: 'ti-cycle' }, '◂ ▸') : null,
     )));
 
     this._showPlatform();
@@ -295,6 +318,12 @@ export class ResultScreen {
     const isBest = recordBest(result);
     this.recordEl.classList.toggle('hidden', !isBest);
     this.rowsEl.replaceChildren(
+      // How far up the ladder, first: a run is a walk through the places
+      // now, and that is what the player was trying to do.
+      this._row('難易度', result.difficultyLabel ?? '—'),
+      this._row('到達ステージ', result.cleared
+        ? `ALL CLEAR (${result.stages})`
+        : `${result.stage} / ${result.stages}`),
       this._row('到達ウェーブ', String(result.wave)),
       this._row('撃破', String(result.kills)),
       this._row('生存時間', clock(result.time)),

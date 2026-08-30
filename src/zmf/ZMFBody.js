@@ -6,7 +6,7 @@ import { AngularDynamics } from './AngularDynamics.js';
 import { AssistController } from './AssistController.js';
 import { RelativeSpaceMapper } from './RelativeSpace.js';
 import { EnvironmentInterference } from './EnvInterference.js';
-import { STAGGER, LANDING } from '../core/constants.js';
+import { STAGGER, LANDING, DRIFT, FALL, AIR, HOVER } from '../core/constants.js';
 
 // ============================================================
 //  ZMF §9 : the update flow, assembled.
@@ -24,6 +24,8 @@ import { STAGGER, LANDING } from '../core/constants.js';
 
 const _worldCmd = new THREE.Vector3();
 const _thrust = new THREE.Vector3();
+/** Scratch for the body-local thrust command before it goes to world space. */
+const _air = new THREE.Vector3();
 const _external = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
 const _flat = new THREE.Vector3();
@@ -115,8 +117,12 @@ export class ZMFBody {
     // Leg count sets how the machine relates to the ground.
     const legs = stats.legs;
     this.grip = legs === 0 ? 0.35 : legs === 1 ? 0.8 : legs === 2 ? 1.0 : 1.25;
-    this.jumpPower = legs === 0 ? 6 : legs === 1 ? 15.5 : legs === 2 ? 12 : 9.5;
-    this.groundSpeedCap = 8 + legs * 2.2 + stats.agility * 9;
+    // How much a leg is worth depends on what the leg is made of. Counting
+    // them and stopping there meant a machine on wire walked as well as one
+    // on tree trunks, which is why bone thickness only ever cost weight.
+    const drive = stats.legDrive ?? 1;
+    this.jumpPower = (legs === 0 ? 6 : legs === 1 ? 15.5 : legs === 2 ? 12 : 9.5) * drive;
+    this.groundSpeedCap = 8 + legs * 2.2 * drive + stats.agility * 9;
     this.airSpeedCap = 16 + stats.agility * 24;
     // BOOST plates make a dash bite harder. They stack, deliberately gently.
     // Hard and immediate. A boost you have to wait for is a boost you stop
@@ -216,7 +222,12 @@ export class ZMFBody {
    */
   applyStagger(power, dir) {
     if (!(power > 0)) return this;
-    const a = clamp01(power);
+    // Weight is what a blow has to move. The same shell knocked a
+    // two-hundred-tonne siege frame exactly as far off its feet as a
+    // four-tonne drone, which is the sort of thing you only notice as
+    // "everything feels the same" rather than as a bug.
+    const braced = power / (1 + (this.stats.weightClass ?? 0) * STAGGER.brace);
+    const a = clamp01(braced);
     // Horizontal to begin with. A machine shot from above should stumble,
     // not be driven into the floor, and one shot from below should stumble
     // rather than take off — the knock is what puts it off its feet, and
@@ -234,7 +245,7 @@ export class ZMFBody {
     // everything the machine does from here is decided by where it was
     // pointed when it was hit.
     const over = clamp01(
-      (power - STAGGER.launchAt) / (STAGGER.launchFull - STAGGER.launchAt),
+      (braced - STAGGER.launchAt) / (STAGGER.launchFull - STAGGER.launchAt),
     );
     this.knockback.copy(_shove).multiplyScalar(STAGGER.knockback * a + STAGGER.launchPush * over);
     if (over > 0) {
@@ -255,7 +266,26 @@ export class ZMFBody {
    *
    * @param {number} fall  downward speed at the moment of contact, m/s
    */
+  /**
+   * What a landing costs in forward speed.
+   *
+   * A machine used to touch down at any speed and carry every bit of it
+   * through, so a drop from a rooftop was a free way to cross ground — the
+   * landing played and nothing about it was true. Heavy machines lose more,
+   * because planting two hundred tonnes is not something you do while still
+   * travelling.
+   */
+  _plant(fall) {
+    const hard = clamp01((fall - LANDING.speed) / (LANDING.speed * 2));
+    if (hard <= 0) return this;
+    const keep = 1 - hard * LANDING.scrub * (0.4 + (this.stats.weightClass ?? 0) * 0.6);
+    this.inertia.velocity.x *= keep;
+    this.inertia.velocity.z *= keep;
+    return this;
+  }
+
   _touchdown(fall) {
+    this._plant(fall);
     if (!(fall > LANDING.speed)) return 0;
     const hard = clamp01((fall - LANDING.speed) / (LANDING.hard - LANDING.speed));
     const heft = clamp01(
@@ -361,7 +391,21 @@ export class ZMFBody {
     // Lights fast, dies slowly: a thruster that snaps off looks switched, not spent.
     this.boostOutput = damp(this.boostOutput, boosting ? 1 : 0, boosting ? 0.018 : 0.09, dt);
     const burn = this.hover * 0.30 + this.inertia.thrustOutput * 0.11 + (boosting ? 0.34 : 0);
-    const regen = groundedNow > 0.5 ? 0.55 : 0.10;
+    /**
+     * A thruster that is burning is not a thruster that is charging.
+     *
+     * Standing on the ground used to refill at 0.55 a second against a
+     * maximum burn of 0.45, so ON THE GROUND THE TANK NEVER MOVED — you
+     * could hold the boost down for ever and the gauge would not budge.
+     * Energy was a flight-only resource that looked like a general one,
+     * which is worse than not having it: the bar was on screen the whole
+     * time saying nothing.
+     *
+     * Cutting regeneration while boosting is the whole fix. Everything else
+     * keeps the old numbers: walk around and you recover quickly, which is
+     * what makes spending it a decision rather than a countdown.
+     */
+    const regen = boosting ? 0.05 : (groundedNow > 0.5 ? 0.55 : 0.10);
     // Both sides divided by the tank: a bigger one lasts longer AND takes
     // longer to fill, which is what makes it a choice rather than a bonus.
     this.energy = clamp01(this.energy + (regen - burn) / this.energyCapacity * dt);
@@ -371,16 +415,21 @@ export class ZMFBody {
     // A dash is an impulse, not a thrust command. Routing it through the
     // spool would let the deliberately sluggish backward profile swallow a
     // backward dash entirely, and a dash you cannot feel is not a dash.
-    if (input.dash && this.dashCooldown <= 0 && this.energy > 0.08) {
+    // A dash costs no energy. Its own cooldown is what limits it, and
+    // charging for it too meant a machine low on energy could neither boost
+    // nor dodge — the two things you need most at exactly that moment.
+    if (input.dash && this.dashCooldown <= 0) {
       _tmp.copy(input.dash.dir).applyQuaternion(this.angular.quaternion);
       if (groundedNow > 0.5) _tmp.y = 0;
       if (_tmp.lengthSq() > 1e-6) {
         // Backwards is a fraction weaker, but still unmistakably a dash.
         const back = input.dash.dir.z < -0.5 ? 0.9 : 1;
         this.inertia.applyImpulse(_tmp.normalize().multiplyScalar(this.dashSpeed * back));
-        this.dashCooldown = 0.26;
+        // How soon it can do that again. Weight decides: a siege frame
+        // that could sidestep as often as a drone is a siege frame with no
+        // weakness worth exploiting.
+        this.dashCooldown = 0.26 * (1 + (this.stats.weightClass ?? 0) * 0.9);
         this.dashFlash = 1;
-        this.energy = clamp01(this.energy - 0.12 / this.energyCapacity);
         input.dash = null;
       }
     }
@@ -415,7 +464,77 @@ export class ZMFBody {
       this.inertia.velocity.multiplyScalar(1 - clamp01(over * 3.2 * dt));
     }
 
+    // Hovering is not skating.
+    //
+    // A machine off the ground has no friction, so a light hover build took
+    // 2.1 seconds to come to a stop — LONGER than a two-hundred-tonne frame
+    // on its feet, which is exactly backwards. Thrusters holding a machine
+    // up can hold it still too, and only while nothing is being asked of
+    // them, so a deliberate drift still drifts.
+    if (this.hover > 0.3 && this.env.grounded < 0.5) {
+      // Only while nothing is being asked of them. Under thrust this has to
+      // be as close to nothing as makes no difference: at a tenth it was
+      // still scrubbing 40% of a two-second climb's speed, which showed up
+      // as the chassis refusing to pitch with the aim.
+      const idle = this.inertia.thrustOutput < 0.15 ? 1 : 0.02;
+      const hold = HOVER.hold * this.hover * idle * (1 - (this.stats.weightClass ?? 0) * 0.6);
+      this.inertia.velocity.x *= 1 - clamp01(hold * dt);
+      this.inertia.velocity.z *= 1 - clamp01(hold * dt);
+    }
+
+    // A fall has to read as a fall.
+    //
+    // The drag model is tuned for thrust, and applied to a free drop it
+    // pinned the descent at 13.5 m/s — a twenty-metre machine took eight
+    // seconds to come down from a rooftop and never looked like it was
+    // falling. Below the cap nothing changes; past it the machine stops
+    // being slowed by air it is not flying through.
+    const vy = this.inertia.velocity.y;
+    if (vy < -FALL.softFrom && this.env.grounded < 0.5) {
+      const over = clamp01((-vy - FALL.softFrom) / (FALL.terminal - FALL.softFrom));
+      this.inertia.velocity.y -= FALL.pull * over * dt;
+    }
+
+    // Somewhere with no gravity, letting go of the stick has to mean
+    // something.
+    //
+    // Every other arena stops a machine with the floor: you come down, you
+    // land, you are still. Weightless there is no floor in the way, so
+    // without this a tap of the thruster is a one-way trip to the ceiling
+    // and the controls stop being controls. This is the machine holding
+    // itself steady — which is what a thruster does when it is not being
+    // asked for anything — so it fades out the moment anything IS asked.
+    if (this.world.gravity <= 0) {
+      const asking = input.move.lengthSq() > 1e-4 || wantsLift || wantsDown || boosting;
+      const hold = asking ? DRIFT.thrusting : DRIFT.idle;
+      this.inertia.velocity.multiplyScalar(1 - clamp01(hold * dt));
+    }
+
     return this;
+  }
+
+  /**
+   * Off the ground you have thrusters, not feet.
+   *
+   * Air lateral authority was uncapped, so strafing while hovering reached
+   * 21 m/s against 11 on the ground — flying sideways was better than
+   * running sideways at everything, and the floor became a place you left
+   * as soon as possible and never came back to. Cutting sideways and
+   * backward push in the air leaves flight what it ought to be: better at
+   * going up and over, worse at fencing.
+   *
+   * Applied to the SPOOL, in the machine's own axes. Doing it after the
+   * command has been turned into world space would only be "sideways" while
+   * the machine happened to be facing down +Z.
+   *
+   * @param {THREE.Vector3} sp body-local thrust command, modified in place
+   */
+  _airCut(sp, grounded) {
+    if (grounded >= 0.5) return sp;
+    const keep = 1 - (1 - grounded) * AIR.lateral;
+    sp.x *= keep;
+    if (sp.z < 0) sp.z *= keep;
+    return sp;
   }
 
   _substep(input, dt, boosting, wantsLift, wantsDown) {
@@ -474,14 +593,17 @@ export class ZMFBody {
       // into vertical thrust, so tracking a target above you would quietly
       // fly the machine off the ground. Use the yaw-only frame instead, and
       // let the deliberate vertical channel be the only source of lift.
-      const sp = this.inertia.spool;
+      const sp = _air.copy(this.inertia.spool);
+      this._airCut(sp, grounded);
       _thrust.set(
         _flat.x * sp.z + rightX * sp.x,
         sp.y,
         _flat.z * sp.z + rightZ * sp.x,
       );
     } else {
-      _thrust.copy(this.inertia.spool).applyQuaternion(this.angular.quaternion);
+      _thrust.copy(_air.copy(this.inertia.spool));
+      this._airCut(_thrust, grounded);
+      _thrust.applyQuaternion(this.angular.quaternion);
     }
     // Legs push against the floor: more of them means more traction, which
     // is where a walker's ground speed advantage over a hover build comes from.

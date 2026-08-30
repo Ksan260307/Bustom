@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { clamp, clamp01, damp, lerp, smoothstep } from '../zmf/math.js';
-import { SLIDE } from '../core/constants.js';
+import { SLIDE, CHAIN_FALLOFF_DEFAULT } from '../core/constants.js';
 
 // ============================================================
 //  Procedural animation driven by bone ATTRIBUTE.
@@ -27,6 +27,23 @@ const _axis = new THREE.Vector3();
 const _axis2 = new THREE.Vector3();
 const _t2 = new THREE.Vector2();
 const _push = new THREE.Vector3();
+const _foot = new THREE.Vector3();
+const _pivot = new THREE.Vector3();
+const _armv = new THREE.Vector3();
+const _paxis = new THREE.Vector3();
+const _rate = new THREE.Vector3();
+const _pq = new THREE.Quaternion();
+const _rest = new THREE.Quaternion();
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+
+/**
+ * Standing on what is there rather than on what the middle of the machine
+ * is over. `reach` is how far a foot will stretch for a surface below it —
+ * beyond that it is a ledge, and a leg does not reach down a ledge.
+ */
+const PLANT = { reach: 1.1, ease: 0.09, maxAngle: 0.45 };
+// Scratch for reading an angle's direction back off a quaternion.
+const _lv = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 const BODY_X = new THREE.Vector3(1, 0, 0);
 const BODY_Y = new THREE.Vector3(0, 1, 0);
@@ -54,12 +71,108 @@ const FLINCH = { pitch: 0.34, roll: 0.26, drop: 0.11, sprawl: 2.6 };
  */
 const BRACE = { bend: 40, drop: 0.34 };
 
-/** Limit a rotation to `maxDeg` away from rest. */
-function limitQuat(q, maxDeg) {
+/**
+ * Hold a posed joint inside the travel its bone allows.
+ *
+ * `floorDeg` is a minimum the caller insists on — an aiming arm needs room
+ * whatever the bone was set to. Which of the two limits applies is decided
+ * by which way the joint has actually turned, so a knee can bend 130 forward
+ * and 4 back; with `limitBack` unset both directions are the same number and
+ * this behaves exactly as one cone always did.
+ */
+function limitQuat(q, part, floorDeg = 0, node = null) {
+  // A shot-up joint does not open as far as an intact one.
+  const wear = 1 - (node?.wear ?? 0) * 0.5;
+  const fwd = Math.max(part.limit ?? 70, floorDeg) * wear;
+  const back = ((part.limitBack ?? null) === null
+    ? Math.max(part.limit ?? 70, floorDeg)
+    : Math.max(part.limitBack, floorDeg)) * wear;
+
+  // A hinge turns on one axis and no other. Everything the animator asked
+  // for that was not about this axis is dropped here rather than being
+  // limited, because a knee that wanders sideways by 5 degrees is not a knee
+  // that has been limited — it is a knee that is broken.
+  if (part.hinge && node) {
+    const axis = Animator.spinAxisOf(node);
+    if (axis) {
+      const angle = 2 * Math.atan2(_lv.set(q.x, q.y, q.z).dot(axis), q.w);
+      q.setFromAxisAngle(axis, angle);
+    }
+  }
+
+  let maxDeg = fwd;
+  if (back !== fwd && node) {
+    // sin(t/2) about the axis, times cos(t/2): negative exactly when the
+    // joint has swung the other way.
+    const axis = Animator.spinAxisOf(node);
+    maxDeg = axis && _lv.set(q.x, q.y, q.z).dot(axis) * q.w < 0 ? back : fwd;
+  }
+
   const max = maxDeg * DEG;
   const angle = 2 * Math.acos(clamp(Math.abs(q.w), -1, 1));
-  if (angle <= max) return q;
-  return q.slerp(_q2.identity(), 1 - max / angle);
+  if (angle <= max || max <= 0) return angle <= max ? q : q.slerp(_q2.identity(), 1);
+  // A rotation is allowed round; a hinge is not.
+  if (part.limitMode === 'wrap') return q;
+  // Sprung: the overshoot comes back off the stop instead of parking on it.
+  const keep = part.limitMode === 'bounce'
+    ? Math.max(0, max - Math.min(angle - max, max))
+    : max;
+  return q.slerp(_q2.identity(), 1 - keep / angle);
+}
+
+/**
+ * A joint's travel, which is not the same in both directions.
+ *
+ * Every joint used to be one cone: as far forward as back. A knee bends one
+ * way, and there was no way to say so — so every knee could hyperextend
+ * exactly as far as it could bend, which is most of why a leg chain looked
+ * like a rope rather than like a leg.
+ *
+ * The mode decides what happens at the end. `clamp` stops dead, which is a
+ * hard stop; `bounce` reflects the overshoot back, which is a sprung one;
+ * `wrap` lets it carry round, for anything that is really a rotation.
+ *
+ * @param {number} angle signed radians about the bone's axis
+ * @param {object} part the bone, for its limits and mode
+ */
+export function limitAngle(angle, part, wear = 0) {
+  const worn = 1 - clamp01(wear) * 0.5;
+  const fwd = (part.limit ?? 70) * worn * DEG;
+  const back = ((part.limitBack ?? null) === null
+    ? (part.limit ?? 70) : part.limitBack) * worn * DEG;
+  const hi = angle >= 0 ? fwd : back;
+  if (hi <= 0) return 0;
+  const over = Math.abs(angle) - hi;
+  if (over <= 0) return angle;
+  const sign = Math.sign(angle);
+  switch (part.limitMode) {
+    // Reflected, and only as far as the stop again: a joint that bounces
+    // past its own end stop is a joint with no end stop.
+    case 'bounce': return sign * (hi - Math.min(over, hi));
+    case 'wrap': return angle;
+    default: return sign * hi;
+  }
+}
+
+/**
+ * Value noise: smooth, repeatable, and nothing like Math.random().
+ *
+ * A joint that jitters has to jitter the SAME way every time the machine is
+ * built, or a replay of a fight is a different fight. This is a hash of the
+ * integer part blended across the fraction, which costs two multiplies and
+ * is deterministic for ever.
+ */
+function noiseAt(t) {
+  const i = Math.floor(t);
+  const f = t - i;
+  const hash = (n) => {
+    const x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+    return (x - Math.floor(x)) * 2 - 1;
+  };
+  const a = hash(i);
+  const b = hash(i + 1);
+  const k = f * f * (3 - 2 * f);          // smoothstep, so it has no corners
+  return a + (b - a) * k;
 }
 
 /** -1..1 for one cycle of `t` turns. */
@@ -69,6 +182,10 @@ export function waveAt(wave, t) {
     case 'tri': return 1 - 4 * Math.abs(u - 0.5);
     case 'square': return u < 0.5 ? 1 : -1;
     case 'saw': return u * 2 - 1;
+    // Sharp out, slow back. A recoil, a heartbeat, a piston — none of which
+    // a sine can do, because a sine spends as long arriving as leaving.
+    case 'pulse': return 2 * Math.exp(-u * 5.5) - 1;
+    case 'noise': return noiseAt(t * 3.1);
     default: return Math.sin(u * TAU);
   }
 }
@@ -88,6 +205,20 @@ export class Animator {
     /** Which way that skate is going, +1 or -1 in body space. */
     this.slideDir = 1;
     this.aimBlend = 0;
+    /**
+     * Things that HAPPEN, held for a moment so a bone can react to them.
+     *
+     * A drive source has to be a number a bone can read every frame, but
+     * firing, landing, being hit and swapping weapons are all instants.
+     * Each of these is set to 1 by the event and decays on its own, so a
+     * bone driven by one fires and settles rather than being held open.
+     */
+    this.firePulse = 0;
+    this.landPulse = 0;
+    this.hurtPulse = 0;
+    this.swapPulse = 0;
+    /** Which weapon is live, so weapon bones know whether they are up. */
+    this.activeWeapon = null;
     /**
      * Direction of travel in the body's own horizontal plane, as (x, z).
      * Legs step along THIS, not along the nose — strafing should put the feet
@@ -121,12 +252,23 @@ export class Animator {
     this.time = 0;
     this.gaitPhase = 0;
     this.gaitFreq = 0;
+    // A weapon bone starts wherever the weapon it is bound to says it
+    // should be, rather than swinging into place on the spawn pad.
+    for (const node of this.rig.weaponBones ?? []) {
+      node.deployT = undefined;
+      node.deployV = 0;
+    }
     this.hopCharge = 0;
     this.bodyBob = 0;
     this.bodyLean.set(0, 0);
     this.slide = 0;
     this.slideDir = 1;
     this.aimBlend = 0;
+    this.firePulse = 0;
+    this.landPulse = 0;
+    this.hurtPulse = 0;
+    this.swapPulse = 0;
+    this.activeWeapon = null;
     this.travel.set(0, 1);
     this.travelBlend = 0;
     this.localVel.set(0, 0, 0);
@@ -251,6 +393,12 @@ export class Animator {
     /** A FLOAT plate keeps the feet off the floor, so nothing walks. */
     const floating = (this.stats.hoverHeight ?? 0) > 0 && this.rig.limbs.length > 0;
     this.aimBlend = damp(this.aimBlend, s.locked ?? 0, 0.11, dt);
+
+    // ---- the things that happen
+    //
+    // Set by the event, decayed here. Landing arrives as a speed, so it is
+    // scaled against what counts as a hard one rather than used raw.
+    this._pulses(s, dt);
 
     // ---- gait clock: stride rate follows real ground speed
     const legs = Math.max(1, this.rig.limbs.length);
@@ -377,6 +525,9 @@ export class Animator {
     this._arms(s, dt);
     this._faces(s, dt);
     this._customs(s, dt);
+    this._weapons(s, dt);
+    // Last, because a linked bone copies whatever its partner ended up at.
+    this._links();
     this._commit(dt);
   }
 
@@ -399,7 +550,7 @@ export class Animator {
         const bend = BRACE.bend * DEG * load * (i % 2 === 0 ? 1 : -1.35) * mirror;
         _q.setFromAxisAngle(this._strideAxis(node), bend * Animator.gainOf(node));
         node.target.multiply(_q);
-        limitQuat(node.target, node.part.limit);
+        limitQuat(node.target, node.part, 0, node);
       });
     }
   }
@@ -413,7 +564,16 @@ export class Animator {
    * so the answer is just the same blend of the two bound axes.
    */
   /** How much of its attribute's motion this bone takes. */
-  static gainOf(node) { return node.part.gain ?? 1; }
+  /**
+   * How hard this bone drives, with what has been shot off it taken away.
+   *
+   * `wear` is put there by the machine when a round lands on the joint. A
+   * worn hip still walks, it just walks worse — which is the whole point of
+   * shooting at one.
+   */
+  static gainOf(node) {
+    return (node.part.gain ?? 1) * (1 - (node.wear ?? 0) * 0.75);
+  }
 
   /** Where this bone sits in the gait cycle, its own lag included. */
   _phaseFor(node, extra = 0) {
@@ -450,7 +610,7 @@ export class Animator {
         this._strideAxis(node),
         (bend + (dir + sway) * (1 - t)) * Animator.gainOf(node),
       );
-      node.target.copy(limitQuat(_q, node.part.limit));
+      node.target.copy(limitQuat(_q, node.part, 0, node));
     });
   }
 
@@ -494,7 +654,7 @@ export class Animator {
           angle = (-stride * amp * 0.35 + lift * kneeAmp * 0.4) * mirror;
         }
         _q.setFromAxisAngle(this._strideAxis(node), angle * walking * Animator.gainOf(node));
-        node.target.copy(limitQuat(_q, node.part.limit));
+        node.target.copy(limitQuat(_q, node.part, 0, node));
 
         // Cant the whole leg over onto the side it is being dragged from.
         // A positive turn about the splay axis takes the tip toward -X, so
@@ -507,7 +667,7 @@ export class Animator {
             SLIDE.tilt * DEG * skate * this.slideDir * taper * Animator.gainOf(node),
           );
           node.target.multiply(_q);
-          limitQuat(node.target, node.part.limit);
+          limitQuat(node.target, node.part, 0, node);
         }
       });
     }
@@ -561,7 +721,7 @@ export class Animator {
           );
           _q.multiply(_q2);
         }
-        node.target.copy(limitQuat(_q, node.part.limit));
+        node.target.copy(limitQuat(_q, node.part, 0, node));
       });
     }
   }
@@ -635,7 +795,7 @@ export class Animator {
         _q2.setFromAxisAngle(node.axisStride, (9 + mag * 13) * DEG * g);
         _q.multiply(_q2);
       }
-      node.target.copy(limitQuat(_q, node.part.limit));
+      node.target.copy(limitQuat(_q, node.part, 0, node));
     });
   }
 
@@ -676,7 +836,7 @@ export class Animator {
         // Drawn in toward the centre line, plus whatever the sway asks for.
         _q2.setFromAxisAngle(node.axisSplay, (side * 5 * DEG - sway.x * 20 * DEG * follow) * g);
         _q.multiply(_q2);
-        node.target.copy(limitQuat(_q, Math.max(node.part.limit, 80)));
+        node.target.copy(limitQuat(_q, node.part, 80, node));
       });
     }
   }
@@ -713,7 +873,7 @@ export class Animator {
           (-fore * (16 + i * 13) * DEG - sway.y * 22 * DEG * follow + idle + mag * 5 * DEG) * g,
         );
         _q.multiply(_q2);
-        node.target.copy(limitQuat(_q, Math.max(node.part.limit, 110)));
+        node.target.copy(limitQuat(_q, node.part, 110, node));
       });
     }
   }
@@ -723,7 +883,7 @@ export class Animator {
     for (const node of this.rig.joints) {
       if (node.part.boneType !== 'leg') continue;
       _q.setFromAxisAngle(node.axisStride, Math.sin(this.time * 1.6 + node.restPos.x) * 5 * DEG);
-      node.target.copy(limitQuat(_q, node.part.limit));
+      node.target.copy(limitQuat(_q, node.part, 0, node));
     }
   }
 
@@ -752,7 +912,12 @@ export class Animator {
       // An arm hung off another arm is a forearm: it trails the shoulder and
       // takes less of the swing, or the limb bends twice as far as an arm can.
       const depth = node.chainDepth ?? 0;
-      const chainFalloff = depth === 0 ? 1 : 0.55 ** depth;
+      // How much of the shoulder's swing this link takes. It was 0.55 per
+      // link, hard-wired, which puts a third link at 0.166 — right for a
+      // forearm, useless for a tentacle where every segment takes nearly
+      // all of it.
+      const perLink = node.part.chain ?? CHAIN_FALLOFF_DEFAULT;
+      const chainFalloff = depth === 0 ? 1 : perLink ** depth;
       const chainLag = depth * 0.08;
       const p = this._phaseFor(node, phaseSide + chainLag);
       const swing = -Math.sin(p * TAU) * swingAmp * chainFalloff;
@@ -770,7 +935,7 @@ export class Animator {
         this._aimQuat(node, s.aimDir, s.bodyQ, _q2);
         _q.slerp(_q2, this.aimBlend);
       }
-      node.target.copy(limitQuat(_q, Math.max(node.part.limit, 95)));
+      node.target.copy(limitQuat(_q, node.part, 95, node));
     }
   }
 
@@ -790,21 +955,22 @@ export class Animator {
         this._aimQuat(node, s.aimDir, s.bodyQ, _q2);
         _q.slerp(_q2, this.aimBlend);
       }
-      node.target.copy(limitQuat(_q, Math.max(node.part.limit, 80)));
+      node.target.copy(limitQuat(_q, node.part, 80, node));
     }
   }
 
   _customs(s, dt) {
     for (const node of this.rig.customBones) {
       const c = node.part.custom ?? {};
-      const axis = c.axis === 'y' ? node.axisTwist : c.axis === 'z' ? node.axisLift : node.axisStride;
+      const axis = this._axisOf(node, c.axis);
       const drive = this._customDrive(c, s);
+      const gain = Animator.gainOf(node);
 
-      if ((c.wave ?? 'sine') === 'saw') {
+      if ((c.wave ?? 'sine') === 'saw' && !c.bounded) {
         // A continuous turn: the drive scales the SPEED, not the angle, so
         // easing off does not snap the joint back to where it started.
         node.spinPhase = (node.spinPhase ?? c.phase ?? 0)
-          + (c.freq ?? 1) * drive * Animator.gainOf(node) * dt;
+          + (c.freq ?? 1) * drive * gain * dt;
         _q.setFromAxisAngle(axis, node.spinPhase * TAU + (c.offset ?? 0) * DEG);
         node.target.copy(_q);          // no joint limit: it is a rotation
         continue;
@@ -812,14 +978,187 @@ export class Animator {
 
       // "Stride" locks the wave to the walk cycle instead of a free clock,
       // which is what a waist has to do: twist in time with the footfalls.
-      const t = c.source === 'stride'
+      const base = c.source === 'stride'
         ? this._phaseFor(node) * (c.freq ?? 1) + (c.phase ?? 0)
         : this.time * (c.freq ?? 1) + (c.phase ?? 0);
-      const angle = ((c.offset ?? 0)
-        + waveAt(c.wave, t) * (c.amp ?? 20) * drive * Animator.gainOf(node)) * DEG;
-      _q.setFromAxisAngle(axis, angle);
-      node.target.copy(limitQuat(_q, node.part.limit));
+
+      /**
+       * A second wave, laid over the first.
+       *
+       * One wave is either slow and wide or quick and small; it cannot be
+       * both, so "sways heavily while trembling" was not expressible at
+       * all. Zero amplitude costs nothing, which is the default.
+       */
+      let swing = waveAt(c.wave, base) * (c.amp ?? 20);
+      if (c.amp2) {
+        const t2 = c.source === 'stride'
+          ? this._phaseFor(node) * (c.freq2 ?? 4) + (c.phase ?? 0)
+          : this.time * (c.freq2 ?? 4) + (c.phase ?? 0);
+        swing += waveAt(c.wave2 ?? 'sine', t2) * c.amp2;
+      }
+
+      // The resting angle itself can move with the drive: a waist that
+      // leans forward the faster you go, rather than only twisting harder.
+      const rest = (c.offset ?? 0) + (c.offsetGain ?? 0) * drive * (c.amp ?? 20);
+      const angle = (rest + swing * drive * gain) * DEG;
+      _q.setFromAxisAngle(axis, limitAngle(angle, node.part, node.wear));
+      node.target.copy(_q);
     }
+  }
+
+  /**
+   * The things that HAPPEN, set by their event and decayed on their own.
+   *
+   * Landing arrives as a speed, so it is scaled against what counts as a
+   * hard one rather than used raw. A swap is noticed rather than announced:
+   * the weapon system already knows which plate is live, and comparing it to
+   * last frame is both cheaper and impossible to forget to call.
+   */
+  _pulses(s, dt) {
+    const decay = Math.pow(0.02, dt);
+    this.firePulse = Math.max(s.fired ? 1 : 0, this.firePulse * decay);
+    this.hurtPulse = Math.max(s.hurt ? clamp01(s.hurt) : 0, this.hurtPulse * decay);
+    this.landPulse = Math.max(clamp01((s.landing ?? 0) / 12), this.landPulse * decay);
+    const nowWeapon = s.activeWeapon ?? null;
+    if (nowWeapon !== this.activeWeapon) {
+      this.swapPulse = 1;
+      this.activeWeapon = nowWeapon;
+    } else {
+      this.swapPulse *= decay;
+    }
+    return this;
+  }
+
+  /** Which of the bone's three axes a setting names. */
+  _axisOf(node, axis) {
+    return axis === 'y' ? node.axisTwist : axis === 'z' ? node.axisLift : node.axisStride;
+  }
+
+  /**
+   * What a custom bone is listening to.
+   *
+   * The first six are all about MOVING. Nothing here used to be about
+   * fighting, which is why a machine looked the same whether it was full of
+   * holes and out of ammunition or fresh off the bench.
+   */
+  /**
+   * Weapon bones: the stance a machine takes for the gun in its hands.
+   *
+   * "Only moves when you switch weapons" read literally is a one-shot
+   * gesture, but a gesture that plays and ends says nothing about WHICH
+   * weapon you ended up holding. A pose does both: the bone is deployed
+   * while its weapon is live and stowed otherwise, so it moves exactly at
+   * the switch and then holds — and the machine's silhouette tells you what
+   * it is carrying without a glance at the rack.
+   *
+   * Bound to a weapon TYPE, not to a rack index. An index shifts the moment
+   * another plate is fitted, which would silently change what every weapon
+   * bone on the machine means; "the arm that raises for the sniper" stays
+   * that arm for ever.
+   */
+  _weapons(s, dt) {
+    for (const node of this.rig.weaponBones) {
+      const w = node.part.weapon ?? {};
+      const live = s.activeWeapon ?? null;
+      const want = live !== null && (w.when === 'any' || w.when === live) ? 1 : 0;
+
+      // This is the whole of "only moves when you switch". The target is 0
+      // or 1 and nothing else, so between switches it is already there and
+      // nothing moves. No state machine, no timers.
+      //
+      // A machine that spawns holding a rifle starts with the rifle pose,
+      // rather than swinging into it in front of everyone.
+      if (node.deployT === undefined) {
+        node.deployT = want;
+        node.deployV = 0;
+      }
+
+      /**
+       * A spring, not a fade.
+       *
+       * `overshoot` is how far under-damped it is: at 0 the bone arrives and
+       * stops, and the further up it goes the more it carries past its mark
+       * and comes back. A fade cannot do that at all — it can only ever
+       * approach from one side, which is why a hard-swung arm read as a
+       * slow one however the numbers were set.
+       */
+      const wn = clamp(w.speed ?? 3.2, 0.1, 12);
+      const zeta = 1 - clamp(w.overshoot ?? 0, 0, 0.9);
+      // A distant machine is posed every third step and hands the animator
+      // all three at once. A spring integrated over a step that long comes
+      // apart, so it is stepped at a length it can survive.
+      const h = Math.min(dt, 1 / 30);
+      node.deployV = (node.deployV ?? 0)
+        + ((want - node.deployT) * wn * wn - 2 * zeta * wn * (node.deployV ?? 0)) * h;
+      node.deployT += node.deployV * h;
+
+      const angle = lerp(w.stowed ?? 0, w.deployed ?? -60, node.deployT)
+        * Animator.gainOf(node) * DEG;
+      _q.setFromAxisAngle(this._axisOf(node, w.axis), limitAngle(angle, node.part, node.wear));
+      node.target.copy(_q);
+    }
+  }
+
+  /**
+   * Bones that copy another bone, as a fraction of its angle.
+   *
+   * A mechanical linkage: armour that opens as the joint under it bends, a
+   * counterweight that swings the other way. Run after everything else,
+   * because it reads the angle its partner actually ended up at rather than
+   * the one it was asked for — a linkage driven by an intention rather than
+   * by a result is not a linkage.
+   */
+  _links() {
+    for (const node of this.rig.joints) {
+      const link = node.part.link;
+      if (!link?.to) continue;
+      const from = this.rig.nodes.get(link.to);
+      if (!from?.target) continue;
+      // Its partner's swing, signed about the axis that partner turns on.
+      // Read off the quaternion rather than remembered, because whichever
+      // routine posed that bone is none of this one's business.
+      if (!from.axisStride) continue;
+      _v.set(from.target.x, from.target.y, from.target.z);
+      const axis = Animator.spinAxisOf(from);
+      const angle = 2 * Math.atan2(_v.dot(axis), from.target.w);
+      _q.setFromAxisAngle(
+        node.axisStride, limitAngle(angle * (link.ratio ?? 1), node.part, node.wear),
+      );
+      node.target.copy(_q);
+    }
+  }
+
+  /**
+   * How hard a joint chases the pose it has been given, this frame.
+   *
+   * Every joint used to be slerped at one global rate, so a two-tonne arm
+   * and a whip aerial arrived at exactly the same speed. A bone can now name
+   * its own half-life, and a damping under 1 lets it overshoot and come
+   * back — which is most of what makes a light part read as light.
+   */
+  /**
+   * The axis a bone is actually turning about, for reading its angle back.
+   *
+   * A custom or weapon bone names its own axis; everything else swings on
+   * its stride axis. Guessing wrong flips the sign of a linkage, which reads
+   * as the linked part moving the opposite way to the joint driving it.
+   */
+  static spinAxisOf(node) {
+    const named = node.part.boneType === 'weapon'
+      ? node.part.weapon?.axis
+      : node.part.boneType === 'custom' ? node.part.custom?.axis : null;
+    if (named === 'y') return node.axisTwist;
+    if (named === 'z') return node.axisLift;
+    return node.axisStride;
+  }
+
+  static followOf(node, dt, base) {
+    const f = node.part.follow ?? {};
+    if (!f.ease) return base;
+    const k = clamp01(1 - Math.pow(0.001, dt / Math.max(0.01, f.ease)));
+    // Under-damped: carry a little past, then settle. Never past 1.6, or
+    // the joint oscillates instead of arriving.
+    return clamp(k * (f.damping >= 1 ? 1 : (2 - f.damping)), 0, 1.6);
   }
 
   _customDrive(c, s) {
@@ -829,6 +1168,17 @@ export class Animator {
       case 'thrust': return s.thrust ?? 0;
       case 'jerk': return clamp01((s.jerk ?? 0) / 240);
       case 'aim': return this.aimBlend;
+      case 'boost': return clamp01(s.boost ?? 0);
+      // These four decay on their own, so a bone driven by them fires and
+      // settles rather than being held open by a number that stays put.
+      case 'landing': return clamp01(this.landPulse);
+      case 'recoil': return clamp01(this.firePulse);
+      case 'damage': return clamp01(this.hurtPulse);
+      // How far GONE it is, not how much is left: a machine should do more
+      // as it comes apart, not less.
+      case 'hp': return clamp01(1 - (s.hp ?? 1));
+      case 'energy': return clamp01(1 - (s.energy ?? 1));
+      case 'weapon': return clamp01(this.swapPulse);
       default: return 1;
     }
   }
@@ -838,12 +1188,52 @@ export class Animator {
    * see until you deploy is tuning blind, but faking a whole walk cycle
    * would move everything else too.
    */
-  updateCustomsOnly(dt) {
+  /**
+   * Run the moving bones on the workbench, and nothing else.
+   *
+   * Two things this has to do that a fight does not. It moves only what the
+   * builder is working on, because a machine where every bone is running at
+   * once tells you nothing about the one you are tuning; and it takes its
+   * drive signals from the panel, because on the bench the machine is
+   * standing still — so a bone driven by speed, by boost, by damage or by
+   * anything else that only happens in a fight simply did not move, and
+   * every slider under it was a guess.
+   *
+   * @param {number} dt
+   * @param {object} [s] forced signals, exactly as a fight would supply them
+   * @param {Set<string>|null} [only] part ids to move; null moves them all
+   */
+  previewBones(dt, s = {}, only = null) {
     this.time += dt;
-    this._customs({ planarSpeed: 0, thrust: 0, jerk: 0 }, dt);
-    const k = clamp01(1 - Math.pow(0.0008, dt));
-    for (const node of this.rig.customBones) node.joint.quaternion.slerp(node.target, k);
+    const signals = { planarSpeed: 0, thrust: 0, jerk: 0, ...s };
+    // The gait clock does not run on the bench, so anything locked to the
+    // stride would sit still. The panel drives it directly instead.
+    if (s.gaitFreq !== undefined) this.gaitFreq = s.gaitFreq;
+    if (s.locked !== undefined) this.aimBlend = clamp01(s.locked);
+    this._pulses(signals, dt);
+    this._customs(signals, dt);
+    this._weapons(signals, dt);
+    this._links();
+
+    for (const node of this.rig.joints) {
+      if (only && !only.has(node.part.id)) continue;
+      if (node.part.boneType !== 'custom' && node.part.boneType !== 'weapon'
+        && !node.part.link?.to) continue;
+      const base = clamp01(1 - Math.pow(0.0008, dt));
+      node.joint.quaternion.slerp(node.target, Animator.followOf(node, dt, base));
+
+      // How far it is ACTUALLY going, as opposed to how far it is allowed
+      // to. The arc drawn round a joint is the setting, and whether the
+      // motion under it ever reaches that arc was not knowable from looking.
+      const now = node.joint.quaternion.angleTo(_rest) / DEG;
+      node.reach = Math.max(now, (node.reach ?? 0) - dt * 12);
+    }
     return this;
+  }
+
+  /** @deprecated the bench drives its own signals now. */
+  updateCustomsOnly(dt) {
+    return this.previewBones(dt);
   }
 
   /**
@@ -864,9 +1254,80 @@ export class Animator {
   /** Slew every joint toward its target so nothing ever pops. */
   _commit(dt) {
     for (const node of this.rig.joints) {
-      const k = clamp01(1 - Math.pow(0.0008, dt * (node.part.boneType === 'leg' ? 1.6 : 1.0)));
-      node.joint.quaternion.slerp(node.target, k);
+      const base = clamp01(
+        1 - Math.pow(0.0008, dt * (node.part.boneType === 'leg' ? 1.6 : 1.0)),
+      );
+      node.joint.quaternion.slerp(node.target, Animator.followOf(node, dt, base));
     }
+  }
+
+  /**
+   * Put the feet on what is actually underneath each of them.
+   *
+   * The body is held up by ONE probe at the middle of the machine, so on a
+   * step, a crate or a slope one foot is buried in the concrete and the
+   * other is standing on nothing — and a walk cycle, however good, cannot
+   * hide a foot that is six inches inside the floor.
+   *
+   * One joint per limb, the one at the top of it. Bending the whole chain
+   * would be a solver; this is a correction, and a correction that moves the
+   * hip is the one a real leg makes anyway.
+   *
+   * Called after the pose is committed and after world transforms are up to
+   * date, by whoever knows what the ground is.
+   * Costs one world-position read and one small matrix update per limb, and
+   * only for machines close enough to matter — so it is off by default and
+   * the caller turns it on.
+   *
+   * @param {(x: number, z: number, fromY: number) => number} surfaceAt
+   * @param {number} grounded 0..1 — how much this machine is on the ground
+   * @param {number} dt
+   */
+  plantFeet(surfaceAt, grounded, dt) {
+    if (!surfaceAt || grounded <= 0.01 || !this.rig.limbs?.length) return this;
+
+    for (const limb of this.rig.limbs) {
+      const root = limb.root;
+      const tipNode = limb.chain[limb.chain.length - 1];
+      if (!root?.joint || !tipNode?.far) continue;
+
+      // Where this leg actually ends, in the world.
+      const tip = _foot.set(0, tipNode.length / 2, 0);
+      tipNode.far.localToWorld(tip);
+      const pivot = root.joint.getWorldPosition(_pivot);
+
+      const want = surfaceAt(tip.x, tip.z, pivot.y);
+      // Up out of the floor at once; down onto a surface only if it is
+      // within reach, or a leg beside a ledge would stretch for the bottom.
+      let delta = want - tip.y;
+      if (delta < -PLANT.reach) delta = -PLANT.reach;
+      if (delta > PLANT.reach) delta = PLANT.reach;
+      // Eased, so stepping onto a crate is a step and not a snap.
+      root.plantY = damp(root.plantY ?? 0, delta * grounded, PLANT.ease, dt);
+      if (Math.abs(root.plantY) < 0.004) continue;
+
+      // The axis about which turning this joint lifts the foot most: across
+      // the line from the hip to the foot, level with the world. Worked out
+      // rather than assumed, because "which way is up for this bone" depends
+      // on how the machine was built and there is no answering it in general.
+      const arm = _armv.copy(tip).sub(pivot);
+      const axis = _paxis.crossVectors(arm, WORLD_UP);
+      if (axis.lengthSq() < 1e-6) continue;
+      axis.normalize();
+      // How far the foot rises per radian about that axis.
+      const rate = _rate.crossVectors(axis, arm).y;
+      if (Math.abs(rate) < 0.05) continue;
+      const theta = clamp(root.plantY / rate, -PLANT.maxAngle, PLANT.maxAngle);
+
+      // Applied in the joint's parent frame, so it composes with the pose
+      // rather than replacing it.
+      root.joint.parent.getWorldQuaternion(_pq);
+      _paxis.applyQuaternion(_pq.invert());
+      _q.setFromAxisAngle(_paxis, theta);
+      root.joint.quaternion.premultiply(_q);
+      root.joint.updateMatrixWorld(true);
+    }
+    return this;
   }
 
   /** Visual-only body offset: bob and lean, applied by the caller. */

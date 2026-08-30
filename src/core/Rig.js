@@ -931,6 +931,7 @@ export class Rig {
     }
     this.faceBones = this.joints.filter((n) => n.part.boneType === 'face');
     this.customBones = this.joints.filter((n) => n.part.boneType === 'custom');
+    this.weaponBones = this.joints.filter((n) => n.part.boneType === 'weapon');
     return limbs;
   }
 

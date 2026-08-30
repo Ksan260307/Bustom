@@ -255,7 +255,7 @@ export class Hud {
     ctx.globalAlpha = 0.5;
     ctx.fillStyle = '#9fc4dd';
     ctx.font = '600 10px ui-monospace, Menlo, Consolas, monospace';
-    ctx.fillText('つぎの ウェーブまでに ひとつ', this.w / 2, y - 52);
+    ctx.fillText('CHOOSE ONE', this.w / 2, y - 52);
 
     // What the hull is at, in a number, and only here.
     //
@@ -268,7 +268,7 @@ export class Hud {
       ctx.globalAlpha = 0.95;
       ctx.fillStyle = left > 0.6 ? '#8effc9' : left > 0.3 ? '#ffd166' : '#ff6a5c';
       ctx.font = '700 15px ui-monospace, Menlo, Consolas, monospace';
-      ctx.fillText(`装甲 ${Math.round(player.hp)} / ${player.maxHp}`, this.w / 2, y - 30);
+      ctx.fillText(`HULL ${Math.round(player.hp)} / ${player.maxHp}`, this.w / 2, y - 30);
     }
 
     offer.choices.forEach((c, i) => {
@@ -434,7 +434,22 @@ export class Hud {
     ctx.globalAlpha = 0.5;
     ctx.fillStyle = '#9fc4dd';
     ctx.font = '600 9px ui-monospace, Menlo, Consolas, monospace';
-    ctx.fillText('WAVE', pad, pad + 4);
+    // Which rung of the ladder, and how many there are. A run is a walk
+    // through the places now, and how far along that walk you are is the
+    // thing a player wants to know that the wave number cannot tell them.
+    ctx.fillText(m.stages ? `STAGE ${m.stage}/${m.stages}` : 'WAVE', pad, pad + 4);
+    // The setting, and how far up its curve the opposition has climbed.
+    //
+    // A difficulty you cannot see the effect of is a difficulty you argue
+    // with rather than answer: ×2.1 says plainly why the same opponent that
+    // died in a second now takes four.
+    if (m.difficulty) {
+      ctx.textAlign = 'right';
+      ctx.fillStyle = '#ffb37a';
+      ctx.fillText(`${m.difficulty}  ×${m.power.toFixed(1)}`, pad + 132, pad + 46);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#9fc4dd';
+    }
     ctx.globalAlpha = 0.95;
     ctx.fillStyle = '#dff0ff';
     ctx.font = '700 26px ui-monospace, Menlo, Consolas, monospace';
@@ -443,7 +458,7 @@ export class Hud {
     ctx.font = '600 10px ui-monospace, Menlo, Consolas, monospace';
     ctx.globalAlpha = 0.5;
     ctx.fillStyle = '#9fc4dd';
-    ctx.fillText('のこり', pad + 58, pad + 18);
+    ctx.fillText('LEFT', pad + 58, pad + 18);
     ctx.globalAlpha = 0.95;
     ctx.fillStyle = m.remaining > 0 ? '#dff0ff' : '#8effc9';
     ctx.font = '700 16px ui-monospace, Menlo, Consolas, monospace';
@@ -535,7 +550,7 @@ export class Hud {
 
       if (w.melee) {
         ctx.globalAlpha = 0.45 * fade;
-        ctx.fillText('接触', x + 100, y);
+        ctx.fillText('MELEE', x + 100, y);
       } else if (w.reloading) {
         // The bar IS the wait: no number, just the thing filling back up.
         const bw = 62;
