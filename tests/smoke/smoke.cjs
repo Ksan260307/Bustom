@@ -214,12 +214,81 @@ const CHECKS = [
 
     for (let i = 0; i < 120; i++) a.field.update(1 / 60);
     // And the legs are actually running that correction while it stands.
-    const corrected = r.rig.limbs.every((l) => l.root.plantY !== undefined);
+    const corrected = r.rig.limbs.every((l) => l.plantY !== undefined);
 
     return {
       ok: floor === 0 && onTop !== null && onTop > 0 && corrected,
       note: 'floor ' + floor + ', a surface up at ' + (onTop === null ? 'none' : onTop.toFixed(1))
         + 'm, ' + r.rig.limbs.length + ' legs corrected ' + corrected,
+    };
+  })()`],
+
+  ['the legs stand still when the machine does, and walk when it walks', `(() => {
+    const a = window.__blostom;
+    a.goTitle();
+    a.setMode('edit');
+    a.loadPreset('biped', { ask: false });
+    a.goTitle();
+    a.setMode('field');
+    const r = a.field.player;
+    a.input.enabled = true;
+    const real = r.animator.plantFeet;
+    const noop = function () { return this; };
+
+    // How far a hip turns from one frame to the next. A pose is smooth, so
+    // this is small for anything a machine is meant to be doing — and it is
+    // exactly what shaking looks like as a number.
+    const sample = (walk, plant) => {
+      r.animator.plantFeet = plant ? real : noop;
+      if (walk) a.input.keys.add('KeyW'); else a.input.keys.delete('KeyW');
+      const prev = r.rig.limbs.map((l) => l.root.joint.quaternion.clone());
+      const moves = [];
+      const feet = [];
+      for (let i = 0; i < 300; i++) {
+        a.input.update(1 / 60);
+        a.field.update(1 / 60);
+        if (i > 150) {
+          r.rig.limbs.forEach((l, k) => {
+            moves.push(l.root.joint.quaternion.angleTo(prev[k]) * 180 / Math.PI);
+          });
+          r.object3D.updateMatrixWorld(true);
+          const tip = r.rig.limbs[0].chain[r.rig.limbs[0].chain.length - 1];
+          const v = new (Object.getPrototypeOf(r.position).constructor)(0, tip.length / 2, 0);
+          tip.far.localToWorld(v);
+          feet.push(v.y - a.field.world.surfaceAt(v.x, v.z, v.y + 40));
+        }
+        r.rig.limbs.forEach((l, k) => prev[k].copy(l.root.joint.quaternion));
+      }
+      return {
+        worst: Math.max(...moves),
+        mean: moves.reduce((x, y) => x + y, 0) / moves.length,
+        dip: Math.max(...feet) - Math.min(...feet),
+      };
+    };
+
+    const stand = sample(false, true);
+    const walk = sample(true, true);
+    const walkOff = sample(true, false);
+    r.animator.plantFeet = real;
+    a.input.keys.delete('KeyW');
+
+    // Standing on flat ground there is nothing to correct, so nothing moves.
+    const still = stand.worst < 0.05;
+    // Walking, the correction must cost the gait nothing. Putting a foot
+    // DOWN onto whatever is under it used to drag the swinging leg back to
+    // the floor sixty times a second, against an animation that was lifting
+    // it: 45 degrees of hip a frame, against 7 without.
+    const smooth = walk.worst < walkOff.worst * 1.4 && walk.mean < walkOff.mean * 1.4;
+    // And it is still doing its job: the feet sit closer to the ground.
+    const closer = walk.dip <= walkOff.dip + 0.01;
+
+    return {
+      ok: still && smooth && closer,
+      note: 'hip deg/frame — standing ' + stand.worst.toFixed(2)
+        + ', walking ' + walk.worst.toFixed(2) + '/' + walk.mean.toFixed(2)
+        + ' against ' + walkOff.worst.toFixed(2) + '/' + walkOff.mean.toFixed(2)
+        + ' unplanted; foot spread ' + walk.dip.toFixed(3) + 'm vs '
+        + walkOff.dip.toFixed(3) + 'm',
     };
   })()`],
 

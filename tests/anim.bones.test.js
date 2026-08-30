@@ -496,7 +496,9 @@ describe('putting a foot on what is under it', () => {
     // The foot on the step was half a metre inside it and is now much less.
     const worstBefore = Math.max(...before.map(Math.abs));
     const worstAfter = Math.max(...after.map(Math.abs));
-    // Measured: half a metre inside the step, to eight millimetres above it.
+    // Measured: half a metre inside the step, to three centimetres — which
+    // is the slack the correction deliberately leaves, so a foot resting a
+    // hair inside something does not keep the legs working.
     expect(worstBefore).toBeGreaterThan(0.3);
     expect(worstAfter).toBeLessThan(0.05);
   });
@@ -514,18 +516,43 @@ describe('putting a foot on what is under it', () => {
     }
   });
 
-  it('does not reach down a ledge', () => {
+  it('never reaches DOWN for anything', () => {
     const kit = stand();
     const before = kit.rig.limbs.map((l) => l.root.joint.quaternion.clone());
-    // A surface forty metres down is a ledge, not a floor.
+    // Half of every stride is a leg in the air on purpose, and there is no
+    // per-foot "this one is taking the weight" to tell that apart from a
+    // leg that has missed the floor. So a foot is only ever lifted out of
+    // something, never pulled down onto it — otherwise the correction
+    // spends the whole gait fighting the animation, at sixty hertz.
     for (let i = 0; i < 90; i++) {
       kit.animator.update(state());
       kit.rig.root.updateMatrixWorld(true);
       kit.animator.plantFeet(() => -40, 1, 1 / 60);
     }
-    const moved = kit.rig.limbs
-      .map((l, i) => l.root.joint.quaternion.angleTo(before[i]) * 180 / Math.PI);
-    // It leans into it a little and stops, rather than stretching for it.
-    expect(Math.max(...moved)).toBeLessThan(40);
+    for (let i = 0; i < kit.rig.limbs.length; i++) {
+      expect(kit.rig.limbs[i].root.joint.quaternion.angleTo(before[i])).toBeLessThan(1e-6);
+    }
+  });
+
+  it('reads the pose the animator meant, not its own last answer', () => {
+    // Measuring through its own output makes this a loop with a frame of
+    // lag in it. Measured: 25.8 degrees of hip movement per frame while
+    // standing perfectly still, against none at all now.
+    const kit = stand();
+    const surface = () => 4;                 // permanently above the feet
+    let worst = 0;
+    const prev = kit.rig.limbs.map(() => new THREE.Quaternion());
+    for (let i = 0; i < 300; i++) {
+      kit.animator.update(state());
+      kit.rig.root.updateMatrixWorld(true);
+      kit.animator.plantFeet((x, z, y) => Math.min(surface(), y), 1, 1 / 60);
+      if (i > 150) {
+        kit.rig.limbs.forEach((l, k) => {
+          worst = Math.max(worst, (l.root.joint.quaternion.angleTo(prev[k]) * 180) / Math.PI);
+        });
+      }
+      kit.rig.limbs.forEach((l, k) => prev[k].copy(l.root.joint.quaternion));
+    }
+    expect(worst).toBeLessThan(0.05);
   });
 });

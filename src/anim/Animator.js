@@ -41,7 +41,15 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0);
  * is over. `reach` is how far a foot will stretch for a surface below it —
  * beyond that it is a ledge, and a leg does not reach down a ledge.
  */
-const PLANT = { reach: 1.1, ease: 0.09, maxAngle: 0.45 };
+const PLANT = {
+  reach: 1.1,
+  ease: 0.09,
+  maxAngle: 0.45,
+  passes: 3,
+  share: 0.7,
+  /** How far into a surface a foot may go before anyone minds. */
+  slack: 0.03,
+};
 // Scratch for reading an angle's direction back off a quaternion.
 const _lv = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
@@ -258,6 +266,14 @@ export class Animator {
       node.deployT = undefined;
       node.deployV = 0;
     }
+    // Nothing about the pose it was in — or the ground it was standing on —
+    // should follow a machine into its next life.
+    for (const node of this.rig.joints) {
+      node.poseQ = null;
+      node.plantApplied = 0;
+      node.reach = 0;
+    }
+    for (const limb of this.rig.limbs ?? []) limb.plantY = 0;
     this.hopCharge = 0;
     this.bodyBob = 0;
     this.bodyLean.set(0, 0);
@@ -1220,7 +1236,9 @@ export class Animator {
       if (node.part.boneType !== 'custom' && node.part.boneType !== 'weapon'
         && !node.part.link?.to) continue;
       const base = clamp01(1 - Math.pow(0.0008, dt));
-      node.joint.quaternion.slerp(node.target, Animator.followOf(node, dt, base));
+      const pose = node.poseQ ?? (node.poseQ = node.joint.quaternion.clone());
+      pose.slerp(node.target, Animator.followOf(node, dt, base));
+      node.joint.quaternion.copy(pose);
 
       // How far it is ACTUALLY going, as opposed to how far it is allowed
       // to. The arc drawn round a joint is the setting, and whether the
@@ -1257,7 +1275,14 @@ export class Animator {
       const base = clamp01(
         1 - Math.pow(0.0008, dt * (node.part.boneType === 'leg' ? 1.6 : 1.0)),
       );
-      node.joint.quaternion.slerp(node.target, Animator.followOf(node, dt, base));
+      // The slew runs on the animator's OWN copy of the pose, and the joint
+      // is then set from it. Anything that adjusts a joint afterwards —
+      // foot planting does — would otherwise be slewed from next frame, so
+      // its own output would come back to it as if it were the pose. That
+      // is a feedback loop with a frame of lag in it, which is a shake.
+      const pose = node.poseQ ?? (node.poseQ = node.joint.quaternion.clone());
+      pose.slerp(node.target, Animator.followOf(node, dt, base));
+      node.joint.quaternion.copy(pose);
     }
   }
 
@@ -1287,45 +1312,100 @@ export class Animator {
     if (!surfaceAt || grounded <= 0.01 || !this.rig.limbs?.length) return this;
 
     for (const limb of this.rig.limbs) {
-      const root = limb.root;
       const tipNode = limb.chain[limb.chain.length - 1];
-      if (!root?.joint || !tipNode?.far) continue;
+      if (!limb.root?.joint || !tipNode?.far) continue;
 
-      // Where this leg actually ends, in the world.
+      // Take last frame's correction back off before measuring anything.
+      // Measuring through our own output makes this a loop that chases
+      // itself with a frame of lag in it, and a leg chasing itself at sixty
+      // hertz is a leg shaking.
+      for (const node of limb.chain) {
+        if (node.poseQ) node.joint.quaternion.copy(node.poseQ);
+        node.plantApplied = 0;
+      }
+      limb.root.joint.updateMatrixWorld(true);
+
+      // Where this leg ends when nobody has interfered with it.
       const tip = _foot.set(0, tipNode.length / 2, 0);
       tipNode.far.localToWorld(tip);
-      const pivot = root.joint.getWorldPosition(_pivot);
 
-      const want = surfaceAt(tip.x, tip.z, pivot.y);
-      // Up out of the floor at once; down onto a surface only if it is
-      // within reach, or a leg beside a ledge would stretch for the bottom.
-      let delta = want - tip.y;
-      if (delta < -PLANT.reach) delta = -PLANT.reach;
-      if (delta > PLANT.reach) delta = PLANT.reach;
-      // Eased, so stepping onto a crate is a step and not a snap.
-      root.plantY = damp(root.plantY ?? 0, delta * grounded, PLANT.ease, dt);
-      if (Math.abs(root.plantY) < 0.004) continue;
+      const surface = surfaceAt(tip.x, tip.z, limb.root.joint.getWorldPosition(_pivot).y);
+      /**
+       * Out of the floor only. Never down onto it.
+       *
+       * Pulling a foot DOWN to whatever is under it sounds like the other
+       * half of the same idea, and it is the half that ruins it: half the
+       * time a walking leg is in the air ON PURPOSE, and there is no
+       * per-foot "this one is taking the weight" to tell the two apart —
+       * the machine is either on the ground or it is not. So the correction
+       * spent the whole gait dragging the swinging leg back to the floor
+       * and the animation spent it lifting the leg again, at sixty hertz.
+       *
+       * Only lifting a foot out of something it is inside cannot fight the
+       * walk, because a foot in the air is already right. And it keeps the
+       * thing this is for: feet do not sink into steps any more.
+       */
+      const delta = clamp(surface - tip.y - PLANT.slack, 0, PLANT.reach);
+      // Eased, so stepping onto a crate is a step and not a snap. This is
+      // the only thing carried between frames, and it is a GOAL rather than
+      // an output — which is what keeps the whole thing steady.
+      limb.plantY = damp(limb.plantY ?? 0, delta * grounded, PLANT.ease, dt);
+      if (Math.abs(limb.plantY) < 0.004) continue;
 
-      // The axis about which turning this joint lifts the foot most: across
-      // the line from the hip to the foot, level with the world. Worked out
-      // rather than assumed, because "which way is up for this bone" depends
-      // on how the machine was built and there is no answering it in general.
-      const arm = _armv.copy(tip).sub(pivot);
-      const axis = _paxis.crossVectors(arm, WORLD_UP);
-      if (axis.lengthSq() < 1e-6) continue;
-      axis.normalize();
-      // How far the foot rises per radian about that axis.
-      const rate = _rate.crossVectors(axis, arm).y;
-      if (Math.abs(rate) < 0.05) continue;
-      const theta = clamp(root.plantY / rate, -PLANT.maxAngle, PLANT.maxAngle);
+      /**
+       * Bend the leg until the foot is where it should be.
+       *
+       * Solved inside this frame rather than across several, because a
+       * correction spread over frames is one that reads its own last answer
+       * as if it were the pose.
+       *
+       * Shared down the chain rather than taken all at the hip: a hip alone
+       * runs out of travel long before the foot arrives, and swinging one
+       * joint twenty-six degrees to move a foot half a metre looks like a
+       * leg being dragged rather than a leg being bent.
+       */
+      const goalY = tip.y + limb.plantY;
+      for (let pass = 0; pass < PLANT.passes; pass++) {
+        let moved = false;
+        for (const node of limb.chain) {
+          tip.set(0, tipNode.length / 2, 0);
+          tipNode.far.localToWorld(tip);
+          const need = goalY - tip.y;
+          if (Math.abs(need) < 0.003) break;
 
-      // Applied in the joint's parent frame, so it composes with the pose
-      // rather than replacing it.
-      root.joint.parent.getWorldQuaternion(_pq);
-      _paxis.applyQuaternion(_pq.invert());
-      _q.setFromAxisAngle(_paxis, theta);
-      root.joint.quaternion.premultiply(_q);
-      root.joint.updateMatrixWorld(true);
+          const pivot = node.joint.getWorldPosition(_pivot);
+          // The axis about which turning this joint lifts the foot most:
+          // across the line from the joint to the foot, level with the
+          // world. Worked out rather than assumed, because "which way is up
+          // for this bone" depends on how the machine was built.
+          const arm = _armv.copy(tip).sub(pivot);
+          const axis = _paxis.crossVectors(arm, WORLD_UP);
+          if (axis.lengthSq() < 1e-6) continue;
+          axis.normalize();
+          // How far the foot rises per radian about that axis.
+          const rate = _rate.crossVectors(axis, arm).y;
+          if (Math.abs(rate) < 0.05) continue;
+
+          // A share, not the lot: the joints below this one take the rest,
+          // and the clamp is on each joint's TOTAL so a limit stays a limit
+          // however many passes it takes to reach it.
+          const was = node.plantApplied ?? 0;
+          const step = clamp(was + (need / rate) * PLANT.share, -PLANT.maxAngle, PLANT.maxAngle)
+            - was;
+          if (Math.abs(step) < 1e-5) continue;
+          node.plantApplied = was + step;
+
+          // Applied in the joint's parent frame, so it composes with the
+          // pose rather than replacing it.
+          node.joint.parent.getWorldQuaternion(_pq);
+          _paxis.applyQuaternion(_pq.invert());
+          _q.setFromAxisAngle(_paxis, step);
+          node.joint.quaternion.premultiply(_q);
+          node.joint.updateMatrixWorld(true);
+          moved = true;
+        }
+        if (!moved) break;
+      }
     }
     return this;
   }
