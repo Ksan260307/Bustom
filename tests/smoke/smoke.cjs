@@ -292,6 +292,400 @@ const CHECKS = [
     };
   })()`],
 
+  ['every shipped file arrives, and nothing falls back', `(async () => {
+    const a = window.__blostom;
+    const kit = await a.kitReady;
+    // The assets are not in the repository — they are reproducible from a
+    // URL and a script, so a clean checkout has none of them and the game
+    // is built to run that way. Absent is fine; half-fetched is not.
+    const none = kit.surfaces === 0 && kit.envs === 0 && kit.fx === 0
+      && kit.space === 0 && kit.skies === 0 && kit.sfx === 0;
+    if (none) {
+      return { ok: true, note: 'not fetched — run python tools/fetch-assets.py' };
+    }
+    return {
+      ok: kit.surfaces === 8 && kit.envs === 3 && kit.sfx === 7
+        && kit.fx === 9 && kit.space === 3 && kit.skies === 4 && kit.failed === 0,
+      note: kit.surfaces + '/8 surfaces, ' + kit.envs + '/3 reflected skies, '
+        + kit.skies + '/4 drawn skies, ' + kit.sfx + '/7 sounds, ' + kit.fx
+        + '/9 sprites, ' + kit.space + '/3 space, ' + kit.failed + ' failed',
+    };
+  })()`],
+
+  ['a detail map averages what the material is scaled for', `(async () => {
+    const a = window.__blostom;
+    await a.kitReady;
+    // The material multiplies the arena's colour by this map and winds the
+    // result back up by 1 / DETAIL_MEAN. If the bake and the constant ever
+    // disagree, every floor in the game is the wrong brightness and nothing
+    // says so — the picture just quietly stops matching the palette.
+    const read = (name) => new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.width; c.height = img.height;
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0);
+        const d = ctx.getImageData(0, 0, c.width, c.height).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 4) sum += d[i];
+        resolve(sum / (d.length / 4) / 255);
+      };
+      img.onerror = () => resolve(null);
+      img.src = './kit/surface/' + name + '_detail.jpg';
+    });
+
+    const means = {};
+    for (const kind of ['concrete', 'stone', 'regolith', 'deckplate']) {
+      means[kind] = await read(kind);
+    }
+    // Nothing to check on a clean checkout: see the note above.
+    if (Object.values(means).every((m) => m === null)) {
+      return { ok: true, note: 'not fetched' };
+    }
+    const off = Object.entries(means)
+      .filter(([, m]) => m === null || Math.abs(m - 0.75) > 0.04);
+
+    return {
+      ok: off.length === 0,
+      note: Object.entries(means)
+        .map(([k, m]) => k + ' ' + (m === null ? 'MISSING' : m.toFixed(3))).join(', ')
+        + ' (wanted 0.75)',
+    };
+  })()`],
+
+  ['a floor is a photograph tinted by the arena, not a painting of it', `(async () => {
+    const a = window.__blostom;
+    await a.kitReady;
+    a.goTitle();
+    a.setMode('field');
+
+    if (!(await a.kitReady).surfaces) return { ok: true, note: 'not fetched' };
+    const floors = {};
+    for (const id of ['proving', 'city', 'canyon', 'moon']) {
+      a.setArena(id);
+      const g = a.field.world.group.children.find((o) => o.geometry
+        && o.geometry.type === 'CircleGeometry');
+      if (!g) return { ok: false, note: id + ' has no floor' };
+      const m = g.material;
+      floors[id] = {
+        normal: !!m.normalMap,
+        rough: !!m.roughnessMap,
+        // The arena's colour has to survive: a photographed floor that
+        // paints every place the same grey is a photographed floor that
+        // threw away the art direction to get some grain.
+        hex: m.color.getHexString(),
+      };
+    }
+    a.setArena('proving');
+
+    const ids = Object.keys(floors);
+    const allMapped = ids.every((id) => floors[id].normal && floors[id].rough);
+    const tints = new Set(ids.map((id) => floors[id].hex));
+    // Four places, four different floor colours, and none of them white.
+    const kept = tints.size === ids.length && !tints.has('ffffff');
+
+    return {
+      ok: allMapped && kept,
+      note: ids.map((id) => id + ' #' + floors[id].hex
+        + (floors[id].normal ? ' +relief' : ' FLAT')).join(', '),
+    };
+  })()`],
+
+  ['metal reflects a sky with shapes in it, except where there is no sky', `(async () => {
+    const a = window.__blostom;
+    await a.kitReady;
+    a.goTitle();
+    a.setMode('field');
+
+    // A gradient is smooth by construction, so the thing to measure is
+    // whether the reflection VARIES across a row. The painted sky changes
+    // only from top to bottom; a photograph of a night city does not.
+    const spread = (id) => {
+      a.setArena(id);
+      const env = a.field.world.sky.environment;
+      const img = env.image;                       // the prefiltered cube
+      return { id, w: img && img.width, has: !!env };
+    };
+
+    const ground = spread('city');
+    const space = spread('orbit');
+    a.setArena('proving');
+
+    // What actually differs is the SOURCE, and the arena says which it
+    // wants. Space and the Moon name none, on purpose: there is no sky over
+    // either of them to reflect.
+    const reflects = (id) => { a.setArena(id); return a.field.world.arena.reflects ?? null; };
+    const named = ['proving', 'city', 'works', 'canyon', 'flats'].every((id) => !!reflects(id));
+    const vacuum = ['orbit', 'moon'].every((id) => !reflects(id));
+    a.setArena('proving');
+
+    return {
+      ok: ground.has && space.has && named && vacuum,
+      note: 'five places reflect a photographed sky ' + named
+        + ', space and the moon reflect none ' + vacuum,
+    };
+  })()`],
+
+  ['the interface carries its own type', `(async () => {
+    const a = window.__blostom;
+    await document.fonts.ready;
+    // The stylesheet has named Inter since the beginning and never shipped
+    // it, so on a machine without it the whole game fell back to Segoe UI.
+    if (![...document.fonts].length) return { ok: true, note: 'not fetched' };
+    const inter = document.fonts.check('16px Inter');
+    const mono = document.fonts.check('16px "JetBrains Mono"');
+    const loaded = [...document.fonts].map((f) => f.family + ' ' + f.weight);
+    return {
+      ok: inter && mono,
+      note: 'Inter ' + inter + ', JetBrains Mono ' + mono + ' — ' + loaded.join(', '),
+    };
+  })()`],
+
+  ['the guns have recordings under them, and still work without', `(async () => {
+    const a = window.__blostom;
+    await a.kitReady;
+    const fb = a.feedback;
+    fb.init();
+    if (!fb.ctx) return { ok: false, note: 'no audio context' };
+    fb.setMuted(false);
+
+    // Decoding is asked for on the first play and answered later, so this
+    // fires once, waits, and then checks that the buffer turned up.
+    if (!(await a.kitReady).sfx) { fb.setMuted(true); return { ok: true, note: 'not fetched' }; }
+    for (const n of ['fire-light', 'fire-heavy', 'hit-landed', 'hit-taken', 'boom', 'lock-on']) {
+      fb._sample(n, 0);
+    }
+    await new Promise((r) => setTimeout(r, 900));
+    const decoded = [...fb.samples.entries()].filter(([, v]) => v && v.duration > 0);
+
+    // And the synthesised layer is still there underneath: these are events
+    // the game has always had a sound for, and a missing file must not take
+    // one away.
+    let threw = null;
+    try {
+      fb.fire(0.9, true); fb.hit(0.5, false); fb.boom(1); fb.lock(true); fb.lock(false);
+    } catch (e) { threw = String(e && e.message); }
+    fb.setMuted(true);
+
+    return {
+      ok: decoded.length >= 6 && !threw,
+      note: decoded.length + ' sounds decoded ('
+        + decoded.map(([k, v]) => k + ' ' + v.duration.toFixed(2) + 's').join(', ')
+        + ')' + (threw ? ' THREW ' + threw : ''),
+    };
+  })()`],
+
+  ['space is a place, not an unlit room', `(async () => {
+    const a = window.__blostom;
+    await a.kitReady;
+    a.goTitle();
+    a.setMode('field');
+
+    const look = (id) => {
+      a.setArena(id);
+      for (let i = 0; i < 30; i++) a.field.update(1 / 60);
+      const bd = a.field.world.backdrop;
+      const sky = bd && bd.userData && bd.userData.sky;
+      let shell = 0;
+      let planets = 0;
+      let biggest = 0;
+      if (sky) {
+        sky.traverse((o) => {
+          if (!o.isMesh) return;
+          // The whole sky, photographed: an inside-out sphere with a map.
+          if (o.material.side === 1 && o.material.map) shell++;
+          // A ball with a real face on it, lit by its own shader so that
+          // nothing it does escapes into the arena's own lighting.
+          if (o.material.type === 'ShaderMaterial' && o.material.uniforms.map.value) {
+            planets++;
+            biggest = Math.max(biggest, o.getWorldScale(new (Object.getPrototypeOf(
+              a.field.player.position).constructor)()).x);
+          }
+        });
+      }
+      return { shell, planets, biggest: Math.round(biggest) };
+    };
+
+    if (!(await a.kitReady).space) return { ok: true, note: 'not fetched' };
+    const orbit = look('orbit');
+    const moon = look('moon');
+    // The five with weather get a photographed sky too, but never a planet:
+    // an Earth over the proving ground is a different game.
+    const weather = ['proving', 'city', 'works', 'canyon', 'flats'].map(look);
+    a.setArena('proving');
+
+    const allSky = weather.every((w) => w.shell === 1);
+    const noBodies = weather.every((w) => w.planets === 0);
+
+    return {
+      ok: orbit.shell === 1 && orbit.planets === 2 && orbit.biggest > 60
+        && moon.shell === 1 && moon.planets === 1 && allSky && noBodies,
+      note: 'orbit ' + orbit.shell + ' sky / ' + orbit.planets + ' bodies (biggest '
+        + orbit.biggest + 'm), moon ' + moon.shell + '/' + moon.planets
+        + ', five weather arenas: sky ' + allSky + ', no planets ' + noBodies,
+    };
+  })()`],
+
+  ['a shot, a hit and a thruster all carry a picture', `(async () => {
+    const a = window.__blostom;
+    await a.kitReady;
+    a.goTitle();
+    a.setMode('field');
+    for (let i = 0; i < 30; i++) a.field.update(1 / 60);
+
+    if (!(await a.kitReady).fx) return { ok: true, note: 'not fetched' };
+    const fx = a.field.effects;
+    // Every pooled burst got a card, and every card got its sprite. A card
+    // with no map is a quad of flat colour, which is worse than no card.
+    const cards = fx.cards.length;
+    const mapped = fx.cards.filter((c) => c.mat.map).length;
+    const puffs = fx.puffs.filter((p) => p.mat.map).length;
+
+    // And they actually come out when something happens.
+    const V = Object.getPrototypeOf(a.field.player.position).constructor;
+    fx.muzzle(new V(0, 2, 0), new V(0, 0, 1), { scale: 1, color: 0xffcc88 });
+    fx.impact(new V(0, 2, 4), new V(0, 0, 1), { scale: 1, color: 0xffffff });
+    a.field.update(1 / 60);
+    const litMuzzle = fx.muzzles.some((e) => e.life > 0 && e.card.visible
+      && e.card.material.opacity > 0);
+    const litImpact = fx.impacts.some((e) => e.life > 0 && e.card.visible
+      && e.card.material.opacity > 0);
+
+    // The thruster plume is part of the rig, so it is checked on the rig.
+    let plumes = 0;
+    for (const node of a.field.player.rig.equipNodes) {
+      if (node.boostFlare && node.boostFlare.cards) plumes += node.boostFlare.cards.length;
+    }
+
+    return {
+      ok: cards > 0 && mapped === cards && puffs > 0 && litMuzzle && litImpact,
+      note: mapped + '/' + cards + ' burst cards mapped, ' + puffs + ' puffs, '
+        + 'muzzle ' + litMuzzle + ', impact ' + litImpact + ', ' + plumes + ' plume cards',
+    };
+  })()`],
+
+  ['the offer to restore folds away by itself, and cannot go stale', `(async () => {
+    const a = window.__blostom;
+    const bar = document.getElementById('draftbar');
+    if (!bar) return { ok: false, note: 'no draft bar in the page' };
+
+    // Put a draft on disk and offer it, the way a fresh boot would.
+    a.setMode('edit');
+    a.loadPreset('core', { ask: false });
+    localStorage.setItem('blostom.draft.v1', JSON.stringify({
+      at: Date.now() - 60000, json: a.assembly.toJSON(),
+    }));
+    a.ui.offerDraft();
+    const shown = !bar.classList.contains('hidden');
+    // While it is up the autosave holds off, or the thing being offered is
+    // quietly replaced by whatever you do next and "restore" restores that.
+    const held = a.tickDraft ? a._draftHeld === true : false;
+
+    // Doing anything at all takes it down: restoring on top of work already
+    // started is the same mistake in the other direction.
+    a.touch();
+    const goneOnEdit = bar.classList.contains('hidden');
+    const released = a._draftHeld === false;
+
+    // And it comes back up on its own timer when nobody touches anything.
+    a.ui.offerDraft();
+    const again = !bar.classList.contains('hidden');
+    a.ui.foldDraft();
+    const folds = bar.classList.contains('hidden');
+
+    // The offer is not lost with the bar: it moves into the file menu.
+    const menu = [...document.querySelectorAll('#topbar button, .menupop button')]
+      .some((b) => b.textContent.includes('前回の作業を復元'));
+
+    localStorage.removeItem('blostom.draft.v1');
+    return {
+      ok: shown && held && goneOnEdit && released && again && folds && menu,
+      note: 'shown ' + shown + ', autosave held ' + held + ', folds on edit '
+        + goneOnEdit + ' (released ' + released + '), folds on its own ' + folds
+        + ', still in the file menu ' + menu,
+    };
+  })()`],
+
+  ['everybody wakes up looking at the middle', `(() => {
+    const a = window.__blostom;
+    a.goTitle();
+    a.setMode('field');
+    a.field.restart();
+
+    const V = Object.getPrototypeOf(a.field.player.position).constructor;
+    const facing = [];
+    for (const r of [a.field.player, ...a.field.enemies]) {
+      if (!r || !r.alive) continue;
+      const toMiddle = new V(-r.position.x, 0, -r.position.z);
+      if (toMiddle.lengthSq() < 1) continue;      // already in the middle
+      toMiddle.normalize();
+      const nose = r.body.forward.clone();
+      nose.y = 0;
+      if (nose.lengthSq() < 1e-6) continue;
+      nose.normalize();
+      // Degrees off the line to the centre of the arena.
+      facing.push(Math.acos(Math.max(-1, Math.min(1, nose.dot(toMiddle)))) * 180 / Math.PI);
+    }
+
+    // Every machine used to spawn pointing at +Z whichever corner it woke
+    // up in, so three of the four opened the fight looking at the wall.
+    const worst = facing.length ? Math.max(...facing) : 999;
+    return {
+      ok: facing.length >= 2 && worst < 6,
+      note: facing.length + ' machines, worst ' + worst.toFixed(1) + ' degrees off centre',
+    };
+  })()`],
+
+  ['the corner dial shows the place, and turns with you', `(() => {
+    const a = window.__blostom;
+    a.goTitle();
+    a.setMode('field');
+    a.setArena('city');
+    // The read-out is drawn by the present pass, not the update one: the
+    // fight and the picture of it are two passes on purpose, and only one
+    // of them touches the canvas.
+    for (let i = 0; i < 60; i++) { a.field.update(1 / 60); a.field.present(1 / 60); }
+
+    const cv = document.getElementById('hud');
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    // The read-out says where it put the dial, rather than this working the
+    // sum out a second time: it depends on the window and on how much of
+    // the top is covered, and a second copy of that is a second thing to
+    // get wrong. The first attempt at this guessed, and measured the EN bar.
+    const m = a.field.hud.mapAt;
+    if (!m) return { ok: false, note: 'the dial has not been drawn' };
+    const dpr = window.devicePixelRatio || 1;
+    const box = ctx.getImageData(
+      (m.cx - m.r) * dpr, (m.cy - m.r) * dpr, m.r * 2 * dpr, m.r * 2 * dpr,
+    ).data;
+
+    let drawn = 0;
+    let red = 0;
+    let cyan = 0;
+    for (let i = 0; i < box.length; i += 4) {
+      if (box[i + 3] < 8) continue;
+      drawn++;
+      const r = box[i]; const g = box[i + 1]; const b = box[i + 2];
+      if (r > 180 && g < 140 && b < 120) red++;
+      if (b > 200 && g > 180 && r < 180) cyan++;
+    }
+
+    // The arrow sits at the exact middle: the dial is nose-up, so the
+    // player does not move on it — the world turns around them.
+    const mid = ctx.getImageData((m.cx - 3) * dpr, (m.cy - 5) * dpr, 6 * dpr, 8 * dpr).data;
+    let midCyan = 0;
+    for (let i = 0; i < mid.length; i += 4) {
+      if (mid[i + 3] > 8 && mid[i + 2] > 200 && mid[i] < 180) midCyan++;
+    }
+    const where = Math.round(m.cx) + ',' + Math.round(m.cy);
+    return {
+      ok: drawn > 2000 && red > 0 && cyan > 0 && midCyan > 0,
+      note: 'dial at ' + where + ': ' + drawn + ' px, ' + red + ' opponent, '
+        + cyan + ' player (' + midCyan + ' dead centre)',
+    };
+  })()`],
+
   ['a limb comes out in one go', `(() => {
     const a = window.__blostom;
     a.setMode('edit');

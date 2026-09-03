@@ -3,6 +3,7 @@ import { makeSky } from './Sky.js';
 import { makeBackdrop } from './Backdrop.js';
 import { getArena, DEFAULT_ARENA } from './Arenas.js';
 import { makeTexture, roughnessFrom } from './Textures.js';
+import { surfaceMaps, DETAIL_MEAN } from './Kit.js';
 import { buildProp, variantAt } from './Props.js';
 
 // ============================================================
@@ -37,6 +38,50 @@ const FEEL = {
   rust: { metalness: 0.22, roughness: 0.86 },
 };
 const feelOf = (kind) => FEEL[kind] ?? { metalness: 0.18, roughness: 0.66 };
+
+/**
+ * What to make a surface out of: a photograph if one shipped, else a painting.
+ *
+ * The arena's colour is the arena's, either way. A photographed surface here
+ * is a DETAIL map — greyscale, levelled at the bake — so the place keeps the
+ * palette it was designed with and gains the grain that tells you how big
+ * everything is. The painted version had to carry both at once, and a
+ * painting that has to be its own colour cannot be very detailed.
+ *
+ * @param {string} kind    which surface
+ * @param {number} colour  what this arena wants it to be
+ * @param {number} accent  the colour of whatever is lit on it
+ * @param {object} opts    passed through to the painter
+ */
+function surfaceOf(kind, colour, accent, opts) {
+  const shot = surfaceMaps(kind, opts.repeat ?? 1);
+  if (shot) {
+    const tint = new THREE.Color(colour);
+    // Wound back up by exactly what the detail map takes off, so swapping a
+    // flat fill for a photograph does not darken a whole arena by a third.
+    tint.multiplyScalar(1 / DETAIL_MEAN);
+    return {
+      color: tint,
+      map: shot.map,
+      roughnessMap: shot.roughnessMap,
+      normalMap: shot.normalMap,
+      // Gentle on purpose. A floor photographed at a hand's width and then
+      // tiled across a two-hundred-metre arena has relief in it that is, at
+      // that scale, several metres deep — and every bump of it catches the
+      // light, which is what turned a dry canyon floor into wet slate.
+      normalScale: shot.normalMap ? new THREE.Vector2(0.35, 0.35) : null,
+    };
+  }
+
+  const painted = makeTexture(kind, colour, accent, opts);
+  return {
+    color: new THREE.Color(painted ? 0xffffff : colour),
+    map: painted,
+    roughnessMap: roughnessFrom(painted),
+    normalMap: null,
+    normalScale: null,
+  };
+}
 
 /** Whether a floor is something somebody laid, or something that was there. */
 const NATURAL = new Set(['stone', 'saltpan', 'regolith']);
@@ -116,6 +161,21 @@ export class World {
    *
    * @param {string} arenaId
    */
+  /**
+   * Put the same place up again.
+   *
+   * `setArena` refuses to rebuild somewhere you are already standing, which
+   * is right nearly always and wrong exactly once: the files the arena is
+   * made of arrive after the boot, and the arena that was standing when
+   * they landed was built without them.
+   */
+  rebuild() {
+    const id = this.arenaId;
+    this.arenaId = null;
+    this.setArena(id);
+    return this;
+  }
+
   setArena(arenaId) {
     if (arenaId === this.arenaId) return this;
     this._teardown();
@@ -232,7 +292,10 @@ export class World {
     // metal surface reflects, so the two can never disagree.
     const arena = this.arena;
     if (this.renderer) {
-      this.sky = makeSky(this.renderer, arena.sky);
+      // Space and the Moon pass nothing: there is no sky over either of
+      // them to reflect, and giving them one would be a mistake dressed up
+      // as a feature.
+      this.sky = makeSky(this.renderer, arena.sky, arena.reflects ?? null);
       scene.background = this.sky.texture;
       scene.environment = this.sky.environment;
       // The sky is there to be reflected, not to light the frame: shown at
@@ -310,7 +373,7 @@ export class World {
     //
     // A flat fill has no scale: standing on it, a machine could be two
     // metres tall or twenty and nothing in the picture would say which.
-    const floorTex = makeTexture(arena.floor, arena.ground, arena.accent, {
+    const floor = surfaceOf(arena.floor, arena.ground, arena.accent, {
       size: 512, repeat: arena.floorScale ?? 24, seed: 0x10ad,
     });
     // Somewhere with no floor draws none.
@@ -330,9 +393,11 @@ export class World {
     const ground = new THREE.Mesh(
       new THREE.CircleGeometry(this.arenaRadius, 96),
       new THREE.MeshStandardMaterial({
-        color: floorTex ? 0xffffff : arena.ground,
-        map: floorTex,
-        roughnessMap: roughnessFrom(floorTex),
+        color: floor.color,
+        map: floor.map,
+        roughnessMap: floor.roughnessMap,
+        normalMap: floor.normalMap,
+        ...(floor.normalScale ? { normalScale: floor.normalScale } : {}),
         roughness: floorFeel.roughness,
         metalness: floorFeel.metalness,
         envMapIntensity: 0.55,
@@ -351,7 +416,7 @@ export class World {
     if (laid) {
       const grid = new THREE.GridHelper(this.arenaRadius * 2, 96, arena.grid, 0x1e2a38);
       grid.material.transparent = true;
-      grid.material.opacity = floorTex ? 0.16 : 0.55;
+      grid.material.opacity = floor.map ? 0.16 : 0.55;
       grid.position.y = 0.012;
       this.group.add(grid);
     }
@@ -373,7 +438,7 @@ export class World {
     if (laid) {
       const fine = new THREE.GridHelper(40, 80, arena.grid, 0x223142);
       fine.material.transparent = true;
-      fine.material.opacity = floorTex ? 0.12 : 0.35;
+      fine.material.opacity = floor.map ? 0.12 : 0.35;
       fine.position.y = 0.018;
       this.group.add(fine);
     }
@@ -426,14 +491,16 @@ export class World {
    * places were told apart only by how many there were.
    */
   _buildProps(arena) {
-    const skinTex = makeTexture(arena.skin, arena.skinColor ?? 0x2b3646, arena.accent, {
+    const skin = surfaceOf(arena.skin, arena.skinColor ?? 0x2b3646, arena.accent, {
       size: 512, repeat: 1, seed: 0x5c1f,
     });
     const skinFeel = feelOf(arena.skin);
     const pillarMat = new THREE.MeshStandardMaterial({
-      color: skinTex ? 0xffffff : 0x2b3646,
-      map: skinTex,
-      roughnessMap: roughnessFrom(skinTex),
+      color: skin.color,
+      map: skin.map,
+      roughnessMap: skin.roughnessMap,
+      normalMap: skin.normalMap,
+      ...(skin.normalScale ? { normalScale: skin.normalScale } : {}),
       roughness: skinFeel.roughness,
       metalness: skinFeel.metalness,
       envMapIntensity: 0.9,

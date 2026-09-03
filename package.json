@@ -17,7 +17,9 @@
     "pack": "npm run build:release && electron-builder --dir",
     "dist:win": "npm run build:release && electron-builder --win",
     "dist:linux": "npm run build:release && electron-builder --linux",
-    "smoke": "vite build && electron tests/smoke/smoke.cjs"
+    "smoke": "vite build && electron tests/smoke/smoke.cjs",
+    "stage": "vite build --mode stage && electron electron/stage.js",
+    "stage:dev": "vite --mode stage"
   },
   "devDependencies": {
     "electron": "^33.4.11",
@@ -40,6 +42,7 @@
     },
     "files": [
       "electron/**/*",
+      "!electron/stage.js",
       "dist/**/*",
       "package.json"
     ],

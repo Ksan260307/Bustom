@@ -50,6 +50,21 @@ const VITALS = {
   alpha: 0.42,
 };
 
+/**
+ * The dial in the corner: how big, how far off the edge, and how much of
+ * the arena fits in it.
+ *
+ * `reach` above 1 leaves a margin of empty ground round the arena's own
+ * edge, so the boundary reads as a boundary rather than as the rim of the
+ * dial.
+ */
+const MAP = { size: 132, margin: 18, reach: 1.12 };
+
+/** A packed colour and an opacity, as something a canvas will take. */
+function css(hex, alpha = 1) {
+  return `rgba(${(hex >> 16) & 255}, ${(hex >> 8) & 255}, ${hex & 255}, ${alpha})`;
+}
+
 export class Hud {
   constructor(canvas) {
     this.canvas = canvas;
@@ -61,6 +76,8 @@ export class Hud {
     this.lockProgress = 0;   // 0..1 acquisition animation
     this.lockPulse = 0;
     this.visible = true;
+    /** Where the corner dial was last drawn, or null before the first. */
+    this.mapAt = null;
 
     /** Seconds left on the "you just switched to X" banner. */
     this.weaponFlash = 0;
@@ -186,11 +203,128 @@ export class Hud {
     this._drawTelemetry(s, ctx);
     this._drawWeapons(s, ctx);
     this._drawThreats(s, ctx);
+    this._drawMinimap(s, ctx);
     if (s.mission) this._drawMission(s.mission, ctx, s.topInset ?? 0);
     if (s.mission?.offer) this._drawOffer(s.mission.offer, ctx, s.player);
     // Last, over everything: how close you are to losing is not a detail to
     // be read past other details.
     this._drawVitals(s, ctx, dt);
+  }
+
+  /**
+   * The arena from above, in the corner.
+   *
+   * Everything the read-out said about the field was relative to where the
+   * camera happened to be pointing: a threat arc on the edge of the screen
+   * tells you somebody is off to your left, and nothing at all about where
+   * you are, where the cover is, or which way the middle went. On a
+   * hundred-and-fifty-metre map with four machines on it, that is most of
+   * what a player wants to know.
+   *
+   * Drawn NOSE-UP, not north-up. The player is a fixed arrow at the middle
+   * and the world turns around them, because the question is always "what
+   * is in front of me", never "what is north".
+   *
+   * Nothing here is read from the fight: it is handed the same positions
+   * everything else on the read-out uses, and draws them. It cannot affect
+   * anything, which is the rule for all of this file.
+   */
+  _drawMinimap(s, ctx) {
+    const arena = s.arena;
+    if (!arena || !s.player) return;
+
+    const R = MAP.size / 2;
+    // Top right, under whatever the legend is covering. The bottom right
+    // already has the telemetry in it, and a dial drawn over six rows of
+    // numbers is two things you cannot read instead of one you can.
+    const cx = this.w - MAP.margin - R;
+    const cy = (s.topInset ?? 0) + MAP.margin + R;
+    /**
+     * Where the dial ended up, for anything that needs to look at it.
+     *
+     * Written down rather than worked out again elsewhere: the position
+     * depends on the window and on how much of the top is covered, and a
+     * second copy of that sum is a second thing to get wrong.
+     */
+    this.mapAt = { cx, cy, r: R };
+    const scale = R / (arena.radius * MAP.reach);
+
+    // Nose-up: turn the world by minus the machine's heading.
+    const nose = s.player.body.forward;
+    const heading = Math.atan2(nose.x, nose.z);
+    const place = (x, z, out) => {
+      const dx = x - s.player.position.x;
+      const dz = z - s.player.position.z;
+      const c = Math.cos(-heading);
+      const sn = Math.sin(-heading);
+      // Screen up is -y, and forward should point up.
+      out[0] = cx + (dx * c - dz * sn) * scale;
+      out[1] = cy - (dx * sn + dz * c) * scale;
+      return out;
+    };
+    const at = [0, 0];
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(6, 10, 16, 0.62)';
+    ctx.fill();
+    // Everything below is clipped to the dial, so a piece of cover half off
+    // the edge is cut rather than drawn into the middle of the screen.
+    ctx.clip();
+
+    // ---- the ground, and where it stops
+    ctx.strokeStyle = css(arena.accent, 0.5);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    place(0, 0, at);
+    ctx.arc(at[0], at[1], arena.radius * scale, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // ---- cover, as it is: a square for a block, sized as it stands
+    ctx.fillStyle = css(arena.grid, 0.62);
+    for (const [x, z, r] of arena.pillars ?? []) {
+      place(x, z, at);
+      const w = Math.max(2, r * 2 * scale);
+      ctx.fillRect(at[0] - w / 2, at[1] - w / 2, w, w);
+    }
+    // What is in the air is drawn hollow, so it is not mistaken for a wall.
+    ctx.strokeStyle = css(arena.grid, 0.5);
+    ctx.lineWidth = 1;
+    for (const [x, , z, r] of arena.floaters ?? []) {
+      place(x, z, at);
+      const w = Math.max(2, r * 2 * scale);
+      ctx.strokeRect(at[0] - w / 2, at[1] - w / 2, w, w);
+    }
+
+    // ---- the machines
+    for (const t of s.targets ?? []) {
+      place(t.position.x, t.position.z, at);
+      const locked = s.lock && s.lock === t;
+      ctx.fillStyle = locked ? '#ffd166' : '#ff6a5c';
+      ctx.beginPath();
+      ctx.arc(at[0], at[1], locked ? 4.5 : 3.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // ---- and the player, always in the middle, always pointing up
+    ctx.fillStyle = '#8ae8ff';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 6);
+    ctx.lineTo(cx + 4.2, cy + 4.5);
+    ctx.lineTo(cx, cy + 2.2);
+    ctx.lineTo(cx - 4.2, cy + 4.5);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+
+    // The rim, outside the clip so it is a full circle.
+    ctx.strokeStyle = 'rgba(150, 180, 210, 0.4)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.stroke();
   }
 
   /**

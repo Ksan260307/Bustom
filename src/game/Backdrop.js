@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { spaceMap, fxSprite, skyPanorama, SKY_MEAN } from './Kit.js';
 import { Random } from '../core/Random.js';
 
 // ============================================================
@@ -133,6 +134,30 @@ function ridgeMask(kind, seed = 1) {
     draw((t) => Math.max(0, Math.cos((t - c) * Math.PI * 1.12)) * k);
   }
 
+  /**
+   * Shade the fill, keeping the outline.
+   *
+   * The alpha is the silhouette and stays exactly as drawn; the colour
+   * channels get a vertical ramp, dark at the base and lifting toward the
+   * crest. Without it every landform in the game is ONE flat colour — the
+   * outline is good and the thing inside it is a paper cutout, which is
+   * precisely how the salt flat and the canyon read.
+   *
+   * Applied in place so the alpha is untouched: `globalCompositeOperation`
+   * of `source-atop` paints only where something is already drawn.
+   */
+  const shade = ctx.createLinearGradient(0, N, 0, 0);
+  // Lifted well off black. The first try ran the base down to 0.17 and the
+  // salt flat's low pale ridges simply went out — the shading has to give
+  // them relief, not take them away.
+  shade.addColorStop(0.00, '#737373');       // the base, in shadow
+  shade.addColorStop(0.55, '#c8c8c8');
+  shade.addColorStop(1.00, '#ffffff');       // the crest, catching the sky
+  ctx.globalCompositeOperation = 'source-atop';
+  ctx.fillStyle = shade;
+  ctx.fillRect(0, 0, N, N);
+  ctx.globalCompositeOperation = 'source-over';
+
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.needsUpdate = true;
@@ -172,6 +197,9 @@ function ridge(radius, {
   // times round the horizon.
   const mats = [0, 1, 2, 3].map((k) => {
     const mask = ridgeMask(kind, seed * 31 + k);
+    // `map` now carries the shading and `alphaMap` the outline. They are
+    // still the same canvas — three reads RGB from one and A from the
+    // other, which is exactly the split that was baked into it.
     return new THREE.MeshBasicMaterial({
       color, map: mask, alphaMap: mask, transparent: true, opacity,
       side: THREE.DoubleSide, depthWrite: false, fog: false,
@@ -300,36 +328,150 @@ function nebula(radius, { color = 0x2a4a8c, seed = 11 } = {}) {
 }
 
 /**
+ * A lit ball that lights nothing else.
+ *
+ * The obvious way to give a planet a night side is a directional light and
+ * a Lambert material. It is also wrong here: a light in three.js belongs to
+ * the SCENE, not to the group it was added to, so a sun put in the sky to
+ * shade a planet lights every machine in the arena from the same direction
+ * — and the arena has its own lighting, chosen per place.
+ *
+ * Twenty lines of shader instead. The sun direction is a constant, the
+ * terminator is softened so the edge is a limb rather than a cut, and
+ * nothing about it escapes this mesh.
+ */
+function planetMaterial(map, sun) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      map: { value: map },
+      sun: { value: new THREE.Vector3(...sun).normalize() },
+      // Never fully black: a night side with nothing in it is a hole cut
+      // out of the sky, which reads as a rendering fault rather than as
+      // night.
+      night: { value: 0.09 },
+    },
+    fog: false,
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vN;
+      void main() {
+        vUv = uv;
+        vN = normalize(mat3(modelMatrix) * normal);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D map;
+      uniform vec3 sun;
+      uniform float night;
+      varying vec2 vUv;
+      varying vec3 vN;
+      void main() {
+        // Softened across a few degrees, so the terminator is a limb and
+        // not a knife edge drawn across a photograph.
+        float lit = smoothstep(-0.12, 0.34, dot(normalize(vN), sun));
+        vec3 c = texture2D(map, vUv).rgb * mix(night, 1.0, lit);
+        gl_FragColor = vec4(c, 1.0);
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+}
+
+/**
+ * The whole sky, photographed.
+ *
+ * Drawn dots make stars and nothing else. What was missing over both of the
+ * airless places was the BAND — the Milky Way is the single most obvious
+ * thing in a real night sky and the reason black reads as depth rather than
+ * as an unlit room.
+ *
+ * Inside-out sphere, unlit, behind everything. The drawn stars stay on top
+ * of it: a photograph at this size has no points sharp enough to be stars,
+ * and the two together are what the eye expects.
+ */
+function skyShell(radius, map, { tint = 0xffffff, brightness = 1 } = {}) {
+  const geo = new THREE.SphereGeometry(radius * 1.86, 32, 20);
+  const mat = new THREE.MeshBasicMaterial({
+    map,
+    side: THREE.BackSide,
+    fog: false,
+    depthWrite: false,
+    color: new THREE.Color(tint).multiplyScalar(brightness),
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = -8;                    // behind the stars and the planet
+  mesh.userData.dispose = () => { geo.dispose(); mat.dispose(); };
+  return mesh;
+}
+
+/**
  * A planet, low and far off.
  *
  * One fixed landmark. Open ground with no boundary wall has nothing in it
  * to say which way is which — every direction is the same colour to the
  * same black — and this is what a wall was really for on a map this size.
  */
-function planet(radius, { color = 0x4d7fc4, halo = 0x6fa8ff, at = [-0.55, 0.30, -0.78], size = 0.13 } = {}) {
+function planet(radius, {
+  color = 0x4d7fc4, halo = 0x6fa8ff, at = [-0.55, 0.30, -0.78], size = 0.13,
+  map = null, spin = 0.35, sun = [0.6, 0.35, 0.7],
+} = {}) {
   const R = radius * 1.9;
   const group = new THREE.Group();
-  const geo = new THREE.CircleGeometry(1, 48);
+  const geo = map ? new THREE.SphereGeometry(1, 40, 28) : new THREE.CircleGeometry(1, 48);
 
-  const disc = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-    color, transparent: true, opacity: 0.92, fog: false, depthWrite: false,
-  }));
+  /**
+   * A ball with a real face on it, and a night side.
+   *
+   * A flat disc says "there is a light over there"; a lit sphere says which
+   * way the sun is, which on a map with no walls is the only thing telling
+   * you which way you are facing. Lambert rather than Basic exactly for
+   * that: the terminator is the whole point, and it wants a light.
+   */
+  const mat = map
+    ? planetMaterial(map, sun)
+    : new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0.92, fog: false, depthWrite: false,
+    });
+  const disc = new THREE.Mesh(geo, mat);
   disc.scale.setScalar(R * size);
   disc.position.set(R * at[0], R * at[1], R * at[2]);
-  disc.lookAt(0, disc.position.y * 0.4, 0);
+  if (map) {
+    // Turned so the interesting half faces the arena, and tipped over a
+    // little: a planet drawn dead upright reads as a diagram.
+    disc.rotation.set(0.18, spin, 0.12);
+  } else {
+    disc.lookAt(0, disc.position.y * 0.4, 0);
+  }
   disc.renderOrder = -3;
 
-  const glow = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-    color: halo, transparent: true, opacity: 0.16, fog: false,
+  /**
+   * The air around it, not a plate behind it.
+   *
+   * The old glow was the same circle as the planet, scaled up — which was
+   * fine while the planet was itself a flat circle, and became a hard-edged
+   * blue dinner plate the moment there was a ball in front of it. A soft
+   * sprite has no edge to give away, which is the whole job.
+   */
+  const soft = fxSprite('blob');
+  const glowGeo = new THREE.PlaneGeometry(1, 1);
+  const glow = new THREE.Mesh(soft ? glowGeo : geo, new THREE.MeshBasicMaterial({
+    color: halo, map: soft, transparent: true, opacity: soft ? 0.30 : 0.16, fog: false,
     blending: THREE.AdditiveBlending, depthWrite: false,
   }));
-  glow.scale.setScalar(R * size * 1.55);
+  glow.scale.setScalar(R * size * (soft ? 2.4 : 1.55));
   glow.position.copy(disc.position);
-  glow.quaternion.copy(disc.quaternion);
-  glow.renderOrder = -4;
+  // Always square on to the camera, or a flat glow seen edge-on vanishes
+  // exactly when the planet is at its most side-lit.
+  glow.lookAt(0, 0, 0);
+  // AFTER the ball, not before it. A soft blob drawn first has nothing to
+  // be hidden by and lies across the planet's face like a bruise; drawn
+  // second it is cut away by the ball itself and what is left is the rim,
+  // which is the only part of it that was ever meant to show.
+  glow.renderOrder = -2;
 
   group.add(glow, disc);
-  group.userData.dispose = () => geo.dispose();
+  group.userData.dispose = () => { geo.dispose(); glowGeo.dispose(); mat.dispose(); };
   return group;
 }
 
@@ -381,6 +523,57 @@ const PROFILES = { city, industry, mesas, mountains, craterWall, compound };
  * @param {object} arena the arena description
  * @returns {THREE.Group} one group; call `userData.dispose()` when done
  */
+/**
+ * sRGB byte -> linear. The same curve the renderer uses.
+ *
+ * A copy of the one in Sky.js rather than an import, because the two
+ * modules are the two halves of "what the sky is" and neither should have
+ * to load the other to draw its own half.
+ */
+function toLinear(c) {
+  return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+}
+
+/**
+ * A photographed sky, tinted to the painted one it replaces.
+ *
+ * Same idea as the surfaces: the picture brings the SHAPE — cloud, a
+ * horizon glow, depth — and the arena keeps its colour, because the colour
+ * is a decision somebody made and each of the seven places is told apart by
+ * it. The sky's average is a known number from the bake, so the tint is
+ * simply the arena's average divided by it.
+ *
+ * Weighted the way the gradient covers the sphere: the horizon band is a
+ * sliver and the two ends are most of it, so a flat average of the four
+ * stops would report a sky several times brighter than the drawn one.
+ */
+function skyTint(palette, arena) {
+  const stops = [
+    [palette.top, 0.42], [palette.horizon, 0.16],
+    [palette.glow, 0.08], [palette.bottom, 0.34],
+  ];
+  const out = [0, 0, 0];
+  for (const [hex, weight] of stops) {
+    const n = parseInt(hex.slice(1), 16);
+    out[0] += toLinear(((n >> 16) & 255) / 255) * weight;
+    out[1] += toLinear(((n >> 8) & 255) / 255) * weight;
+    out[2] += toLinear((n & 255) / 255) * weight;
+  }
+  const mean = toLinear(SKY_MEAN);
+  // Matched to the painted average, and no more.
+  //
+  // The first try lifted it 2.6x on the theory that half a photograph is
+  // darker than its own average. Measured, that theory cost the salt flat
+  // its night: the sky band came out at 0.42 against a painted sky whose
+  // whole point was to be nearly black, and the place read as afternoon.
+  const lift = arena.skyLift ?? 1;
+  return new THREE.Color(
+    Math.min(1, (out[0] / mean) * lift),
+    Math.min(1, (out[1] / mean) * lift),
+    Math.min(1, (out[2] / mean) * lift),
+  );
+}
+
 export function makeBackdrop(arena) {
   const group = new THREE.Group();
   group.name = 'backdrop';
@@ -404,9 +597,41 @@ export function makeBackdrop(arena) {
   group.add(sky);
   group.userData.sky = sky;
 
+  /**
+   * The sky, for the places that have one.
+   *
+   * Behind the ridge silhouettes and inside the fog, so it is the thing
+   * they are seen AGAINST — which is what turns a row of flat cutouts into
+   * a horizon.
+   */
+  if (!back.stars && back.sky) {
+    const shot = skyPanorama(back.sky);
+    if (shot) {
+      const shell = skyShell(R, shot, { tint: 0xffffff });
+      shell.material.color.copy(skyTint(arena.sky, arena));
+      sky.add(shell);
+    }
+  }
+
   if (back.stars) {
-    sky.add(starfield(R, { count: back.stars, seed: 7, color: back.starColor }));
-    sky.add(nebula(R, { color: back.nebula ?? 0x2a4a8c, seed: 11 }));
+    // The photograph carries the band; the drawn points carry the stars.
+    // Neither is enough on its own — a 2k panorama has nothing in it sharp
+    // enough to read as a point of light at this distance, and a spray of
+    // points has no shape to it at all.
+    const shot = back.sky ? spaceMap(back.sky) : null;
+    if (shot) {
+      sky.add(skyShell(R, shot, {
+        tint: back.skyTint ?? 0xffffff,
+        brightness: back.skyBrightness ?? 1,
+      }));
+    } else {
+      sky.add(nebula(R, { color: back.nebula ?? 0x2a4a8c, seed: 11 }));
+    }
+    sky.add(starfield(R, {
+      count: shot ? Math.round(back.stars * 0.55) : back.stars,
+      seed: 7,
+      color: back.starColor,
+    }));
   }
 
   if (back.ridge) {
@@ -432,7 +657,13 @@ export function makeBackdrop(arena) {
     }));
   }
 
-  if (back.planet) sky.add(planet(R, back.planet));
+  if (back.planet) {
+    sky.add(planet(R, { ...back.planet, map: spaceMap(back.planet.map ?? null) }));
+  }
+  // A second body, for somewhere that has two things worth looking at.
+  if (back.planet2) {
+    sky.add(planet(R, { ...back.planet2, map: spaceMap(back.planet2.map ?? null) }));
+  }
 
   for (const p of parts) group.add(p);
   group.userData.dispose = () => {

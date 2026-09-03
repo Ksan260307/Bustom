@@ -11,3 +11,13 @@ release2/
 # the client. Never checked in, since it differs between the placeholder and
 # the real one.
 steam_appid.txt
+
+# Raw asset downloads. The baked results live in public/kit/; see tools/README.md.
+tools/dl/
+
+# Downloaded and baked assets. Not ours, and reproducible: see tools/README.md
+# for the one command that fetches and bakes the lot.
+public/kit/
+
+# The stage editor is built on its own; the game never ships it.
+dist-stage/

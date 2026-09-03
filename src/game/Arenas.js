@@ -12,22 +12,34 @@
 //
 //  ---- on where the cover goes
 //
-//  These layouts were scattered by hand and it showed: cover in a heap at
-//  one end and nothing at the other, pieces standing a metre apart with no
-//  lane between them, and the four corners the machines start in furnished
-//  as densely as the middle. They are now built from a small number of
-//  deliberate ideas — a ring, a spine, a cluster, a scatter with a hole in
-//  it — so every place has somewhere to cross, somewhere to hold, and a
-//  route round the outside that is not a straight line.
+//  These layouts were written by hand, piece by piece, and it showed. Every
+//  block was its own width, nothing lined up with anything, and the four
+//  corners the machines start in were furnished differently from each
+//  other — so a fight could open with one player behind good cover and
+//  another in the open, decided before anybody moved.
 //
-//  Three rules the helpers below exist to keep:
+//  They are built now, not scattered. Five rules, all of them measurable,
+//  and all of them checked in tests/game.arenas.test.js so they cannot
+//  quietly stop being true:
 //
-//    1. THE MIDDLE IS CONTESTED. Whatever is at the centre is worth having
-//       and worth leaving: cover you can hold from and be flanked in.
-//    2. THE CORNERS ARE CLEAR. Machines start there. Waking up inside a
-//       wall is not an opening move.
-//    3. NOTHING IS EVENLY SPREAD. An even scatter is the same everywhere,
-//       which means nowhere is anywhere. Density has to vary.
+//    1. ONE LATTICE. Every piece stands on an eight-metre grid. Nothing is
+//       at 21.4 metres because 21.4 is where somebody's hand stopped.
+//    2. FOUR WIDTHS. Cover comes in slim, mid, wide and mass. A place built
+//       from four sizes reads as somewhere that was built; one where every
+//       piece is its own width reads as rubble.
+//    3. THE SAME FROM ALL FOUR CORNERS. Turned or mirrored — the arena says
+//       which — so the four machines see the same arena. This is fairness,
+//       not decoration.
+//    4. THE CORNERS ARE CLEAR. Machines start there. Waking up against a
+//       shelf is not an opening move.
+//    5. LANES. Two pieces are either touching, which makes a wall, or far
+//       enough apart to walk between. The crack in between is the one thing
+//       that is never allowed: too narrow to pass, wide enough to stick in.
+//
+//  Density still varies between places — the yard is dense and the salt
+//  flat is nearly bare, and that is what tells them apart. What does not
+//  vary any more is the grain inside one place.
+//
 // ============================================================
 
 /**
@@ -55,71 +67,147 @@
  * @property {number} skinColor  and what colour that surface is mostly
  * @property {string} prop       which kit the cover is built from; see Props.js
  * @property {number} [propSalt] shifts which silhouette lands where
+ * @property {'turn4'|'mirror4'} [symmetry] how the layout repeats itself:
+ *   turned four ways, or mirrored in both axes. Written down rather than
+ *   inferred, because the test that checks it has to know which it is
  * @property {number[][]} pillars   [x, z, half-width, height] — on the floor
  * @property {number[][]} [floaters] [x, y, z, half-width, height] — in the air
  * @property {number[][]} platforms [x, y, z, half-width]
  */
 
 // ------------------------------------------------------------ layout kit
+//
+//  Everything below stands on a lattice, comes in one of four widths, and
+//  is laid out so the place looks the same from all four corners.
+//
+//  That last one is not decoration. Four machines start at four corners; if
+//  the arena is not the same from each of them, one of the four is standing
+//  somewhere better and the fight was decided before anybody moved.
 
-/** Evenly round a circle. The plainest idea there is, and the most useful. */
-function ring(count, radius, r, h, turn = 0) {
+/** The lattice everything stands on, in metres. */
+export const CELL = 8;
+
+/**
+ * The widths cover comes in. Four, not forty.
+ *
+ * A place built from four sizes reads as somewhere that was built; one
+ * where every piece is its own width reads as rubble. This is most of the
+ * difference between a stage and a scatter.
+ */
+export const GAUGE = { slim: 2.4, mid: 3.6, wide: 5.2, mass: 8.0 };
+
+/** Onto the lattice. */
+const at = (v) => Math.round(v / CELL) * CELL;
+
+/** A piece is the same piece if it stands in the same square. */
+const key = (x, z) => `${at(x)}|${at(z)}`;
+
+/**
+ * One quadrant, turned about the centre into four.
+ *
+ * A pinwheel: what you see ahead of you from your own corner is what the
+ * machine opposite sees from theirs, turned. Right for anywhere whose
+ * shape is about crossing — a ring of cover, a spread of outcrops.
+ */
+function turn4(spec) {
   const out = [];
-  for (let i = 0; i < count; i++) {
-    const a = turn + (i / count) * Math.PI * 2;
-    out.push([
-      Math.round(Math.cos(a) * radius * 100) / 100,
-      Math.round(Math.sin(a) * radius * 100) / 100,
-      r, h,
-    ]);
+  const seen = new Set();
+  for (let q = 0; q < 4; q++) {
+    for (const [x, z, r, h] of spec) {
+      let px = x;
+      let pz = z;
+      for (let i = 0; i < q; i++) {
+        const t = px;
+        px = -pz;
+        pz = t;
+      }
+      // A piece on the centre is one piece, not four.
+      const k = key(px, pz);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push([at(px), at(pz), r, h]);
+    }
   }
   return out;
 }
 
 /**
- * A ring with pieces missing.
+ * One quadrant, mirrored in both axes instead of turned.
  *
- * A complete ring is a wall, and a wall you cannot get through turns the
- * middle into a room. The gaps are the doors, and where they are is the
- * whole point of the shape.
- *
- * @param {number[]} skip which indices to leave out
+ * A grid. Rotation gives a pinwheel, and a pinwheel of shelving is a maze —
+ * a yard wants its aisles straight and parallel, all four quarters of it.
  */
-function arc(count, radius, r, h, turn = 0, skip = []) {
-  return ring(count, radius, r, h, turn).filter((_, i) => !skip.includes(i));
-}
-
-/**
- * A line of cover running one way across the map.
- *
- * This is what gives a place a grain. Approaching along the spine is safe
- * and slow; crossing it is quick and exposed, and that trade is the fight.
- */
-function spine(count, from, to, r, h) {
+function mirror4(spec) {
   const out = [];
-  for (let i = 0; i < count; i++) {
-    const t = count === 1 ? 0.5 : i / (count - 1);
-    out.push([
-      Math.round((from[0] + (to[0] - from[0]) * t) * 100) / 100,
-      Math.round((from[1] + (to[1] - from[1]) * t) * 100) / 100,
-      r, h,
-    ]);
+  const seen = new Set();
+  for (const sx of [1, -1]) {
+    for (const sz of [1, -1]) {
+      for (const [x, z, r, h] of spec) {
+        const k = key(x * sx, z * sz);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push([at(x * sx), at(z * sz), r, h]);
+      }
+    }
   }
   return out;
 }
 
 /**
- * A knot of cover around one spot.
+ * A straight run of cover, `count` pieces every `step` cells.
  *
- * Somewhere to fight over, as opposed to somewhere to fight in. The offsets
- * are written out rather than drawn, so the same knot appears every time.
+ * The thing you fight along. Everything about a lane is that it is straight
+ * and that you can see down it.
  */
-function cluster(x, z, spec) {
-  return spec.map(([dx, dz, r, h]) => [x + dx, z + dz, r, h]);
+function line(x, z, dx, dz, count, r, h, step = 2) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    out.push([x + dx * i * step * CELL, z + dz * i * step * CELL, r, h]);
+  }
+  return out;
 }
 
-/** One piece, on its own, a long way from anything. A landmark. */
-const lone = (x, z, r, h) => [[x, z, r, h]];
+/** A rectangular bank: `cols` by `rows`, on the lattice. */
+function bank(x, z, cols, rows, r, h, step = 2) {
+  const out = [];
+  for (let c = 0; c < cols; c++) {
+    for (let d = 0; d < rows; d++) {
+      out.push([x + c * step * CELL, z + d * step * CELL, r, h]);
+    }
+  }
+  return out;
+}
+
+/** One piece, where it was put. */
+const one = (x, z, r, h) => [[at(x), at(z), r, h]];
+
+/**
+ * The same four ways up, for things that sit in the air.
+ *
+ * Platforms and floaters carry a height as well, and it has to survive the
+ * turn — a staircase that spirals is a staircase; one whose steps land at
+ * random heights is scaffolding.
+ */
+function turn4y(spec) {
+  const out = [];
+  const seen = new Set();
+  for (let q = 0; q < 4; q++) {
+    for (const [x, y, z, ...rest] of spec) {
+      let px = x;
+      let pz = z;
+      for (let i = 0; i < q; i++) {
+        const t = px;
+        px = -pz;
+        pz = t;
+      }
+      const k = `${key(px, pz)}|${y}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push([at(px), y, at(pz), ...rest]);
+    }
+  }
+  return out;
+}
 
 // ------------------------------------------------------------ the places
 
@@ -132,12 +220,19 @@ export const ARENAS = {
     radius: 120,
     ceiling: 95,
     sky: { top: '#03050a', horizon: '#0a1220', glow: '#183246', bottom: '#05070c' },
+    // What the metal reflects. The painted sky above is what the camera
+    // sees; a gradient has no shapes in it, and a reflection is shapes.
+    reflects: 'dikhololo_night',
     fog: 0.0062,
     fogColor: 0x0b1521,
     ground: 0x19212e,
     grid: 0x4f9fd0,
     accent: 0x3fa0dd,
     backdrop: {
+      // The sky, photographed. Tinted to this arena's own gradient, so
+      // the place keeps the colour it was designed with and gains the
+      // cloud and depth a gradient cannot have.
+      sky: 'kloppenheim_02_puresky',
       ridge: 'compound', ridgeColor: 0x2c5f8a, ridgeCount: 34, ridgeOpacity: 0.42,
     },
     floor: 'concrete',
@@ -148,20 +243,22 @@ export const ARENAS = {
     // A knot in the middle worth holding, a broken ring at mid-distance to
     // fight your way through, and two long stacks that give the place a
     // direction. Corners left clear.
+    // Concentric squares, turned four ways: an inner knot worth holding, a
+    // broken ring to fight through, and four masses on the axes that say
+    // which way you are facing from anywhere on the map.
+    symmetry: 'turn4',
     pillars: [
-      ...cluster(0, 0, [
-        [-7, -6, 3.2, 15], [8, -4, 2.6, 19], [-2, 9, 3.6, 11], [10, 10, 2.2, 23],
+      ...turn4([
+        [16, 16, GAUGE.mid, 15],
+        [48, 0, GAUGE.slim, 11],
+        [24, 48, GAUGE.mid, 13],
+        [80, 48, GAUGE.wide, 17],
+        [88, 0, GAUGE.mass, 27],
+        [24, 96, GAUGE.slim, 13],
+        [96, 24, GAUGE.slim, 13],
       ]),
-      ...arc(12, 46, 3.0, 17, 0.26, [1, 4, 7, 10]),
-      // Two lanes running east–west, well clear of the four corners the
-      // machines start in. On the diagonals they were exactly where
-      // somebody wakes up.
-      ...spine(5, [-44, -74], [44, -74], 3.4, 13),
-      ...spine(5, [-44, 74], [44, 74], 3.4, 13),
-      ...lone(-92, 0, 5.0, 27),
-      ...lone(92, 0, 5.0, 27),
     ],
-    platforms: [[-18, 22, 30, 7], [30, 34, -22, 9], [4, 46, 8, 6]],
+    platforms: [...turn4y([[32, 24, 32, 7], [72, 34, 8, 8]])],
   },
 
   // ---- tight, tall, and you cannot see anybody coming
@@ -172,12 +269,19 @@ export const ARENAS = {
     radius: 96,
     ceiling: 110,
     sky: { top: '#050710', horizon: '#101a2e', glow: '#2a4a6e', bottom: '#080a12' },
+    // What the metal reflects. The painted sky above is what the camera
+    // sees; a gradient has no shapes in it, and a reflection is shapes.
+    reflects: 'modern_buildings_night',
     fog: 0.0088,
     fogColor: 0x101a2c,
     ground: 0x1b1f27,
     grid: 0x5a7fa8,
     accent: 0xe0a64a,
     backdrop: {
+      // The sky, photographed. Tinted to this arena's own gradient, so
+      // the place keeps the colour it was designed with and gains the
+      // cloud and depth a gradient cannot have.
+      sky: 'kloppenheim_07_puresky',
       ridge: 'city', ridgeColor: 0x24406a, ridgeCount: 54, ridgeOpacity: 0.55,
     },
     floor: 'asphalt',
@@ -188,37 +292,26 @@ export const ARENAS = {
     // City blocks, not a forest. Two avenues cross at the middle and the
     // rest is built up either side of them, which is what gives a city its
     // corners — the thing you actually fight over here.
+    // A street grid: four-tower blocks on a lattice with the avenues left
+    // open along both axes, and one tower on the crossing itself. Mirrored
+    // rather than turned — a city's streets run straight, and a pinwheel of
+    // them is a spiral nobody can navigate.
+    symmetry: 'mirror4',
     pillars: [
-      // Inner blocks, on the diagonals but well inside the ring the
-      // machines start on.
-      ...cluster(21, 21, [
-        [-9, -9, 4.5, 38], [9, -7, 3.6, 28], [-7, 10, 3.8, 44], [10, 10, 4.2, 32],
+      ...mirror4([
+        // Four blocks to a quarter, set off the crossing so both avenues
+        // stay open all the way through.
+        [24, 8, GAUGE.mid, 34], [8, 24, GAUGE.mid, 30],
+        [40, 24, GAUGE.mid, 28], [24, 40, GAUGE.mid, 38],
+        // Two out on the ring roads.
+        [72, 8, GAUGE.mid, 26], [8, 72, GAUGE.mid, 26],
+        // And a pair of high ones, well off the diagonals the machines
+        // arrive on.
+        [80, 32, GAUGE.wide, 44], [32, 80, GAUGE.wide, 40],
       ]),
-      ...cluster(-21, 21, [
-        [-9, -9, 3.8, 30], [10, -8, 4.4, 42], [-8, 10, 4.0, 26], [9, 10, 3.4, 36],
-      ]),
-      ...cluster(-21, -21, [
-        [-10, -8, 4.2, 34], [8, -10, 3.6, 46], [-8, 9, 4.6, 28], [10, 9, 3.8, 40],
-      ]),
-      ...cluster(21, -21, [
-        [-8, -10, 3.4, 44], [10, -8, 4.0, 30], [-10, 8, 3.8, 36], [8, 10, 4.4, 24],
-      ]),
-      // Outer blocks square-on to the avenues, so the two roads out of the
-      // middle stay open and everything else is built up.
-      ...cluster(0, 64, [[-13, 0, 4.0, 30], [13, 5, 3.4, 40]]),
-      ...cluster(0, -64, [[-13, 0, 3.4, 42], [13, -5, 4.0, 28]]),
-      ...cluster(64, 0, [[0, -13, 3.8, 34], [5, 13, 4.2, 26]]),
-      ...cluster(-64, 0, [[0, -13, 4.2, 26], [-5, 13, 3.8, 38]]),
-      // And the far corners, outside where anybody starts.
-      ...lone(60, 60, 4.4, 34),
-      ...lone(-60, 60, 4.4, 28),
-      ...lone(-60, -60, 4.4, 38),
-      ...lone(60, -60, 4.4, 30),
-      // One tower on the crossing itself: the whole map can see it, and
-      // anybody at the foot of it cannot be seen at all.
-      ...lone(0, 0, 5.0, 52),
+      ...one(0, 0, GAUGE.wide, 52),
     ],
-    platforms: [[-24, 38, 24, 8], [26, 44, -20, 8], [0, 52, 40, 7], [-40, 30, -36, 9]],
+    platforms: [...turn4y([[24, 38, 24, 8], [0, 52, 56, 7]])],
   },
 
   // ---- dense low cover: everything is a corner, nothing is safe for long
@@ -229,12 +322,19 @@ export const ARENAS = {
     radius: 88,
     ceiling: 70,
     sky: { top: '#080a0b', horizon: '#1a221f', glow: '#3c5248', bottom: '#0a0d0c' },
+    // What the metal reflects. The painted sky above is what the camera
+    // sees; a gradient has no shapes in it, and a reflection is shapes.
+    reflects: 'modern_buildings_night',
     fog: 0.0088,
     fogColor: 0x181f1c,
     ground: 0x2a302c,
     grid: 0x6f9f88,
     accent: 0xffb347,
     backdrop: {
+      // The sky, photographed. Tinted to this arena's own gradient, so
+      // the place keeps the colour it was designed with and gains the
+      // cloud and depth a gradient cannot have.
+      sky: 'kloppenheim_07_puresky',
       ridge: 'industry', ridgeColor: 0x3f6a58, ridgeCount: 40, ridgeOpacity: 0.45,
     },
     floor: 'deckplate',
@@ -245,21 +345,21 @@ export const ARENAS = {
     // A yard: rows of stacked goods with aisles between them, a clear apron
     // in the middle where the loading happened, and heaps in two corners.
     // The aisles are the whole place — they are what you fight along.
+    // A yard: four rows of stacked goods with straight aisles between them,
+    // and an apron in the middle where the loading happened. The aisles are
+    // the place — they are what you fight along, so they run the same way
+    // in all four quarters rather than pinwheeling.
+    symmetry: 'mirror4',
     pillars: [
-      ...spine(6, [-58, -26], [-14, -26], 2.6, 8),
-      ...spine(6, [-58, -12], [-14, -12], 2.6, 6),
-      ...spine(6, [-58, 12], [-14, 12], 2.6, 9),
-      ...spine(6, [-58, 26], [-14, 26], 2.6, 7),
-      ...spine(4, [16, -30], [46, -30], 3.0, 7),
-      ...spine(5, [16, -14], [56, -14], 3.0, 9),
-      ...spine(5, [16, 14], [56, 14], 3.0, 6),
-      ...spine(4, [16, 30], [46, 30], 3.0, 8),
-      // The apron: four pieces round an open square, not filling it.
-      ...cluster(0, 0, [[-9, -9, 3.4, 11], [9, 9, 3.4, 11]]),
-      ...lone(0, -58, 4.4, 13),
-      ...lone(0, 58, 4.4, 13),
+      ...mirror4([
+        // Two aisles to a quarter, five deep. They stop short of the
+        // diagonal on purpose: that is where the machines come in, and a
+        // shelf you wake up against is not an opening move.
+        ...line(16, 8, 1, 0, 5, GAUGE.slim, 8),
+        ...line(16, 24, 1, 0, 5, GAUGE.slim, 6),
+      ]),
     ],
-    platforms: [[-20, 16, 20, 6], [22, 18, -18, 6], [0, 24, -34, 7]],
+    platforms: [...turn4y([[24, 16, 24, 6], [0, 24, 56, 7]])],
   },
 
   // ---- open, and the only cover is where the ground itself rises
@@ -270,12 +370,19 @@ export const ARENAS = {
     radius: 140,
     ceiling: 80,
     sky: { top: '#0a0710', horizon: '#2e1a18', glow: '#7a3a22', bottom: '#120a08' },
+    // What the metal reflects. The painted sky above is what the camera
+    // sees; a gradient has no shapes in it, and a reflection is shapes.
+    reflects: 'moonless_golf',
     fog: 0.0044,
     fogColor: 0x2a1712,
     ground: 0x2e2018,
     grid: 0xa8642f,
     accent: 0xff8a3c,
     backdrop: {
+      // The sky, photographed. Tinted to this arena's own gradient, so
+      // the place keeps the colour it was designed with and gains the
+      // cloud and depth a gradient cannot have.
+      sky: 'qwantani_dusk_1_puresky',
       ridge: 'mesas', ridgeColor: 0x6a3520, ridgeCount: 30,
       ridgeSpread: 1.35, ridgeOpacity: 0.7,
     },
@@ -287,18 +394,21 @@ export const ARENAS = {
     // Two walls of rock running the length of the map with a floor between
     // them: that is what a canyon is. Crossing from one wall to the other
     // is the exposed move, and there are two ways through.
+    // Four ridges, each running clear of the corner behind it, turned into
+    // a pinwheel: the gaps between them are the four ways across, and the
+    // mass in the middle is the only real cover out there.
+    symmetry: 'turn4',
     pillars: [
-      ...spine(6, [-96, -70], [-40, 76], 10.0, 32),
-      ...spine(6, [96, -76], [40, 70], 10.0, 32),
-      // Rubble on the floor between them, in two loose heaps, so the run
-      // across is not a completely bare one.
-      ...cluster(-16, -34, [[0, 0, 5.0, 14], [13, -9, 3.5, 9], [-11, 10, 4.0, 11]]),
-      ...cluster(20, 40, [[0, 0, 5.5, 16], [-14, -8, 4.0, 10], [12, 11, 3.5, 8]]),
-      // And one big one in the middle, which is the only real cover out
-      // there and therefore the thing everybody wants.
-      ...lone(0, 0, 9.0, 26),
+      // A ridge across each side, built of masses standing shoulder to
+      // shoulder — this is a wall, and a wall with gaps in it is a fence.
+      // The four corners are left open, and those are the ways in.
+      ...turn4([...line(-40, 96, 1, 0, 6, GAUGE.mass, 30)]),
+      // Rubble between the wall and the middle.
+      ...turn4([[32, 32, GAUGE.wide, 12]]),
+      // And the one piece of real cover in the open ground.
+      ...one(0, 0, GAUGE.mass, 26),
     ],
-    platforms: [[0, 26, 0, 10]],
+    platforms: [[0, 26, 0, 10], ...turn4y([[48, 22, 48, 7]])],
   },
 
   // ---- nothing to hide behind at all
@@ -309,12 +419,19 @@ export const ARENAS = {
     radius: 150,
     ceiling: 100,
     sky: { top: '#04080c', horizon: '#123040', glow: '#2f7f9e', bottom: '#071016' },
+    // What the metal reflects. The painted sky above is what the camera
+    // sees; a gradient has no shapes in it, and a reflection is shapes.
+    reflects: 'dikhololo_night',
     fog: 0.0030,
     fogColor: 0x143040,
     ground: 0x243642,
     grid: 0x7fd8f0,
     accent: 0x8ae8ff,
     backdrop: {
+      // The sky, photographed. Tinted to this arena's own gradient, so
+      // the place keeps the colour it was designed with and gains the
+      // cloud and depth a gradient cannot have.
+      sky: 'qwantani_moon_noon_puresky',
       ridge: 'mountains', ridgeColor: 0x2f6a86, ridgeCount: 36,
       ridgeSpread: 2.1, ridgeOpacity: 0.4,
     },
@@ -328,14 +445,19 @@ export const ARENAS = {
     // Scattering fifteen outcrops evenly would have made a sparse forest;
     // three isolated landmarks and one cluster make a plain with features
     // in it, and every one of them is worth crossing open ground for.
+    // Four outcrops on the axes and four further out on the diagonals, and
+    // a low knot in the middle. On a plain this bare, the only thing that
+    // matters is that every one of them is worth crossing open ground for —
+    // and that the four corners see the same number of them.
+    symmetry: 'turn4',
     pillars: [
-      ...cluster(0, 0, [[-6, -5, 5.0, 10], [7, 6, 3.5, 6]]),
-      ...lone(-64, 48, 4.5, 9),
-      ...lone(70, -34, 4.0, 8),
-      ...lone(24, 96, 3.5, 7),
-      ...lone(-96, -62, 5.0, 11),
-      ...lone(108, 54, 3.0, 5),
-      ...lone(-30, -104, 3.5, 6),
+      ...turn4([
+        [56, 0, GAUGE.wide, 10],
+        [24, 24, GAUGE.slim, 6],
+        [96, 96, GAUGE.mid, 8],
+        [120, 24, GAUGE.slim, 6],
+      ]),
+      ...one(0, 0, GAUGE.wide, 11),
     ],
     platforms: [],
   },
@@ -377,7 +499,24 @@ export const ARENAS = {
       stars: 2200,
       starColor: 0xe6ecff,
       nebula: 0x2f4c96,
-      planet: { color: 0x3a6ab0, halo: 0x5f9bff, at: [-0.5, 0.18, -0.86], size: 0.16 },
+      // The whole sky, photographed. Held well down: this is a picture of a
+      // dark sky and the arena is darker still, and a bright band across it
+      // would light the fight from nowhere.
+      sky: 'milkyway',
+      skyBrightness: 0.55,
+      // Earth, large and low, with the sun off to one side of it. On a map
+      // with no walls it is the only thing telling you which way you face.
+      planet: {
+        map: 'earth', halo: 0x5f9bff, at: [-0.5, 0.14, -0.86], size: 0.30,
+        // The sun well off to one side, so there is a terminator to see.
+        // Lit square-on, a planet is a poster of a planet.
+        spin: 2.1, sun: [-0.75, 0.28, 0.6],
+      },
+      // And the Moon, small and far the other way, so there are two.
+      planet2: {
+        map: 'moon', halo: 0x8a8f9c, at: [0.72, 0.42, 0.55], size: 0.055,
+        spin: 0.6, sun: [-0.8, 0.2, -0.5],
+      },
     },
     floor: 'deckplate',
     floorScale: 30,
@@ -394,16 +533,19 @@ export const ARENAS = {
     // crossing between two pieces is a decision rather than a step.
     pillars: [],
     platforms: [],
+    symmetry: 'turn4',
     floaters: [
-      // A loose column through the middle of the volume, so there is a
-      // vertical thread to fight along.
-      [0, 60, 0, 6.0, 26], [0, 130, 0, 5.0, 22], [0, 200, 0, 5.5, 24],
-      // And six well-separated masses out around it, at different heights.
-      [-86, 46, 62, 5.5, 24], [92, 74, -54, 6.0, 26],
-      [70, 150, 78, 5.0, 22], [-96, 168, -70, 5.5, 24],
-      [-58, 108, -110, 5.0, 20], [64, 96, 118, 5.5, 22],
-      // Two more, further out still, as things to make for.
-      [-140, 84, -12, 6.5, 28], [136, 190, 30, 6.0, 26],
+      // A column through the middle of the volume: the vertical thread the
+      // whole fight hangs off.
+      [0, 60, 0, GAUGE.mass, 26], [0, 130, 0, GAUGE.wide, 22],
+      [0, 200, 0, GAUGE.mass, 24],
+      // And a shell round it at three heights, each turned four ways, so
+      // there is somewhere to make for whichever way you are drifting.
+      ...turn4y([
+        [88, 48, 48, GAUGE.mass, 26],
+        [96, 120, 48, GAUGE.wide, 22],
+        [136, 190, 32, GAUGE.mass, 26],
+      ]),
     ],
   },
 
@@ -432,9 +574,18 @@ export const ARENAS = {
       stars: 1500,
       starColor: 0xf0f4ff,
       nebula: 0x1c2f5c,
+      sky: 'milkyway',
+      // Dimmer than in orbit: there is ground under you here, lit hard, and
+      // the sky has to stay behind it rather than compete.
+      skyBrightness: 0.34,
       ridge: 'craterWall', ridgeColor: 0x59564f,
       ridgeCount: 30, ridgeSpread: 1.45, ridgeOpacity: 0.85,
-      planet: { color: 0x4d7fc4, halo: 0x6fa8ff, at: [-0.55, 0.30, -0.78], size: 0.13 },
+      // Earthrise. Half-lit, low over the crater wall, and the one thing on
+      // this map that says where you are.
+      planet: {
+        map: 'earth', halo: 0x6fa8ff, at: [-0.55, 0.26, -0.78], size: 0.16,
+        spin: 3.4, sun: [-0.7, 0.35, 0.62],
+      },
     },
     floor: 'regolith',
     // Big tiles: at forty repeats a crater is a metre across and the whole
@@ -449,23 +600,20 @@ export const ARENAS = {
     // A station in the middle and craters around it, with a long clear run
     // between them — a sixth-gee jump crosses eighty metres, so cover has
     // to be further apart here than anywhere else to mean anything.
+    symmetry: 'turn4',
     pillars: [
-      ...cluster(0, 0, [
-        [-12, -8, 5.0, 6], [14, -6, 4.0, 5], [-4, 14, 4.5, 7], [16, 14, 3.5, 5],
+      ...turn4([
+        [32, 32, GAUGE.wide, 9],
+        [72, 8, GAUGE.mid, 7],
+        [8, 104, GAUGE.mid, 11],
+        [104, 72, GAUGE.slim, 6],
       ]),
-      ...arc(9, 62, 8.0, 6, 0.35, [2, 6]),
-      ...lone(-118, 40, 10.0, 8),
-      ...lone(104, -76, 9.0, 7),
-      ...lone(-40, -122, 8.0, 6),
-      ...lone(60, 118, 9.0, 7),
+      ...one(0, 0, GAUGE.mass, 6),
     ],
-    platforms: [[0, 12, 0, 14], [-40, 26, 30, 9], [42, 30, -28, 9], [0, 44, -56, 8]],
+    platforms: [[0, 12, 0, 14], ...turn4y([[48, 28, 16, 9]])],
     // A one-sixth-gee jump clears a building, so there has to be something
     // up there to clear.
-    floaters: [
-      [26, 34, -44, 4.0, 7], [-56, 40, 48, 4.5, 8],
-      [78, 48, 34, 4.0, 7], [-34, 58, -78, 5.0, 9],
-    ],
+    floaters: [...turn4y([[40, 36, 88, GAUGE.mid, 7], [88, 52, 24, GAUGE.wide, 9]])],
   },
 };
 

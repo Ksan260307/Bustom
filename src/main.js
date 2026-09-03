@@ -5,6 +5,7 @@ import { History } from './editor/History.js';
 import { PartLibrary } from './editor/PartLibrary.js';
 import { FieldScene } from './game/FieldScene.js';
 import { ARENAS, DEFAULT_ARENA, getArena } from './game/Arenas.js';
+import { loadKit, kitStatus } from './game/Kit.js';
 import {
   SoloRun, SOLO_STAGES, DIFFICULTIES, DEFAULT_DIFFICULTY,
 } from './game/SoloRun.js';
@@ -203,6 +204,34 @@ export class App {
     this.mode = null;
     this.setMode('title');
 
+    /**
+     * The files, fetched in the background.
+     *
+     * Deliberately not awaited. Everything they replace has a procedural
+     * version that has always been there and still works, so the title
+     * screen comes up on that and the arena picks these up when they land —
+     * which for three megabytes off local disk is long before anyone has
+     * chosen where to fight. A boot that waits is a boot that can hang.
+     */
+    this.kitReady = loadKit().then((ok) => {
+      // The arena standing when they land was built without them, and it is
+      // the one the player walks into if they go straight to a fight —
+      // `setArena` will not rebuild somewhere you are already standing, so
+      // it has to be told to.
+      if (ok) {
+        this.field.world.rebuild();
+        // The effect pools were built at the boot and the sprites land
+        // after it, so the materials are told rather than rebuilt.
+        this.field.effects?.useKit();
+        // And the machines: a thruster's flame is part of the rig, so a rig
+        // built before the sprites arrived has no flame on it. The bench is
+        // rebuilt here; a machine in the field gets one when the field is
+        // entered, which is always after this.
+        this.editor.rebuild();
+      }
+      return kitStatus();
+    });
+
     this._bindGlobalKeys();
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
@@ -234,6 +263,8 @@ export class App {
     /** Real time owed to the simulation but not yet stepped. */
     this.stepBank = 0;
     this.stepsThisFrame = 0;
+    /** True while the offer to restore is up, so the net is not overwritten. */
+    this._draftHeld = false;
     // The safety net, offered once, on the way in.
     this.ui.offerDraft?.();
     this.renderer.setAnimationLoop(() => this.frame());
@@ -470,6 +501,11 @@ export class App {
    */
   touch() {
     this.dirty = true;
+    // The first change makes the offer meaningless — restoring on top of
+    // work somebody has already started is the mistake the offer exists to
+    // avoid in the other direction. Taking it down here also releases the
+    // autosave, so this change is the first thing kept.
+    this.ui?.foldDraft?.();
     // Never sooner than the last write earned. Restarting the clock on every
     // keystroke is right; restarting it to 1.5s on a document that takes two
     // seconds to write is not.
@@ -478,8 +514,22 @@ export class App {
     return this;
   }
 
+  /**
+   * Hold the autosave off while the offer to restore is on screen.
+   *
+   * Without this the offer goes stale as you look at it: the autosave keeps
+   * running, so a minute into a new machine the draft being offered has
+   * already been replaced by that machine, and "restore" restores what is
+   * in front of you.
+   */
+  holdDraft(on) {
+    this._draftHeld = !!on;
+    return this;
+  }
+
   /** Write the safety net, if it is owed. Driven from the frame clock. */
   tickDraft(dt) {
+    if (this._draftHeld) return this;
     if (this._draftIn <= 0) return this;
     this._draftIn -= dt;
     if (this._draftIn > 0) return this;

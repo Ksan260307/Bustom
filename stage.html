@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<title>BLOSTOM — STAGE EDITOR</title>
+<!--
+  A separate program that happens to read the game's data.
+
+  Not reachable from the game, not imported by it, and not in its build: a
+  tool may depend on the thing it edits, and the thing being edited must
+  never learn to depend on its tools.
+-->
+<link rel="stylesheet" href="./src/stage/stage.css" />
+</head>
+<body>
+  <div id="plot"><canvas id="plan"></canvas></div>
+  <aside id="panel"></aside>
+  <script type="module" src="/src/stage/main.js"></script>
+</body>
+</html>

@@ -159,10 +159,17 @@ export class ZMFBody {
    * on the ground believing it was still falling, and two runs of the same
    * fight could not be made to agree.
    */
-  reset(position = new THREE.Vector3(0, this.rideHeight, 0)) {
+  /**
+   * Put the machine down, facing somewhere.
+   *
+   * `facing` is a direction, not a point. Everything used to spawn pointing
+   * at +Z whatever corner it woke up in, so three of the four machines
+   * opened a fight looking at the wall behind them.
+   */
+  reset(position = new THREE.Vector3(0, this.rideHeight, 0), facing = null) {
     this.position.copy(position);
     this.inertia.reset();
-    this.angular.reset(new THREE.Vector3(0, 0, 1));
+    this.angular.reset(facing ?? new THREE.Vector3(0, 0, 1));
     this.assist.clear();
     this.env.reset();
     this.layers.reset();

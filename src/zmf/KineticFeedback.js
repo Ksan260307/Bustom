@@ -1,4 +1,5 @@
 import { clamp, clamp01, damp } from './math.js';
+import { sfxBytes } from '../game/Kit.js';
 
 // ============================================================
 //  ZMF §8 : Kinetic Feedback — Synesthesia Link
@@ -19,6 +20,18 @@ export class KineticFeedback {
     /** Visual channel, read by the renderer / HUD each frame. */
     this.visual = { chroma: 0, noise: 0, flash: 0 };
     this.rumble = 0;
+
+    /**
+     * Recorded one-shots, decoded on first use.
+     *
+     * The synthesised version stays underneath every one of these and is
+     * what plays if a file is missing — the oscillators are the sound of
+     * this game, and a sample is a body put on them. A shot is a click of
+     * filtered noise plus a recording of a shot; either alone is thinner
+     * than both.
+     */
+    this.samples = new Map();
+    this.sampleGain = null;
   }
 
   /** Must be called from inside a user gesture. */
@@ -85,6 +98,14 @@ export class KineticFeedback {
     events.gain.value = 0.9;
     events.connect(master);
     this.events = events;
+
+    // Recorded one-shots go through their own trim, because they were
+    // mastered by somebody else and arrive far hotter than the oscillators
+    // this game builds for itself.
+    const samples = ctx.createGain();
+    samples.gain.value = 0.42;
+    samples.connect(master);
+    this.sampleGain = samples;
     this.noiseBuffer = buf;
 
     this.master = master;
@@ -185,6 +206,13 @@ export class KineticFeedback {
       q: 0.7,
     });
     if (w > 0.5) this._thump({ gain: 0.14 * w, from: 160, to: 55, life: 0.10 + w * 0.1 });
+    // A cannon gets the bang; a gatling gets the crack, pitched up so a
+    // stream of them does not turn into a drum roll.
+    this._sample(
+      w > 0.5 ? 'fire-heavy' : 'fire-light',
+      (mine ? 0.5 : 0.26) * (0.5 + w * 0.6),
+      w > 0.5 ? 0.9 + w * 0.2 : 1.25 - w * 0.3,
+    );
   }
 
   /** Something arrived. `mine` is a hit WE landed — the one worth hearing. */
@@ -200,6 +228,13 @@ export class KineticFeedback {
     });
     // Being hit gets a body to it, so it is never mistaken for landing one.
     if (!mine) this._thump({ gain: 0.12 + w * 0.16, from: 220, to: 60, life: 0.16 });
+    // Which end of it you are on is the thing worth hearing, so the two are
+    // different recordings rather than the same one at two volumes.
+    this._sample(
+      mine ? 'hit-landed' : 'hit-taken',
+      (mine ? 0.38 : 0.5) * (0.5 + w * 0.6),
+      1.15 - w * 0.35,
+    );
   }
 
   /** A machine came apart. */
@@ -208,11 +243,61 @@ export class KineticFeedback {
     const w = clamp01(size);
     this._burst({ gain: 0.26 * (0.6 + w), from: 1800, to: 90, life: 0.5 + w * 0.4, q: 0.5 });
     this._thump({ gain: 0.30 * (0.5 + w), from: 120, to: 28, life: 0.6 + w * 0.4 });
+    // Bigger machines come apart lower down.
+    this._sample('boom', 0.55 * (0.6 + w * 0.5), 1.15 - w * 0.35);
+  }
+
+  /**
+   * Play a recorded one-shot, if one shipped for this event.
+   *
+   * Decoded the first time it is asked for rather than at boot: the bytes
+   * arrive long before an AudioContext exists, because a context cannot be
+   * made until the player has clicked something.
+   *
+   * The pitch wanders slightly on every play. Ten identical shots in two
+   * seconds is the single most obvious way a sampled gun gives itself away,
+   * and this is presentation — nothing here is replayed, so it is allowed
+   * to differ between two runs of the same fight.
+   *
+   * @param {string} name   which file
+   * @param {number} gain   0..1
+   * @param {number} pitch  centre playback rate
+   */
+  _sample(name, gain, pitch = 1) {
+    if (!this.audible || !this.sampleGain) return false;
+    const ctx = this.ctx;
+
+    let entry = this.samples.get(name);
+    if (entry === undefined) {
+      const bytes = sfxBytes(name);
+      if (!bytes) { this.samples.set(name, null); return false; }
+      // Decoding takes a copy: decodeAudioData is entitled to detach the
+      // buffer it is given, and these bytes are wanted again next time.
+      entry = null;
+      this.samples.set(name, null);
+      ctx.decodeAudioData(bytes.slice(0)).then((buf) => {
+        this.samples.set(name, buf);
+      }).catch(() => { this.samples.set(name, null); });
+      return false;
+    }
+    if (!entry) return false;
+
+    const src = ctx.createBufferSource();
+    src.buffer = entry;
+    src.playbackRate.value = pitch * (0.94 + Math.random() * 0.12);
+    const g = ctx.createGain();
+    g.gain.value = clamp01(gain);
+    src.connect(g);
+    g.connect(this.sampleGain);
+    src.start();
+    src.onended = () => { g.disconnect(); };
+    return true;
   }
 
   /** A target was acquired, or lost. Two notes, one order or the other. */
   lock(on = true) {
     if (!this.audible) return;
+    if (this._sample(on ? 'lock-on' : 'lock-off', 0.32)) return;
     const ctx = this.ctx;
     const t = ctx.currentTime;
     for (const [i, f] of (on ? [880, 1320] : [1320, 660]).entries()) {

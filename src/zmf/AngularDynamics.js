@@ -63,13 +63,31 @@ export class AngularDynamics {
     this.maxBankHigh = 30 * DEG * heft;
   }
 
+  /**
+   * Face a direction, from a standing start.
+   *
+   * The attitude is built here rather than left as identity and swung round
+   * on the first step: a machine that spawns facing +Z and then turns is a
+   * machine that spends its first second of a fight turning round, in front
+   * of whoever it is fighting.
+   */
   reset(forward = new THREE.Vector3(0, 0, 1)) {
-    this.freeForward.copy(forward).normalize();
+    this.freeForward.copy(forward);
+    this.freeForward.y = 0;
+    if (this.freeForward.lengthSq() < 1e-8) this.freeForward.set(0, 0, 1);
+    this.freeForward.normalize();
     this.aimForward.copy(this.freeForward);
     this.forward.copy(this.freeForward);
     this.bank = 0;
     this.angularVelocity.set(0, 0, 0);
-    this.quaternion.identity();
+
+    _up.set(0, 1, 0);
+    _right.crossVectors(_up, this.freeForward).normalize();
+    _up.crossVectors(this.freeForward, _right).normalize();
+    _m.makeBasis(_right, _up, this.freeForward);
+    this.quaternion.setFromRotationMatrix(_m);
+    this.up.set(0, 1, 0).applyQuaternion(this.quaternion);
+    this.right.set(1, 0, 0).applyQuaternion(this.quaternion);
   }
 
   /**

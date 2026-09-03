@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {
   BONE_META, EQUIP_META, EQUIP_THICKNESS, equipShape, snapCircleRadius,
 } from './constants.js';
+import { fxSprite } from '../game/Kit.js';
 import { touchesLine } from './Assembly.js';
 
 // ============================================================
@@ -741,7 +742,36 @@ export class Rig {
     disc.frustumCulled = false;
     flare.add(disc);
 
-    return { group: flare, cone, disc, size: d };
+    /**
+     * The flame itself, as a photograph rather than as a cone.
+     *
+     * Two cards crossed at right angles, not one facing the camera. A
+     * thruster is bolted to a machine that turns, and the rig has no camera
+     * to face — a crossed pair reads from every angle for the price of one
+     * more quad, and never swings round as you orbit the machine, which a
+     * billboard visibly does when it is this close to the eye.
+     */
+    const plume = fxSprite('flame');
+    const cards = [];
+    if (plume) {
+      const cardGeo = new THREE.PlaneGeometry(d * 1.5, d * 2.4);
+      cardGeo.translate(0, d * 1.05, 0);
+      this._owned.push(cardGeo);
+      const cardMat = new THREE.MeshBasicMaterial({
+        map: plume, color: meta.accent, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      });
+      this._ownedMaterials.push(cardMat);
+      for (const turn of [0, Math.PI / 2]) {
+        const card = new THREE.Mesh(cardGeo, cardMat);
+        card.rotation.y = turn;
+        card.frustumCulled = false;
+        flare.add(card);
+        cards.push(card);
+      }
+    }
+
+    return { group: flare, cone, disc, cards, size: d };
   }
 
   /** 0..1 — how hard the boost thrusters are burning right now. */
@@ -759,6 +789,12 @@ export class Rig {
       // and at full opacity the core of it just clipped to white.
       f.disc.material.opacity = amount * 0.55;
       f.disc.scale.setScalar(0.6 + amount * 0.7);
+      if (f.cards?.length) {
+        // Longer with output, and jittering on its own so a held burn is
+        // not a still picture of a flame.
+        f.cards[0].material.opacity = amount * 0.85;
+        for (const card of f.cards) card.scale.set(wobble, amount * (0.7 + wobble * 0.5), 1);
+      }
       node.accent.material.emissiveIntensity = 1.9 + amount * 4.2;
     }
     return this;

@@ -11,7 +11,7 @@
   --warn: #ffb454;
   --danger: #ff6a5c;
   --ok: #8effc9;
-  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 /* Native widgets — dropdown popups, scrollbars, spinners — follow this.

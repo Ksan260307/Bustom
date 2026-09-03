@@ -320,9 +320,11 @@ export class FieldScene {
       // part of what makes the practice field the same place every time, so
       // it must not come out of the fight's number stream.
       const bot = this.spawnEnemy({ ...spec, at: _corner.set(spec.x, 2, spec.z) });
-      bot.body.reset(new THREE.Vector3(
-        spec.x, Math.max(0.5, -bot.rig.restLowestY), spec.z,
-      ));
+      bot.body.reset(
+        new THREE.Vector3(spec.x, Math.max(0.5, -bot.rig.restLowestY), spec.z),
+        // Facing in, like everything else that stands up in this arena.
+        new THREE.Vector3(-spec.x, 0, -spec.z),
+      );
       bot.syncTransform();
     }
   }
@@ -1214,6 +1216,9 @@ export class FieldScene {
       lock: this.lock,
       locking: this.locking ? this.locking.t / LOCK_TIME : 0,
       threats: this._threats(),
+      // The place itself, for the dial in the corner. Read-only, like
+      // everything else on this object.
+      arena: this.world.arena,
       telemetry: p.body.telemetry(),
       gait: p.stats.gait,
       legs: p.stats.legs,

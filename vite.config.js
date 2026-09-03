@@ -16,11 +16,19 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     target: 'es2022',
-    outDir: 'dist',
+    // The stage editor is built on its own, into its own folder, by
+    // `npm run stage`. It is never part of the game's build.
+    outDir: mode === 'stage' ? 'dist-stage' : 'dist',
     rollupOptions: {
-      // One entry. The game runs in Electron and nowhere else, so there is
-      // no second page to build and no browser to build it for.
-      input: { main: 'index.html' },
+      /**
+       * One entry, and which one depends on what is being built.
+       *
+       * The game runs in Electron and nowhere else, so there is no second
+       * page to ship. The editor is a separate program that happens to read
+       * the game's data — it must not end up inside the thing it edits, and
+       * building them together is how that happens by accident.
+       */
+      input: mode === 'stage' ? { stage: 'stage.html' } : { main: 'index.html' },
     },
   },
 }));

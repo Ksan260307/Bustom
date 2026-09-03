@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
-import { ARENAS, ARENA_ORDER, DEFAULT_ARENA, getArena } from '../src/game/Arenas.js';
+import { ARENAS, ARENA_ORDER, DEFAULT_ARENA, getArena, CELL, GAUGE } from '../src/game/Arenas.js';
 import { KITS, buildProp, variantAt } from '../src/game/Props.js';
 import { ZMFBody } from '../src/zmf/ZMFBody.js';
 import { SyntheticInput } from '../src/game/Robot.js';
@@ -245,5 +245,131 @@ describe('a machine on the Moon', () => {
     up.hold('up', true);
     run(body, up, 1.5);
     expect(body.position.y).toBeGreaterThan(31);
+  });
+});
+
+// ============================================================
+//  Laid out, rather than scattered.
+//
+//  These layouts used to be written by hand, piece by piece, and it showed:
+//  every block its own width, nothing lining up with anything, and the four
+//  corners the machines start in furnished differently from each other. A
+//  fight that opens with one player behind good cover and another in the
+//  open was decided before anybody moved.
+//
+//  "Tidy" is four measurable things, and they are checked here so it cannot
+//  quietly stop being true.
+// ============================================================
+
+describe('the arenas are laid out, not scattered', () => {
+  /** Where the four machines start: the diagonals, at two thirds out. */
+  const corners = (arena) => [0, 1, 2, 3].map((i) => {
+    const a = Math.PI / 4 + i * (Math.PI / 2);
+    return [Math.cos(a) * arena.radius * 0.66, Math.sin(a) * arena.radius * 0.66];
+  });
+
+  /**
+   * Every piece of cover a place has, as [x, y, z, halfWidth].
+   *
+   * Height is kept because a floating arena stacks pieces over each other
+   * on purpose — a column is three masses at one spot and seventy metres
+   * apart, and flattening it would read as three pieces inside each other.
+   */
+  const cover = (arena) => [
+    ...(arena.pillars ?? []).map(([x, z, r]) => [x, 0, z, r]),
+    ...(arena.floaters ?? []).map(([x, y, z, r]) => [x, y, z, r]),
+  ];
+
+  it('stands everything on one lattice', () => {
+    for (const [id, arena] of Object.entries(ARENAS)) {
+      for (const [x, , z] of cover(arena)) {
+        // Math.abs, because -16 % 8 is -0 and Object.is says that is not 0.
+        expect(Math.abs(x % CELL), `${id} has a piece at x=${x}`).toBe(0);
+        expect(Math.abs(z % CELL), `${id} has a piece at z=${z}`).toBe(0);
+      }
+    }
+  });
+
+  it('builds them from four widths, not forty', () => {
+    const widths = new Set(Object.values(GAUGE));
+    for (const [id, arena] of Object.entries(ARENAS)) {
+      for (const [, , , r] of cover(arena)) {
+        expect(widths, `${id} has a piece ${r} wide, which is not a gauge`).toContain(r);
+      }
+    }
+  });
+
+  it('looks the same from all four corners', () => {
+    // Turned or mirrored, whichever the place declares. Either way the set
+    // has to map onto itself: if it does not, one of the four machines is
+    // starting somewhere better than the others.
+    for (const [id, arena] of Object.entries(ARENAS)) {
+      const pieces = cover(arena);
+      if (!pieces.length) continue;
+      expect(arena.symmetry, `${id} does not say how it is symmetrical`).toBeTruthy();
+
+      const here = new Set(pieces.map(([x, y, z, r]) => `${x}|${y}|${z}|${r}`));
+      const moved = arena.symmetry === 'turn4'
+        ? pieces.map(([x, y, z, r]) => [-z, y, x, r])     // a quarter turn
+        : pieces.map(([x, y, z, r]) => [-x, y, z, r]);    // mirrored across x
+      for (const [x, y, z, r] of moved) {
+        expect(here, `${id} is not ${arena.symmetry}: nothing at ${x},${z}`)
+          .toContain(`${x}|${y}|${z}|${r}`);
+      }
+    }
+  });
+
+  it('leaves the four corners clear to stand in', () => {
+    for (const [id, arena] of Object.entries(ARENAS)) {
+      // The spread a spawn is nudged by, plus room for a large machine.
+      const clear = arena.radius * 0.09 + 8;
+      for (const [cx, cz] of corners(arena)) {
+        for (const [x, , z, r] of cover(arena)) {
+          const gap = Math.hypot(x - cx, z - cz) - r;
+          expect(gap, `${id} has cover ${gap.toFixed(1)}m from a spawn`)
+            .toBeGreaterThan(clear);
+        }
+      }
+    }
+  });
+
+  it('leaves a lane between every two pieces', () => {
+    // Cover a metre apart is one piece of cover with a crack in it, and a
+    // machine that gets stuck in the crack. Everything has to be walkable
+    // between — measured edge to edge, so a wide piece needs more room.
+    const LANE = 6;
+    for (const [id, arena] of Object.entries(ARENAS)) {
+      const pieces = cover(arena);
+      let worst = Infinity;
+      let where = '';
+      for (let i = 0; i < pieces.length; i++) {
+        for (let j = i + 1; j < pieces.length; j++) {
+          const [ax, ay, az, ar] = pieces[i];
+          const [bx, by, bz, br] = pieces[j];
+          const gap = Math.hypot(ax - bx, ay - by, az - bz) - ar - br;
+          // Touching is allowed and meant: a ridge is masses shoulder to
+          // shoulder, and a wall with gaps in it is a fence. What is
+          // forbidden is the crack in between — too narrow to walk down and
+          // wide enough to get stuck in.
+          if (gap > 0.01 && gap < worst) { worst = gap; where = `${ax},${az} and ${bx},${bz}`; }
+        }
+      }
+      if (pieces.length > 1) {
+        expect(worst, `${id}: ${worst.toFixed(1)}m between ${where}`)
+          .toBeGreaterThanOrEqual(LANE);
+      }
+    }
+  });
+
+  it('still gives every place something to fight over', () => {
+    // A tidy arena that is also an empty one is not an improvement. Each
+    // place keeps roughly the amount of cover it was designed around.
+    const least = {
+      proving: 20, city: 24, works: 40, canyon: 20, flats: 12, moon: 16, orbit: 12,
+    };
+    for (const [id, floor] of Object.entries(least)) {
+      const n = cover(ARENAS[id]).length;
+      expect(n, `${id} has only ${n} pieces of cover`).toBeGreaterThanOrEqual(floor);
+    }
   });
 });

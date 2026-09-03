@@ -109,10 +109,43 @@ export class Help {
       { id: 'equip', label: '装備', body: () => this._equip() },
       { id: 'field', label: '操作', body: () => this._field() },
       { id: 'solo', label: 'ソロプレイ', body: () => this._solo() },
+      { id: 'credits', label: 'クレジット', body: () => this._credits() },
     ];
   }
 
   // ---------------------------------------------------------- pages
+
+  /**
+   * Who made the pictures.
+   *
+   * Most of what this game ships is CC0, which asks for nothing. The Milky
+   * Way is not: it is CC BY 4.0, and that licence wants the credit shown to
+   * the people looking at it rather than filed in a text file they will
+   * never open. So it lives here, on a page anyone can reach.
+   *
+   * If this page goes, the sky has to go with it.
+   */
+  _credits() {
+    const row = (what, who, link) => [
+      h('span', { class: 'hk' }, what),
+      h('span', { class: 'hv' }, who, link ? h('em', { class: 'dim' }, ` — ${link}`) : null),
+    ];
+    return [
+      h('h4', {}, '同梱している素材'),
+      para('ゲーム内の写真・音・書体は、外部の公開素材を加工して使っています。'),
+      h('div', { class: 'helpkeys' },
+        ...row('天の川', 'ESO / S. Brunier', 'CC BY 4.0'),
+        ...row('地球', 'NASA Earth Observatory (Blue Marble)', 'パブリックドメイン'),
+        ...row('月面', 'NASA/GSFC Scientific Visualization Studio', 'パブリックドメイン'),
+        ...row('空', 'Greg Zaal, Jarod Guest / Poly Haven', 'CC0'),
+        ...row('地面・壁', 'ambientCG', 'CC0'),
+        ...row('エフェクト', 'Kenney', 'CC0'),
+        ...row('効果音', 'rubberduck / OpenGameArt', 'CC0'),
+        ...row('書体', 'Inter, JetBrains Mono', 'SIL OFL 1.1'),
+      ),
+      para('加工の内容と全リンクは、配布物に同梱の LICENSES.md にあります。'),
+    ];
+  }
 
   _start() {
     return [

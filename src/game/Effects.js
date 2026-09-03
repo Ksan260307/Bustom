@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { fxSprite } from './Kit.js';
 import { clamp01 } from '../zmf/math.js';
 
 // ============================================================
@@ -84,7 +85,17 @@ export class Effects {
     this.ringGeo = new THREE.TorusGeometry(1, 0.035, 6, 40);
     this.ringGeo.rotateX(-Math.PI / 2);
     this.quadGeo = new THREE.PlaneGeometry(1, 1);
+    /**
+     * The drawn blot, kept as the fallback.
+     *
+     * Everything below works without a single file: a flash is a ball of
+     * shaded geometry and a puff is a soft circle, exactly as they were.
+     * What the sprites add is the part geometry cannot have — a muzzle
+     * flash with fingers in it, smoke with a shape rather than a radius.
+     */
     this.blob = blobTexture();
+    /** Cards, one per burst, that carry a photograph of the effect. */
+    this.cards = [];
 
     this.impacts = [];
     for (let i = 0; i < impacts; i++) this.impacts.push(this._makeImpact());
@@ -137,8 +148,10 @@ export class Effects {
       group.add(mesh);
       streaks.push({ mesh, dir: new THREE.Vector3(0, 1, 0), speed: 1, len: 1 });
     }
+    const card = this._makeCard('spark', mat);
+    group.add(card);
     this.group.add(group);
-    return { group, mat, flash, streaks, life: 0, maxLife: 1, scale: 1 };
+    return { group, mat, flash, streaks, card, life: 0, maxLife: 1, scale: 1 };
   }
 
   /**
@@ -162,8 +175,58 @@ export class Effects {
     cone.frustumCulled = false;
     core.frustumCulled = false;
     group.add(cone, core);
+    const card = this._makeCard('muzzle', mat);
+    group.add(card);
     this.group.add(group);
-    return { group, mat, cone, core, life: 0, maxLife: 1, scale: 1 };
+    return { group, mat, cone, core, card, life: 0, maxLife: 1, scale: 1 };
+  }
+
+  /**
+   * A flat card carrying one of the shipped sprites.
+   *
+   * Shares the burst's material for colour and fade, and carries its own for
+   * the map — one material per burst was the point of the pooling, and a
+   * card that faded on its own schedule would come apart from the flash it
+   * belongs to. Hidden outright when there is no sprite to put on it.
+   */
+  _makeCard(sprite, source) {
+    const mat = this._own(new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    const mesh = new THREE.Mesh(this.quadGeo, mat);
+    mesh.frustumCulled = false;
+    mesh.visible = false;
+    this.cards.push({ mesh, mat, source, sprite });
+    return mesh;
+  }
+
+  /**
+   * Take the shipped sprites, now that they have arrived.
+   *
+   * They land after the boot, and the pools are built at the boot. Rather
+   * than wait for them — which would be a load screen for three megabytes —
+   * the materials are simply told about them when they turn up.
+   */
+  useKit() {
+    for (const card of this.cards) {
+      const tex = fxSprite(card.sprite);
+      if (!tex) continue;
+      card.mat.map = tex;
+      card.mat.needsUpdate = true;
+      card.mesh.visible = true;
+      card.ready = true;
+    }
+    const smoke = fxSprite('smoke');
+    const blot = fxSprite('blob');
+    if (smoke) for (const p of this.puffs) { p.mat.map = smoke; p.mat.needsUpdate = true; }
+    if (blot) {
+      for (const mesh of this.shadowPool) {
+        mesh.material.map = blot;
+        mesh.material.needsUpdate = true;
+      }
+    }
+    return this;
   }
 
   /** A single puff of kicked-up floor. Its own material, so it fades alone. */
@@ -377,6 +440,15 @@ export class Effects {
         s.mesh.scale.set(0.035 * e.scale, 0.035 * e.scale, len);
       }
       e.mat.opacity = (1 - t) ** 1.5;
+      // The card carries the fade of the burst it belongs to, and grows
+      // faster than the flash: a photograph of sparks is already spread out,
+      // so it wants to arrive open rather than open up.
+      // Held well under the geometry it sits on. A photograph of a burst
+      // is already a whole burst; at full strength it swallows the flash
+      // and the streaks and the hit becomes a white disc.
+      e.card.material.opacity = e.mat.opacity * 0.5;
+      e.card.material.color.copy(e.mat.color);
+      e.card.scale.setScalar(e.scale * (0.35 + t * 0.85));
     }
 
     for (const e of this.muzzles) {
@@ -388,6 +460,13 @@ export class Effects {
       e.cone.scale.set(k * 0.17, k * 0.17, k * 0.6);
       e.core.scale.setScalar(k * 0.13);
       e.mat.opacity = (1 - t) ** 1.4;
+      e.card.material.opacity = e.mat.opacity * 0.75;
+      e.card.material.color.copy(e.mat.color);
+      // Square on to the barrel rather than to the camera. A muzzle flash
+      // has a direction — it is the one effect in the game that should NOT
+      // look the same from every angle.
+      e.card.scale.setScalar(k * 0.34);
+      e.card.position.set(0, 0, k * 0.2);
     }
 
     for (const p of this.puffs) {
@@ -428,6 +507,15 @@ export class Effects {
       if (p.life <= 0) continue;
       p.mesh.quaternion.copy(_q);
       p.mesh.rotateZ(p.roll);
+    }
+    // Impact cards too. A hit is a thing that happened at a point and has
+    // no direction of its own, so it should read the same wherever you are
+    // standing — the opposite of the muzzle card, which keeps the barrel's.
+    // The impact group is only ever moved, never turned, so the camera's
+    // own orientation is already the right local one.
+    for (const e of this.impacts) {
+      if (e.life <= 0 || !e.card.visible) continue;
+      e.card.quaternion.copy(_q);
     }
     return this;
   }

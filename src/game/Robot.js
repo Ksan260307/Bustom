@@ -16,6 +16,7 @@ const _aim = new THREE.Vector3();
 const _flat = new THREE.Vector3();
 const _knock = new THREE.Vector3();
 const _wear = new THREE.Vector3();
+const _face = new THREE.Vector3();
 
 /** How near a round has to land to count as hitting a joint, in metres. */
 const WEAR_REACH = 2.2;
@@ -528,8 +529,13 @@ export class Robot {
     return this;
   }
 
-  /** Put it back together at `position`, whole and reloaded. */
-  revive(position) {
+  /**
+   * Put it back together at `position`, whole and reloaded.
+   *
+   * @param {THREE.Vector3} position
+   * @param {THREE.Vector3|null} [facing] which way to look; a direction
+   */
+  revive(position, facing = null) {
     for (const node of this.rig?.joints ?? []) node.wear = 0;
     this.hp = this.maxHp;
     this.alive = true;
@@ -539,7 +545,19 @@ export class Robot {
     this.blows.length = 0;
     this.rig.setHitFlash(0);
     this.object3D.visible = true;
-    this.body.reset(position ?? this.position.clone());
+    /**
+     * Face the middle, unless told otherwise.
+     *
+     * Every arena in this game is centred on the origin, so "the middle" is
+     * a fact rather than a parameter. Without this every machine woke up
+     * pointing at +Z whichever corner it was standing in, and three of the
+     * four opened a fight looking at the wall behind them.
+     */
+    const at = position ?? this.position;
+    this.body.reset(
+      position ?? this.position.clone(),
+      facing ?? _face.set(-at.x, 0, -at.z),
+    );
     this.rearm();
     // Stand it up straight again. Nothing about the life it just lost
     // should follow it into the next one.

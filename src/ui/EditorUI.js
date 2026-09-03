@@ -12,6 +12,14 @@ import {
 } from '../core/constants.js';
 import { PRESETS, PRESET_LIST, SIZE_CLASSES } from '../core/Assembly.js';
 
+/**
+ * How long the "there is unfinished work" bar stays up, in milliseconds.
+ *
+ * Long enough to read and decide, short enough that ignoring it costs you
+ * nothing. The offer itself does not expire — it moves into the file menu.
+ */
+const DRAFT_OFFER_MS = 14000;
+
 /** What each size class is called where a player will read it. */
 const SIZE_LABEL = {
   tiny: '極小', small: '小型', medium: '中型', large: '大型', huge: '超大型',
@@ -238,15 +246,49 @@ export class EditorUI {
   }
 
   /**
-   * Offer the safety net back, once, on the way in. Only an offer:
-   * restoring over the top of what somebody meant to open would be the same
-   * mistake in the other direction.
+   * Offer the safety net back, once, on the way in.
+   *
+   * Only an offer: restoring over the top of what somebody meant to open
+   * would be the same mistake in the other direction. And an offer that
+   * stays until it is answered is not an offer, it is a demand — this one
+   * sat across the top of the workbench for the whole session if you simply
+   * ignored it, which is what most people do with a bar they did not ask
+   * for.
+   *
+   * Worse than being in the way, it stopped being TRUE. The autosave keeps
+   * running while the bar is up, so a minute into a new machine the draft
+   * it was offering had already been overwritten by that machine, and
+   * pressing 復元する restored the thing you were looking at.
+   *
+   * So it folds away on its own, it folds the moment anything makes the
+   * offer meaningless, and while it is up the autosave holds off — which
+   * makes the offer honest for exactly as long as it is on screen.
    */
   offerDraft() {
     const d = this.app.draft();
     if (!d || !this.draftBar) return this;
     this.draftWhen.textContent = new Date(d.at).toLocaleString();
     this.draftBar.classList.remove('hidden');
+    this.app.holdDraft?.(true);
+    clearTimeout(this._draftFold);
+    this._draftFold = setTimeout(() => this.foldDraft(), DRAFT_OFFER_MS);
+    return this;
+  }
+
+  /**
+   * Take the offer down without answering it.
+   *
+   * Not the same as declining: the draft stays on disk, and the file menu
+   * still has "前回の作業を復元" in it. Only the bar goes.
+   */
+  foldDraft() {
+    clearTimeout(this._draftFold);
+    this._draftFold = 0;
+    if (!this.draftBar || this.draftBar.classList.contains('hidden')) return this;
+    this.draftBar.classList.add('hidden');
+    // The net is let go here, not before: from now on this session's own
+    // work is what gets kept.
+    this.app.holdDraft?.(false);
     return this;
   }
 
@@ -359,10 +401,10 @@ export class EditorUI {
       this.draftWhen,
       h('button', {
         class: 'primary',
-        onClick: () => { this.app.restoreDraft(); this.draftBar.classList.add('hidden'); },
+        onClick: () => { this.app.restoreDraft(); this.foldDraft(); },
       }, '復元する'),
       h('button', {
-        onClick: () => { this.app.forgetDraft(); this.draftBar.classList.add('hidden'); },
+        onClick: () => { this.app.forgetDraft(); this.foldDraft(); },
       }, '破棄'),
     );
 
@@ -412,6 +454,9 @@ export class EditorUI {
         },
       }, '名前を付けて保存…'),
       h('button', { onClick: () => { app.load(); this._closeMenus(); } }, '上書き保存から読込'),
+      h('button', {
+        onClick: () => { app.restoreDraft(); this.foldDraft(); this._closeMenus(); },
+      }, '前回の作業を復元'),
       h('div', { class: 'k', style: 'padding:6px 8px 2px' }, '保存したもの'),
       this.slotList,
       h('button', { onClick: () => { app.exportJson(); this._closeMenus(); } }, 'ファイルに書き出す'),
