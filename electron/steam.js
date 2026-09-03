@@ -53,6 +53,8 @@ function noSteam(reason) {
     reason,
     appId: 0,
     playerName: '',
+    /** The live binding, for anything that needs more than these verbs. */
+    client: null,
     unlock() { return false; },
     shutdown() { },
   };
@@ -83,6 +85,16 @@ export function openSteam() {
       reason: '',
       appId,
       playerName,
+      /*
+       * The binding itself.
+       *
+       * Everything above went through this file's own verbs so that a
+       * missing Steam was a no-op rather than a crash. Lobbies and P2P are
+       * a large enough surface that wrapping every call the same way would
+       * be a second copy of the Steamworks API — so the client is handed
+       * over, and whoever takes it checks first (see steamNetSupport).
+       */
+      client,
       unlock(id) {
         try {
           const a = client.achievement;

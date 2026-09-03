@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { clamp, clamp01, damp, lerp, smoothstep } from '../zmf/math.js';
-import { SLIDE, CHAIN_FALLOFF_DEFAULT } from '../core/constants.js';
+import { SLIDE, RETREAT, RUN, LEG_SLEW, CHAIN_FALLOFF_DEFAULT } from '../core/constants.js';
 
 // ============================================================
 //  Procedural animation driven by bone ATTRIBUTE.
@@ -19,6 +19,9 @@ import { SLIDE, CHAIN_FALLOFF_DEFAULT } from '../core/constants.js';
 const DEG = Math.PI / 180;
 const TAU = Math.PI * 2;
 
+/** The sine of the widest a hip swings, so the gait can clamp without trig. */
+const SIN_SWING = Math.sin(RUN.swing * DEG);
+
 const _q = new THREE.Quaternion();
 const _euler = new THREE.Euler();
 const _q2 = new THREE.Quaternion();
@@ -27,6 +30,7 @@ const _axis = new THREE.Vector3();
 const _axis2 = new THREE.Vector3();
 const _t2 = new THREE.Vector2();
 const _push = new THREE.Vector3();
+const ZERO = new THREE.Vector3();
 const _foot = new THREE.Vector3();
 const _pivot = new THREE.Vector3();
 const _armv = new THREE.Vector3();
@@ -202,6 +206,33 @@ export class Animator {
   constructor(rig, stats) {
     this.rig = rig;
     this.stats = stats;
+    /**
+     * The longest step this machine can take, in metres.
+     *
+     * A hip swinging RUN.swing either side of centre, on a leg of the
+     * length this machine actually has. Everything about the gait is
+     * measured against it — how long a step is, how fast the legs have to
+     * cycle to cover the ground, and the speed past which no stride works
+     * at all. It is the machine's number, not a designer's.
+     */
+    const reach = rig.limbs?.length
+      ? rig.limbs.reduce((n, l) => n + (l.reach ?? 1), 0) / rig.limbs.length
+      : 1;
+    this.legReach = reach;
+    this.stepMax = 2 * reach * Math.sin(RUN.swing * DEG);
+    /** The fastest the legs can honestly carry the machine, in m/s. */
+    this.runCap = this.stepMax * Math.max(1, rig.limbs?.length ?? 1) * RUN.cadence;
+    /**
+     * The longest step it can take SIDEWAYS, which is a different number.
+     *
+     * Limited by how wide the machine stands rather than by how far the leg
+     * reaches — see RUN.sideStep. Big machines are the ones this shows up
+     * on, because their legs are long relative to how far apart they are.
+     */
+    this.sideStepMax = Math.max(0.4, (rig.stance ?? 1) * RUN.sideStep);
+    /** And the fastest a machine can side-step, as opposed to skate. */
+    this.sideCap = this.sideStepMax
+      * Math.max(1, rig.limbs?.length ?? 1) * RUN.cadence;
     this.time = 0;
     this.gaitPhase = 0;
     this.gaitFreq = 0;
@@ -210,6 +241,22 @@ export class Animator {
     this.bodyLean = new THREE.Vector2(); // x = pitch, y = roll
     /** 0..1, how much of the pose is a sideways skate rather than a walk. */
     this.slide = 0;
+    /**
+     * 0..1 — giving ground with a target held.
+     *
+     * Kept apart from the skate rather than folded into it. They are two
+     * different shapes: one cants the legs to a side and the other reaches
+     * them out in front, and a machine doing both at once is doing neither.
+     */
+    this.brace = 0;
+    /**
+     * 0..1 — carried forward faster than the legs can stride.
+     *
+     * The sideways skate's opposite number. Same reason, same shape, other
+     * axis: above the machine's own run cap there is no step that reaches
+     * the ground it is covering.
+     */
+    this.glide = 0;
     /** Which way that skate is going, +1 or -1 in body space. */
     this.slideDir = 1;
     this.aimBlend = 0;
@@ -245,6 +292,9 @@ export class Animator {
      */
     this.legSway = new THREE.Vector2();
     this._bind();
+    // Last: it drives the gait for real, so everything the gait reads has
+    // to exist first — the joint axes _bind resolves most of all.
+    this._calibrate();
   }
 
   /**
@@ -278,6 +328,8 @@ export class Animator {
     this.bodyBob = 0;
     this.bodyLean.set(0, 0);
     this.slide = 0;
+    this.brace = 0;
+    this.glide = 0;
     this.slideDir = 1;
     this.aimBlend = 0;
     this.firePulse = 0;
@@ -416,15 +468,50 @@ export class Animator {
     // scaled against what counts as a hard one rather than used raw.
     this._pulses(s, dt);
 
-    // ---- gait clock: stride rate follows real ground speed
+    // ---- gait clock: the step comes from the leg, the rate from the ground
+    /*
+     * Walking slowly is short steps at a steady cadence; running is longer
+     * steps, and only a sprint is faster ones. One expression does all
+     * three, because the step opens with speed and then stops:
+     *
+     *   under RUN.minStep of the stride — the feet slow down, the step holds
+     *   up to RUN.openAt of the machine's speed — the step opens, cadence holds
+     *   above it — the step is as long as the leg goes, so the rate rises
+     *
+     * The old version had none of these: it divided speed by a stride
+     * length nothing could deliver, and the whole range came out as one
+     * shape running at different rates.
+     */
     const legs = Math.max(1, this.rig.limbs.length);
-    const strideLen = lerp(2.4, 1.0, clamp01((legs - 1) / 4)) * (0.7 + this.stats.extent * 0.35);
+    // A step across is shorter than a step forward, and travel is rarely
+    // one or the other, so the reach is whatever this direction allows.
+    const across = Math.abs(this.travel.x) * this.travelBlend;
+    const reach = lerp(this.stepMax, this.sideStepMax, across);
+    // The stride opens over the same FRACTION of its own range whichever
+    // way it is pointed. Without this a machine going sideways ran out of
+    // step almost at once and made up the difference in cadence — which is
+    // the skitter again, wearing a different hat.
+    const openAt = Math.max(2, (s.walkCap ?? 8) * RUN.openAt)
+      * (reach / Math.max(0.01, this.stepMax));
+    const step = reach * Math.max(RUN.minStep, clamp01(s.planarSpeed / openAt));
+    // A hop is not a stride: a machine on one leg covers ground by leaving
+    // it, so there is no foot down to keep up with the floor and nothing
+    // here to solve. Those keep the old rate, which was only ever wrong for
+    // gaits that put a foot down and pushed.
+    const striding = gait === 'walk' || gait === 'multileg';
+    const strideLen = striding
+      ? Math.max(0.2, legs * step)
+      : lerp(2.4, 1.0, clamp01((legs - 1) / 4)) * (0.7 + this.stats.extent * 0.35);
     const moving = clamp01(s.planarSpeed / 0.8);
     const targetFreq = gait === 'multileg'
       // Multi-leg machines scuttle: a high floor frequency even at a crawl,
       // otherwise four small legs just look like they are vibrating.
       ? (1.6 + clamp(s.planarSpeed / strideLen, 0, 6) * 1.6) * moving
-      : clamp(s.planarSpeed / strideLen, 0, 4.2);
+      // Capped, because past this the joint slew eats the swing faster than
+      // the extra rate adds to it — see RUN.cadence. Over the cap the legs
+      // stop keeping up, which is what the forward skate is for. A hop keeps
+      // the ceiling it always had, having no swing to lose.
+      : clamp(s.planarSpeed / strideLen, 0, striding ? RUN.cadence : 4.2);
     // Hovering machines have no stride: the clock stops, which also settles
     // the arms into their idle float and stills a stride-driven waist.
     this.gaitFreq = damp(this.gaitFreq, floating ? 0 : targetFreq * s.grounded, 0.12, dt);
@@ -462,6 +549,9 @@ export class Animator {
     // machine tips the way it is being taken, further than a strafe ever
     // does. Same sign as the strafe lean, just more of it.
     if (this.slide > 1e-3) roll -= SLIDE.lean * this.slide * this.slideDir;
+    // Giving ground, it leans the other way: toward what it is backing away
+    // from, which is also where it is still shooting.
+    if (this.brace > 1e-3) pitch += RETREAT.lean * this.brace;
     // Thrown off its feet, it goes right over.
     const sprawl = clamp01(s.downed ?? 0);
     let leanHalfLife = 0.15;
@@ -508,10 +598,39 @@ export class Animator {
     // because "too fast to walk" is a fact about the machine and not a
     // number that could be picked in advance.
     const dash = s.dashSpeed ?? 0;
-    const walk = s.walkCap ?? 0;
-    const sideways = dash > walk + 1
-      ? clamp01((Math.abs(localVel.x) - walk) / (dash - walk))
+    /*
+     * Where the legs give out going sideways.
+     *
+     * It used to be the machine's ground speed, which is a fact about its
+     * thrust and nothing to do with its legs. A machine whose legs are long
+     * next to how wide it stands runs out of side-step a long way below
+     * that, and until it did it kept walking — taking side-steps longer
+     * than the gap between its own feet.
+     */
+    const walk = Math.min(s.walkCap ?? 0, this.sideCap);
+    // Fully skating at twice what it can step, or at the dash, whichever
+    // comes first. Stretching the hand-over all the way to the dash speed
+    // left the machine part-walking at speeds its legs had already given up
+    // on, and the walking part is the part that skids.
+    const full = Math.min(dash, walk * 2);
+    const sideways = full > walk + 1
+      ? clamp01((Math.abs(localVel.x) - walk) / (full - walk))
       : 0;
+    /**
+     * Giving ground with a target held is the same idea, aimed backwards: a
+     * machine keeping its guns on somebody while it opens the range is not
+     * walking, and the gait cycle running in reverse was the tell that it
+     * was being treated as one.
+     *
+     * It gets its own channel rather than borrowing the skate, because the
+     * skate is a shape with a SIDE to it and a straight retreat has none.
+     * Sharing meant `slideDir` was decided by whatever the lateral speed
+     * happened to be doing, and the legs flicked left and right.
+     *
+     * Either way the pose reads it straight off the retreat the physics is
+     * already running, so the two cannot disagree about it.
+     */
+    const backing = clamp01(s.retreat ?? 0);
     // On fast, off slowly. A slide that faded in would be a machine
     // deciding to slide; it is supposed to be a machine that has no choice.
     const want = sideways * s.grounded;
@@ -519,9 +638,37 @@ export class Animator {
       this.slide, want,
       want > this.slide ? SLIDE.riseHalfLife : SLIDE.fallHalfLife, dt,
     );
+    // Which way the legs plant: into the direction of travel. Only the
+    // skate asks, and the skate always has a side.
     this.slideDir = Math.abs(localVel.x) > 0.05
       ? Math.sign(localVel.x)
       : (this.slideDir || 1);
+
+    // And the retreat, on its own channel. No direction to it: backwards is
+    // backwards, which is the whole reason it could not share the skate.
+    const braceWant = backing * s.grounded;
+    this.brace = damp(
+      this.brace, braceWant,
+      braceWant > this.brace ? RETREAT.riseHalfLife : RETREAT.fallHalfLife, dt,
+    );
+
+    /**
+     * And forward, past what the legs can do.
+     *
+     * The same thing the sideways skate is, pointed straight ahead. Above
+     * `runCap` no stride covers the ground — the machine would have to take
+     * steps longer than its own leg — so the gait was scaling itself down
+     * to fit the cadence and the feet were skating anyway, just while
+     * pretending to walk. This is that admitted: legs trailing, machine
+     * carried. Only a dash or a boost gets a machine up here, which is the
+     * same rule the sideways one has.
+     */
+    const over = (localVel.z - this.runCap) / Math.max(1, this.runCap * RUN.overrun);
+    const glideWant = clamp01(over) * s.grounded;
+    this.glide = damp(
+      this.glide, glideWant,
+      glideWant > this.glide ? RUN.riseHalfLife : RUN.fallHalfLife, dt,
+    );
 
     this._sway(dt);
 
@@ -642,17 +789,167 @@ export class Animator {
    * side, which is the shape a thing being carried sideways actually makes
    * — the feet held back by the floor, the body going on ahead.
    */
+  /**
+   * How far a foot actually moves for a given swing — measured, not assumed.
+   *
+   * The hip is not the only thing turning. The knee bends on the same cycle,
+   * and it takes back about a third of what the hip gives; a machine with
+   * three bones in its leg would take back something else again. Working
+   * that out on paper was wrong by 35%, which is a third of every step spent
+   * dragging the foot across the floor.
+   *
+   * So the gait is asked instead, with its own code: drive one cycle at a
+   * known swing and watch where the sole goes. Whatever comes back is the
+   * length of lever the machine really has, whatever its legs are made of.
+   *
+   * Once per build. The pose is put back afterwards, so nothing outside
+   * this method can tell it happened.
+   */
+  _calibrate() {
+    const limbs = this.rig.limbs;
+    if (!limbs?.length || !this.rig.root?.updateMatrixWorld) return this;
+    // Only gaits that put a foot down and push have a stride to measure.
+    if (this.stats.gait !== 'walk' && this.stats.gait !== 'multileg') return this;
+
+    // Half a stride: far enough to measure, near enough that the joint stops
+    // and the sine between here and full swing stay out of it.
+    const legs = Math.max(1, limbs.length);
+    const test = this.stepMax * 0.5;
+    const probe = { planarSpeed: 1, grounded: 1, walkCap: 8 };
+    // Driven by the machine's OWN gait. A four-legger measured through the
+    // two-legged pose would be calibrated against a walk it never runs.
+    const pose = this.stats.gait === 'multileg'
+      ? (a, b) => this._multileg(a, b)
+      : (a, b) => this._walk(a, b);
+    const swept = limbs.flatMap((l) => l.chain);
+    const held = swept.map((n) => n.joint.quaternion.clone());
+    const wasFreq = this.gaitFreq;
+    const wasPhase = this.gaitPhase;
+    this.gaitFreq = probe.planarSpeed / (test * legs);
+
+    // Back to the geometric guess first. A leftover measurement from a
+    // previous build would make the swing being driven disagree with the
+    // swing being solved for, and the answer would chase its own tail.
+    for (const limb of limbs) limb.lever = limb.reach ?? 1;
+
+    const span = limbs.map(() => ({ lo: Infinity, hi: -Infinity }));
+    // Sixteen points around the cycle. The thing being measured is the
+    // width of something close to a sine, and sixteen samples find its
+    // peaks to within two percent — a good deal less than the difference
+    // this whole method exists to correct.
+    const STEPS = 16;
+    for (let i = 0; i < STEPS; i++) {
+      this.gaitPhase = i / STEPS;
+      pose(probe, 1 / 60);
+      for (const node of swept) node.joint.quaternion.copy(node.target);
+      limbs.forEach((limb, k) => {
+        // Only the legs moved, so only the legs are worth recomputing.
+        // Walking the whole machine sixteen times over is most of what this
+        // used to cost, and every rig rebuild pays it.
+        limb.root.group.updateMatrixWorld(true);
+        const tip = limb.chain[limb.chain.length - 1];
+        _v.copy(limb.sole ?? ZERO).applyMatrix4(tip.joint.matrixWorld);
+        span[k].lo = Math.min(span[k].lo, _v.z);
+        span[k].hi = Math.max(span[k].hi, _v.z);
+      });
+    }
+
+    // What the swing was worth, per unit of it — per limb, because a
+    // machine can have legs of two lengths and each was driven by its own.
+    limbs.forEach((limb, k) => {
+      const amp = Math.asin(
+        clamp(test / (2 * Math.max(0.2, limb.reach ?? 1)), 0, SIN_SWING),
+      );
+      const unit = 2 * Math.sin(amp);
+      const travel = span[k].hi - span[k].lo;
+      limb.lever = travel > 1e-3 && unit > 1e-3
+        ? travel / unit
+        : (limb.reach ?? 1);
+    });
+    this.legLever = limbs.reduce((n, l) => n + l.lever, 0) / legs;
+    this.stepMax = 2 * this.legLever * SIN_SWING;
+    this.runCap = this.stepMax * legs * RUN.cadence;
+
+    swept.forEach((n, i) => {
+      n.joint.quaternion.copy(held[i]);
+      n.poseQ?.copy(held[i]);
+    });
+    this.rig.root.updateMatrixWorld(true);
+    this.gaitFreq = wasFreq;
+    this.gaitPhase = wasPhase;
+    return this;
+  }
+
+  /**
+   * How far the ground goes under one step.
+   *
+   * This is the number a swing has to match. Anything it falls short by is
+   * the planted foot being dragged across the floor, and that drag is what
+   * a skitter actually is — it used to be more than half of every step at
+   * every speed, because the clock and the pose were each deciding how long
+   * a step was, separately, and disagreeing.
+   */
+  _perStep(s) {
+    const legs = Math.max(1, this.rig.limbs.length);
+    return this.gaitFreq > 0.02 ? s.planarSpeed / (this.gaitFreq * legs) : 0;
+  }
+
+  /**
+   * How much extra to ask a leg for, so that what arrives is what was meant.
+   *
+   * The slew in _commit is a one-pole filter, and a filter eats a fast
+   * cycle: at four strides a second it was delivering under half the swing
+   * being commanded, so the faster the machine went the LESS its legs moved.
+   * This is that filter's own gain, inverted — worked out from the same
+   * constant the slew uses, so the two cannot drift apart.
+   */
+  _slewPull(dt) {
+    const slew = clamp01(1 - Math.pow(0.0008, dt * LEG_SLEW));
+    const lag = TAU * this.gaitFreq * (dt / Math.max(1e-4, slew));
+    return Math.min(RUN.maxDrive, Math.sqrt(1 + lag * lag));
+  }
+
+  /**
+   * The swing that carries a foot exactly as far as the floor moves under
+   * it, so it plants and pushes instead of skating.
+   *
+   * Per limb, because a machine can have legs of two lengths and each has
+   * to answer for its own. It stops at what the leg can reach — past that
+   * there is no honest answer, and that is the speed the forward skate
+   * takes over at.
+   */
+  _swingFor(limb, perStep) {
+    const lever = Math.max(0.2, limb.lever ?? limb.reach ?? 1);
+    return Math.asin(clamp(perStep / (2 * lever), 0, SIN_SWING));
+  }
+
   _walk(s, dt) {
-    const drive = clamp01(this.gaitFreq / 2.6);
-    const amp = lerp(10, 40, drive) * DEG;
-    const kneeAmp = lerp(8, 55, drive) * DEG;
+    const perStep = this._perStep(s);
+    const pull = this._slewPull(dt);
+    // The knee follows how open the stride is, not how fast it is running:
+    // a long slow step bends as much as a long quick one.
+    const openness = clamp01(perStep / Math.max(0.01, this.stepMax));
+    const kneeAmp = lerp(8, 55, openness) * DEG;
     const idle = 1 - clamp01(this.gaitFreq * 2.2);
     const air = 1 - s.grounded;
     const skate = this.slide;
-    const walking = 1 - skate;
+    /**
+     * Fore and aft, signed: giving ground is positive, being carried
+     * forward is negative.
+     *
+     * They are the same shape reflected — feet out ahead of a machine going
+     * backwards, feet trailing behind one going forwards — so they are one
+     * piece of code rather than two, and they cannot both be on at once.
+     */
+    const plant = this.brace - this.glide;
+    const planted = Math.abs(plant);
+    // None of these is a walk, and no two of them overlap in practice.
+    const walking = clamp01(1 - skate - planted);
 
     for (const limb of this.rig.limbs) {
       const mirror = limb.root.part.invert ? -1 : 1;
+
+      const amp = this._swingFor(limb, perStep);
 
       limb.chain.forEach((node, i) => {
         // Each bone reads the cycle at its own point in it, so a hip set to
@@ -661,13 +958,15 @@ export class Animator {
         const stride = Math.sin(p * TAU);
         const lift = Math.max(0, Math.sin(p * TAU));
 
+        // The compensation goes on the cycling parts only. The air and idle
+        // offsets are postures, not swings, and a filter does not eat them.
         let angle;
         if (i === 0) {
-          angle = stride * amp * mirror - air * 22 * DEG + idle * 2 * DEG;
+          angle = stride * amp * pull * mirror - air * 22 * DEG + idle * 2 * DEG;
         } else if (i === 1) {
-          angle = -(lift * kneeAmp + air * 34 * DEG) * mirror;
+          angle = -(lift * kneeAmp * pull + air * 34 * DEG) * mirror;
         } else {
-          angle = (-stride * amp * 0.35 + lift * kneeAmp * 0.4) * mirror;
+          angle = (-stride * amp * 0.35 + lift * kneeAmp * 0.4) * pull * mirror;
         }
         _q.setFromAxisAngle(this._strideAxis(node), angle * walking * Animator.gainOf(node));
         node.target.copy(limitQuat(_q, node.part, 0, node));
@@ -685,6 +984,39 @@ export class Animator {
           node.target.multiply(_q);
           limitQuat(node.target, node.part, 0, node);
         }
+
+        /**
+         * Carried rather than walking: the feet go one way, the machine the
+         * other.
+         *
+         * Giving ground, the feet reach out AHEAD — the floor keeping them
+         * where they were while the body is taken back. Carried forward
+         * past what the legs can stride, it is exactly the same shape
+         * reflected: the feet trail BEHIND and the body goes on without
+         * them.
+         *
+         * About the STRIDE axis, not the splay one. This is a fore-and-aft
+         * shape, and putting it on the splay axis is what made the legs
+         * flick left and right on a machine that was going straight back.
+         */
+        if (planted > 1e-3) {
+          const taper = i === 0 ? 1 : RETREAT.taper ** i;
+          // Negative about the stride axis is forward: measured, not assumed
+          // — the first sign put the feet behind the machine, which is the
+          // shape of somebody being shoved, not somebody backing off.
+          // One foot ahead of the other, fixed rather than cycling: this
+          // is a stance, not a gait. The gait's own phase offset is what
+          // decides which leg is which, so it agrees with the walk it
+          // replaced about which one leads.
+          const lead = 1 + RETREAT.stagger * Math.cos(limb.phaseOffset * TAU);
+          const reach = i === 1 ? RETREAT.knee : -RETREAT.plant * lead;
+          _q.setFromAxisAngle(
+            node.axisStride,
+            reach * DEG * plant * taper * mirror * Animator.gainOf(node),
+          );
+          node.target.multiply(_q);
+          limitQuat(node.target, node.part, 0, node);
+        }
       });
     }
   }
@@ -696,14 +1028,23 @@ export class Animator {
    * the legs are visible outside the body silhouette in the first place.
    */
   _multileg(s, dt) {
+    // Eight legs skitter for the same reason two did: the clock counted one
+    // length of step and the pose drew another. Solved the same way, so a
+    // scuttle stays a scuttle without the feet washing across the floor.
+    const perStep = this._perStep(s);
+    const pull = this._slewPull(dt);
+    // Only the fore-and-aft swing has to answer to the ground. Picking the
+    // foot UP is not a distance the floor moves, and a scuttle takes short
+    // steps by design — tying the lift to how long they are made a machine
+    // with eight legs barely bend them.
     const drive = clamp01(this.gaitFreq / 4.0);
-    const strideAmp = lerp(16, 38, drive) * DEG;
     const liftAmp = lerp(10, 26, drive) * DEG;
     const kneeAmp = lerp(12, 34, drive) * DEG;
     const air = 1 - s.grounded;
     const idle = 1 - clamp01(this.gaitFreq * 1.6);
 
     for (const limb of this.rig.limbs) {
+      const strideAmp = this._swingFor(limb, perStep) * pull;
       const p = this._phaseFor(limb.root, limb.phaseOffset);
       const stride = Math.sin(p * TAU);
       // Swing occupies the first half of the cycle; stance drags along the floor.
@@ -1273,7 +1614,7 @@ export class Animator {
   _commit(dt) {
     for (const node of this.rig.joints) {
       const base = clamp01(
-        1 - Math.pow(0.0008, dt * (node.part.boneType === 'leg' ? 1.6 : 1.0)),
+        1 - Math.pow(0.0008, dt * (node.part.boneType === 'leg' ? LEG_SLEW : 1.0)),
       );
       // The slew runs on the animator's OWN copy of the pose, and the joint
       // is then set from it. Anything that adjusts a joint afterwards —

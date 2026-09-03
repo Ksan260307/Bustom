@@ -54,6 +54,10 @@ export class ZMFBody {
     this.strain = 0;
     this.gravityScale = 1;
     this.hover = 0;         // 0..1, how committed we are to flight
+    /** 0..1 — giving ground with a target held. Drives the pose and the grip. */
+    this.retreat = 0;
+    /** True once the tank has bottomed out, until it is worth using again. */
+    this.liftLocked = false;
     this.airborneTime = 0;
     this.jumpCooldown = 0;
     this.dashCooldown = 0;
@@ -177,6 +181,7 @@ export class ZMFBody {
 
     this.energy = 1;
     this.hover = 0;
+    this.liftLocked = false;
     this.gravityScale = 1;
     this.airborneTime = 0;
     this.strain = 0;
@@ -370,8 +375,25 @@ export class ZMFBody {
     // A gravity plate does not stop you jumping — it stops you HOVERING.
     // The lift key still fires a legged machine off the floor; what it no
     // longer does is buy back gravity and hold you up there.
-    const wantsLift = input.isDown('up') && this.energy > 0.02 && !this.noFly;
-    const wantsJump = input.isDown('up') && this.energy > 0.02;
+    /**
+     * An empty tank grounds the machine, and stays empty until it isn't.
+     *
+     * A bare "energy > 0.02" is a threshold the regen sits exactly on: the
+     * trickle coming back in each frame is spent the same frame, and the
+     * machine holds itself at the ceiling for ever on a tank that is empty.
+     * Measured: forty seconds of holding lift, energy pinned at 0.020,
+     * altitude pinned at 93.4m, vertical speed 0.0.
+     *
+     * So it latches. Once it bottoms out there is no more lift until there
+     * is enough in the tank to be worth calling lift — which is the whole
+     * of what running out is supposed to mean.
+     */
+    if (this.energy <= 0.02) this.liftLocked = true;
+    else if (this.energy > 0.25) this.liftLocked = false;
+    const hasLift = this.energy > 0.02 && !this.liftLocked;
+
+    const wantsLift = input.isDown('up') && hasLift && !this.noFly;
+    const wantsJump = input.isDown('up') && hasLift;
     const wantsDown = input.isDown('down');
     const groundedNow = this.env.grounded;
 
@@ -382,10 +404,26 @@ export class ZMFBody {
       this.justJumped = true;
     }
 
-    // "Fabricated" gravity: committing to flight buys most of it back.
-    // This is the whole reason air and ground can both feel good at once.
-    const hoverTarget = wantsLift ? 1 : 0;
-    this.hover = damp(this.hover, hoverTarget, wantsLift ? 0.09 : 0.30, dt);
+    /**
+     * "Fabricated" gravity: committing to flight buys most of it back.
+     * This is the whole reason air and ground can both feel good at once.
+     *
+     * It goes on slowly and comes off fast, and those are two different
+     * numbers for a reason. Committing to flight should be a smooth thing
+     * you feel take hold; LETTING GO should be immediate, because a
+     * thruster you have stopped asking for is a thruster that has stopped.
+     *
+     * Measured with them the same way round: releasing after half a second
+     * of climb, a machine took 1.37s to come down from twelve metres
+     * against 1.05s of free fall — the whole descent happened while gravity
+     * was still crawling back from a seventh of itself, so a jump ended
+     * with the machine hanging in the air with nothing holding it up.
+     */
+    // On while it is asked for, off the moment it is not. The ramp is only
+    // on the way IN — a thruster takes a moment to build, and takes none at
+    // all to stop, because stopping is what happens when nothing is holding
+    // the button down.
+    this.hover = wantsLift ? damp(this.hover, 1, 0.09, dt) : 0;
     this.gravityScale = 1 - this.hover * 0.86;
 
     this.airborneTime = groundedNow > 0.5 ? 0 : this.airborneTime + dt;
@@ -489,17 +527,31 @@ export class ZMFBody {
       this.inertia.velocity.z *= 1 - clamp01(hold * dt);
     }
 
-    // A fall has to read as a fall.
-    //
-    // The drag model is tuned for thrust, and applied to a free drop it
-    // pinned the descent at 13.5 m/s — a twenty-metre machine took eight
-    // seconds to come down from a rooftop and never looked like it was
-    // falling. Below the cap nothing changes; past it the machine stops
-    // being slowed by air it is not flying through.
+    /**
+     * A fall has to read as a fall.
+     *
+     * The drag is a HANDLING model, not air: it is what makes millimetre
+     * corrections possible at low speed and gives the top end a ceiling,
+     * and it is applied to the whole velocity because that is how a drag
+     * coefficient works. A machine that has stopped flying and started
+     * falling is still being held up by it — measured, it settles a descent
+     * at about 14 m/s whatever the gravity is.
+     *
+     * This used to be fought with a second force of its own, aimed down and
+     * tuned by hand. That was always going to be a guess, and it measured
+     * out at 1.19x of a free fall with the numbers turned up as far as they
+     * would sensibly go.
+     *
+     * So instead of a counter-force, the drag's own vertical term is handed
+     * straight back. Exactly what it took, no tuning, and gravity is left
+     * to be gravity.
+     */
     const vy = this.inertia.velocity.y;
-    if (vy < -FALL.softFrom && this.env.grounded < 0.5) {
-      const over = clamp01((-vy - FALL.softFrom) / (FALL.terminal - FALL.softFrom));
-      this.inertia.velocity.y -= FALL.pull * over * dt;
+    if (vy < 0 && this.env.grounded < 0.5) {
+      // Ramped in, so a hop is untouched and a drop is a drop. Below the
+      // knee the drag is what makes small vertical corrections land.
+      const shed = clamp01(-vy / FALL.softFrom);
+      this.inertia.velocity.y += this.inertia.zeta * vy * shed * dt;
     }
 
     // Somewhere with no gravity, letting go of the stick has to mean
@@ -592,7 +644,24 @@ export class ZMFBody {
     // -------- §3.2 directional spool (body-local, so profiles mean something)
     _tmp.copy(_worldCmd).applyQuaternion(_qInv.copy(this.angular.quaternion).invert());
     _tmp.y = lift;
-    this.inertia.spoolTo(_tmp, dt, this.layers.jerk * this.layers.jerkBoost);
+    /**
+     * Giving ground while holding a target is a slide, not a walk.
+     *
+     * Backing away had the reverse gear's profile — 56% of forward thrust,
+     * spooling up three times slower than a side-step — so retreating from
+     * something you were locked on to felt like walking backwards, because
+     * mechanically it was. A machine that keeps its guns on a target while
+     * it opens the range is doing the same thing it does going sideways,
+     * and it gets the same profile: quick to answer, and it carries.
+     */
+    const givingGround = this.locked && _tmp.z < -0.05;
+    this.inertia.spoolTo(
+      _tmp, dt, this.layers.jerk * this.layers.jerkBoost, givingGround,
+    );
+    /** 0..1 — how much of a retreat this is, for the pose and the friction. */
+    this.retreat = givingGround && this.env.grounded > 0.4
+      ? Math.min(1, -_tmp.z)
+      : 0;
 
     // -------- world-space thrust
     if (onGround) {
@@ -650,7 +719,11 @@ export class ZMFBody {
       range: this.assist.hasTarget ? this.assist.range : NaN,
     });
 
-    this.env.applyGroundFriction(this.inertia.velocity, input.intensity, this.grip, dt);
+    // A retreat carries. The legs are not walking it, so they are not
+    // braking it either — the same reason a lateral dash skates.
+    this.env.applyGroundFriction(
+      this.inertia.velocity, input.intensity, this.grip * (1 - this.retreat * 0.72), dt,
+    );
 
     // -------- attitude
     this.angular.update({

@@ -1,11 +1,14 @@
 import * as THREE from 'three';
 import { Assembly, PRESETS, PRESET_LIST, starterParts } from './core/Assembly.js';
+import { LoopbackHub } from './net/Transport.js';
+import { Session } from './net/Session.js';
+import { InputFrame } from './net/InputFrame.js';
 import { EditorScene, TOOL, PART_TOOLS } from './editor/EditorScene.js';
 import { History } from './editor/History.js';
 import { PartLibrary } from './editor/PartLibrary.js';
 import { FieldScene } from './game/FieldScene.js';
 import { ARENAS, DEFAULT_ARENA, getArena } from './game/Arenas.js';
-import { loadKit, kitStatus } from './game/Kit.js';
+import { loadKit, kitStatus, KIT_SFX } from './game/Kit.js';
 import {
   SoloRun, SOLO_STAGES, DIFFICULTIES, DEFAULT_DIFFICULTY,
 } from './game/SoloRun.js';
@@ -15,10 +18,10 @@ import { seedFromClock } from './core/Random.js';
 import { EditorUI } from './ui/EditorUI.js';
 import { InputManager, DEFAULT_BINDINGS } from './zmf/InputManager.js';
 import { KineticFeedback } from './zmf/KineticFeedback.js';
-import { SIZE_STEP } from './core/constants.js';
+import { SIZE_STEP, ACTION_BITS, STEP } from './core/constants.js';
 
 /** How long one simulation step covers. Everything in the fight uses this. */
-export const STEP = 1 / 60;
+export { STEP } from './core/constants.js';
 /**
  * The most steps one frame may run. Past this the game shows time passing
  * more slowly rather than trying to catch up, which is the only choice that
@@ -96,7 +99,7 @@ const TOOL_KEYS = {
 
 const EDIT_MODES = new Set(['edit', 'part']);
 /** The two screens that are the arena: same scene, different rules. */
-const FIELD_MODES = new Set(['field', 'solo']);
+const FIELD_MODES = new Set(['field', 'solo', 'versus']);
 
 /** Arrow key -> [screen right, screen forward]. */
 const NUDGE = {
@@ -201,6 +204,17 @@ export class App {
     this.ui.renderLibrary();
     this.ui.syncHistory();
 
+    /**
+     * True while the offer to restore is up, so the net is not overwritten.
+     *
+     * Held from the first frame rather than from the moment the question is
+     * asked: the question waits for the workbench, and between launch and
+     * there the draft has to survive whatever else the session does.
+     */
+    this._draftHeld = !!this.draft();
+    /** Whether the last session has been offered back yet. */
+    this._draftAsked = false;
+
     this.mode = null;
     this.setMode('title');
 
@@ -263,10 +277,6 @@ export class App {
     /** Real time owed to the simulation but not yet stepped. */
     this.stepBank = 0;
     this.stepsThisFrame = 0;
-    /** True while the offer to restore is up, so the net is not overwritten. */
-    this._draftHeld = false;
-    // The safety net, offered once, on the way in.
-    this.ui.offerDraft?.();
     this.renderer.setAnimationLoop(() => this.frame());
   }
 
@@ -278,6 +288,20 @@ export class App {
     // A drag that lays a row of parts is ONE change, the way a slider drag is.
     ed.onGesture = (open) => (open ? this.beginGesture() : this.endGesture());
     ed.onHint = (hint) => this.ui?.showPlacementHint?.(hint);
+    /*
+     * A change that turned out to change nothing, taken back off the list.
+     *
+     * A stroke files its undo step BEFORE it knows whether it will do
+     * anything, because it has to — the first dab is already a change by
+     * the time it could tell. So a stroke on empty air, or one abandoned
+     * halfway, leaves a row in the undo list that undoes nothing, and
+     * pressing Ctrl+Z appears not to work.
+     */
+    ed.onCancelChange = () => this.undo({ quiet: true });
+    /** The eyedropper: the colour under the cursor becomes the armed one. */
+    ed.onPickColor = (i) => this.setColor(i);
+    /** The brush changed — by slider, by key or by changing tool. */
+    ed.onBrush = (pct, metres) => this.ui?.syncBrush?.(pct, metres);
     ed.onWorkPlane = (y) => this.ui?.showWorkPlane?.(y);
     ed.onMarquee = (rect) => this.ui?.showMarquee?.(rect);
     ed.onRecipes = (list) => this.ui?.renderRecipes?.(list);
@@ -356,7 +380,7 @@ export class App {
     this.ui.syncHistory();
   }
 
-  undo() {
+  undo({ quiet = false } = {}) {
     if (!EDIT_MODES.has(this.mode)) return false;
     const entry = this.history.undo(this._snapshot());
     if (!entry) { this.ui.toastMsg('これ以上戻せません'); return false; }
@@ -953,6 +977,20 @@ export class App {
 
   setVoxResolution(n, { force = false } = {}) {
     if (this.assembly.voxRes === n) return;
+    /*
+     * Finer costs every block at once, not one of them.
+     *
+     * Rebuilding is what a placement waits on, and it costs about what the
+     * cell count says: half a second at a million and a half, eight seconds
+     * at forty-eight million. So a machine that cannot be rebuilt in a
+     * reasonable time is refused the setting rather than given a workbench
+     * that hitches on every click.
+     */
+    if (n > this.assembly.voxRes && !this.assembly.fitsAtResolution(n)) {
+      this.ui.syncResolution(this.assembly.voxRes);
+      this.ui.toastMsg(`この機体には細かすぎます。ブロックを減らすと 1/${n} にできます`);
+      return;
+    }
     // Coarser means every grid is resampled DOWN, and detail that goes does
     // not come back by setting it fine again.
     const carved = [...this.assembly.parts.values()]
@@ -1050,6 +1088,12 @@ export class App {
     this.mode = mode;
 
     if (FIELD_MODES.has(previous)) this.field.exit();
+    // A fight against other people ends when you leave it, whichever way
+    // you left. Nothing good comes of a socket outliving the screen.
+    if (previous === 'versus') {
+      this.field.setNetplay(null);
+      this.ui.versus?.leave?.();
+    }
     // Leaving the editor keeps the view and the selection, so a trip to the
     // field to try something does not cost the framing you set up to work in.
     if (previous === 'edit') { this._keepEditorView(); this.mainEditor.exit(); }
@@ -1058,6 +1102,22 @@ export class App {
 
     if (FIELD_MODES.has(mode)) {
       this.hudCanvas.classList.remove('hidden');
+      if (mode === 'versus' && this.pendingVersus) {
+        // Every seat at once, in the order every machine agreed on. The
+        // field builds them; nothing else about a fight changes.
+        const { session, builds, seat } = this.pendingVersus;
+        this.pendingVersus = null;
+        this.field.setEnemyFire(true);
+        this.field.setArena(this._savedArena());
+        this.field.restart(session.seed);
+        this.field.setNetplay(session, builds, seat);
+        this.field.enter();
+        this.ui.syncArena(this.field.world.arenaId, true, false);
+        this.resumeField();
+        this.ui.syncMode(mode);
+        this.resize();
+        return;
+      }
       // A run may be fought with a machine other than the one on the bench.
       this.field.load(mode === 'solo' && this.soloMachine
         ? this.soloMachine : this.mainAssembly);
@@ -1090,6 +1150,18 @@ export class App {
       this.editor.enter();
       // Back where you were looking, with what you had picked still picked.
       if (mode === 'edit') this._restoreEditorView();
+      /*
+       * The last session, offered back the first time the workbench opens.
+       *
+       * Not at launch, which is where it used to be asked: at launch the
+       * title screen is what is on the glass, so the question went up
+       * behind it and timed out unread. Here it is the first thing on the
+       * bench, which is also the first moment the answer means anything.
+       */
+      if (mode === 'edit' && !this._draftAsked) {
+        this._draftAsked = true;
+        this.ui.offerDraft?.();
+      }
       this.ui.syncName(this.assembly.name);
       this.ui.syncResolution(this.assembly.voxRes);
       this.ui.syncTool(this.editor.tool);
@@ -1157,6 +1229,42 @@ export class App {
    * no weapons on it found that out in wave one — and the difficulty, which
    * decides the whole run, was set on a menu row and then never seen again.
    */
+  /** The way in to a fight against other people. */
+  openVersus() {
+    this.ui.versus.show();
+    return this;
+  }
+
+  /** They backed out of it, or it ended. */
+  closeVersus() {
+    this.ui.versus.session?.close();
+    if (this.mode === 'versus') this.goTitle();
+    return this;
+  }
+
+  /**
+   * Everybody is ready: put the machines on the field.
+   *
+   * Each seat brings its own build, so what you fight is what they made —
+   * that is most of the point of the game being a workbench. A build that
+   * did not arrive falls back to the standard machine rather than failing
+   * the whole fight over one bad message.
+   */
+  beginVersus(session) {
+    const builds = session.order.map((id) => {
+      const json = session.players.get(id)?.machine;
+      try {
+        return json ? Assembly.fromJSON(json) : PRESETS.biped.build();
+      } catch {
+        return PRESETS.biped.build();
+      }
+    });
+    this.ui.versus.hide();
+    this.pendingVersus = { session, builds, seat: session.slotOf(session.id) };
+    this.setMode('versus');
+    return this;
+  }
+
   startSolo() {
     if (this.mode === 'solo') { this.restartField(); return this; }
     this.ui.result.close();
@@ -1261,6 +1369,9 @@ export class App {
       }
 
       if (e.code === 'Escape') {
+        // Backing out of the offer keeps the draft, the way clicking off it
+        // does. Only 破棄 throws it away.
+        if (this.ui.draftOpen) { this.ui.foldDraft(); return; }
         if (this.ui.help.open) { this.ui.help.close(); return; }
         if (this.ui.share.open) { this.ui.share.close(); return; }
         if (this.ui.keyConfig.open) { this.ui.keyConfig.close(); return; }
@@ -1444,7 +1555,12 @@ export class App {
     let steps = 0;
     while (this.stepBank >= STEP && steps < MAX_CATCH_UP) {
       this.input.update(STEP);
-      this.field.update(STEP);
+      // A networked fight does not step because time passed; it steps when
+      // everybody's presses for the step have arrived. The clock still runs
+      // at a steady sixtieth so the presses go out at a steady rate — it is
+      // the FIGHT that waits, not the reading of the keyboard.
+      if (this.field.netplay) this.field.netAdvance(STEP);
+      else this.field.update(STEP);
       this.input.endFrame();
       this.stepBank -= STEP;
       steps++;
@@ -1492,5 +1608,21 @@ export class App {
 if (typeof window !== 'undefined') {
   window.addEventListener('DOMContentLoaded', () => {
     window.__blostom = new App();
+    /*
+     * The networking, reachable from outside the app.
+     *
+     * Only the harness uses it, and only to stand two sessions up in one
+     * process — a fight two copies here cannot agree on is a fight two
+     * computers have no hope with, and it can be checked in a millisecond.
+     * Nothing in the game reads this.
+     */
+    // The list itself, so a check that counts sounds counts the real list
+    // rather than a number somebody has to remember to update.
+    window.__blostom.KIT_SFX = KIT_SFX;
+    window.__blostom_net = {
+      LoopbackHub, Session, InputFrame,
+      forwardAndFire: (1 << ACTION_BITS.indexOf('forward'))
+        | (1 << ACTION_BITS.indexOf('fire')),
+    };
   });
 }

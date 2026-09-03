@@ -304,10 +304,14 @@ const CHECKS = [
       return { ok: true, note: 'not fetched — run python tools/fetch-assets.py' };
     }
     return {
-      ok: kit.surfaces === 8 && kit.envs === 3 && kit.sfx === 7
+      // Counted against the list itself rather than a number written here:
+      // the last time a sound was added, this said 7 and the check that
+      // exists to notice a half-fetched kit was the thing that broke.
+      ok: kit.surfaces === 8 && kit.envs === 3 && kit.sfx === a.KIT_SFX.length
         && kit.fx === 9 && kit.space === 3 && kit.skies === 4 && kit.failed === 0,
       note: kit.surfaces + '/8 surfaces, ' + kit.envs + '/3 reflected skies, '
-        + kit.skies + '/4 drawn skies, ' + kit.sfx + '/7 sounds, ' + kit.fx
+        + kit.skies + '/4 drawn skies, ' + kit.sfx + '/' + a.KIT_SFX.length
+        + ' sounds, ' + kit.fx
         + '/9 sprites, ' + kit.space + '/3 space, ' + kit.failed + ' failed',
     };
   })()`],
@@ -453,11 +457,15 @@ const CHECKS = [
     // Decoding is asked for on the first play and answered later, so this
     // fires once, waits, and then checks that the buffer turned up.
     if (!(await a.kitReady).sfx) { fb.setMuted(true); return { ok: true, note: 'not fetched' }; }
-    for (const n of ['fire-light', 'fire-heavy', 'hit-landed', 'hit-taken', 'boom', 'lock-on']) {
-      fb._sample(n, 0);
-    }
-    await new Promise((r) => setTimeout(r, 900));
+    // Every one of them, not a hand-written half: a sound that arrives and
+    // then will not decode is exactly the failure this is here to catch.
+    for (const n of a.KIT_SFX) fb._sample(n, 0);
+    // And the three that are HELD rather than struck go through their own
+    // path, which has its own way of failing.
+    for (const n of ['servo', 'thrust', 'blade']) fb._hold(n, 0);
+    await new Promise((r) => setTimeout(r, 1400));
     const decoded = [...fb.samples.entries()].filter(([, v]) => v && v.duration > 0);
+    const held = [...fb.loops.entries()].filter(([, v]) => v && v.src);
 
     // And the synthesised layer is still there underneath: these are events
     // the game has always had a sound for, and a missing file must not take
@@ -469,10 +477,10 @@ const CHECKS = [
     fb.setMuted(true);
 
     return {
-      ok: decoded.length >= 6 && !threw,
-      note: decoded.length + ' sounds decoded ('
-        + decoded.map(([k, v]) => k + ' ' + v.duration.toFixed(2) + 's').join(', ')
-        + ')' + (threw ? ' THREW ' + threw : ''),
+      ok: decoded.length >= a.KIT_SFX.length - 3 && held.length === 3 && !threw,
+      note: decoded.length + ' of ' + a.KIT_SFX.length + ' struck, '
+        + held.length + '/3 held (' + held.map(([k]) => k).join(',') + ')'
+        + (threw ? ' THREW ' + threw : ''),
     };
   })()`],
 
@@ -565,7 +573,7 @@ const CHECKS = [
     };
   })()`],
 
-  ['the offer to restore folds away by itself, and cannot go stale', `(async () => {
+  ['the offer to restore is a window, and cannot go stale', `(async () => {
     const a = window.__blostom;
     const bar = document.getElementById('draftbar');
     if (!bar) return { ok: false, note: 'no draft bar in the page' };
@@ -578,6 +586,12 @@ const CHECKS = [
     }));
     a.ui.offerDraft();
     const shown = !bar.classList.contains('hidden');
+    // A window in the middle, not a strip along the top. The strip was the
+    // shape of a notice, so it was read as one and ignored.
+    const box = bar.getBoundingClientRect();
+    const middle = box.width > window.innerWidth * 0.9
+      && box.height > window.innerHeight * 0.9
+      && !!bar.querySelector('.draftbox');
     // While it is up the autosave holds off, or the thing being offered is
     // quietly replaced by whatever you do next and "restore" restores that.
     const held = a.tickDraft ? a._draftHeld === true : false;
@@ -588,7 +602,7 @@ const CHECKS = [
     const goneOnEdit = bar.classList.contains('hidden');
     const released = a._draftHeld === false;
 
-    // And it comes back up on its own timer when nobody touches anything.
+    // And it can be raised again.
     a.ui.offerDraft();
     const again = !bar.classList.contains('hidden');
     a.ui.foldDraft();
@@ -600,10 +614,505 @@ const CHECKS = [
 
     localStorage.removeItem('blostom.draft.v1');
     return {
-      ok: shown && held && goneOnEdit && released && again && folds && menu,
-      note: 'shown ' + shown + ', autosave held ' + held + ', folds on edit '
-        + goneOnEdit + ' (released ' + released + '), folds on its own ' + folds
-        + ', still in the file menu ' + menu,
+      ok: shown && middle && held && goneOnEdit && released && again && folds && menu,
+      note: 'shown ' + shown + ' (as a window ' + middle + '), autosave held '
+        + held + ', folds on edit ' + goneOnEdit + ' (released ' + released
+        + '), folds on demand ' + folds + ', still in the file menu ' + menu,
+    };
+  })()`],
+
+  ['the last session is offered on the way into the workbench, not at launch', `(async () => {
+    const a = window.__blostom;
+    const bar = document.getElementById('draftbar');
+    if (!bar) return { ok: false, note: 'no draft window in the page' };
+
+    // Wind the session back to how it launches, with work on disk to offer.
+    a.ui.foldDraft();
+    a._draftAsked = false;
+    localStorage.setItem('blostom.draft.v1', JSON.stringify({
+      at: Date.now() - 60000, json: a.assembly.toJSON(),
+    }));
+    a.goTitle();
+    // The title screen is what is on the glass at launch. Asking here put
+    // the question behind it, where it timed out unread.
+    const quietOnTitle = bar.classList.contains('hidden');
+
+    a.setMode('edit');
+    const askedOnEntry = !bar.classList.contains('hidden');
+    // Once. Going out to the field and back is not a new session.
+    a.ui.foldDraft();
+    a.setMode('field');
+    a.setMode('edit');
+    const askedOnce = bar.classList.contains('hidden');
+
+    // Esc backs out of it, and the draft survives that.
+    a.ui.offerDraft();
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+    const escapes = bar.classList.contains('hidden');
+    const kept = !!a.draft();
+
+    localStorage.removeItem('blostom.draft.v1');
+    return {
+      ok: quietOnTitle && askedOnEntry && askedOnce && escapes && kept,
+      note: 'quiet on the title ' + quietOnTitle + ', asked on entry '
+        + askedOnEntry + ', asked once ' + askedOnce + ', Esc backs out '
+        + escapes + ' and keeps it ' + kept,
+    };
+  })()`],
+
+  ['running flat out, the feet keep up with the floor', `(() => {
+    const a = window.__blostom;
+    a.goTitle();
+    a.setMode('edit');
+    a.loadPreset('biped', { ask: false });
+    a.goTitle();
+    a.setMode('field');
+    // The flattest, emptiest place there is. Started in a corner on a
+    // cluttered map the machine runs into cover after a couple of seconds,
+    // and a stride measured against a machine that has stopped is nothing.
+    a.field.setArena('flats');
+    const r = a.field.player;
+    a.input.enabled = true;
+    const M = Object.getPrototypeOf(r.rig.root.matrixWorld).constructor;
+
+    // Where the sole is, against where the machine is. A foot that plants
+    // and pushes holds still on the ground for half the cycle; one that is
+    // being dragged never does, and the drag is what a skitter is.
+    const limb = r.rig.limbs[0];
+    const tip = limb.chain[limb.chain.length - 1];
+    const run = (hold) => {
+      a.input.keys.clear();
+      for (const k of hold) a.input.keys.add(k);
+      let lo = Infinity;
+      let hi = -Infinity;
+      let speed = 0;
+      let freq = 0;
+      let n = 0;
+      let was = r.position.clone();
+      for (let i = 0; i < 600; i++) {
+        a.input.update(1 / 60);
+        a.field.update(1 / 60);
+        const step = Math.hypot(r.position.x - was.x, r.position.z - was.z) * 60;
+        was.copy(r.position);
+        // Only the frames where it is actually running. Loose in a real
+        // arena a machine finds cover, turns and stops, and a stride
+        // measured against a machine that has stopped is nothing. All of
+        // this comes off the same frames, so it describes one moment.
+        if (i <= 60 || step < 4) continue;
+        // Measured off the ground it actually covered, not off any number
+        // the machine reports about itself.
+        speed += step;
+        freq += r.animator.gaitFreq;
+        n++;
+        r.object3D.updateMatrixWorld(true);
+        // Into the machine's own frame, so its travel is taken out and only
+        // the foot's movement against the body is left.
+        const p = limb.sole.clone()
+          .applyMatrix4(tip.joint.matrixWorld)
+          .applyMatrix4(new M().copy(r.rig.root.matrixWorld).invert());
+        lo = Math.min(lo, p.z);
+        hi = Math.max(hi, p.z);
+      }
+      const legs = r.rig.limbs.length;
+      window.__ran = n;
+      speed /= Math.max(1, n);
+      freq /= Math.max(1, n);
+      const perStep = freq > 0.02 ? speed / (freq * legs) : 0;
+      return {
+        speed, perStep, swing: hi - lo, glide: r.animator.glide,
+        slip: perStep > 0.05 ? 1 - (hi - lo) / perStep : 1,
+      };
+    };
+
+    const cruise = run(['KeyW']);
+    const ran = window.__ran;
+    // And on the thruster, where no stride reaches the ground being covered.
+    const boosted = run(['KeyW', 'KeyE']);
+    a.input.keys.clear();
+    for (let i = 0; i < 120; i++) { a.input.update(1 / 60); a.field.update(1 / 60); }
+
+    const ok = Math.abs(cruise.slip) < 0.25 && cruise.speed > 6
+      && cruise.glide < 0.1 && ran > 90
+      && boosted.speed > cruise.speed * 1.3 && boosted.glide > 0.5;
+    return {
+      ok,
+      note: ran + ' frames running, at ' + cruise.speed.toFixed(1)
+        + 'm/s the floor moved ' + cruise.perStep.toFixed(2) + 'm under a '
+        + cruise.swing.toFixed(2) + 'm step (slip '
+        + (cruise.slip * 100).toFixed(0) + '%), still walking '
+        + (cruise.glide < 0.1) + '; on the thruster '
+        + boosted.speed.toFixed(1) + 'm/s and skating ' + boosted.glide.toFixed(2),
+    };
+  })()`],
+
+  ['the workbench shows what is left, down to the sculpting grid', `(() => {
+    const a = window.__blostom;
+    a.goTitle();
+    a.setMode('edit');
+    a.loadPreset('core', { ask: false });
+
+    // Three bars, filling. The question is "have I room for more", which is
+    // a proportion — a fraction makes you do arithmetic to answer it.
+    const bars = [...document.querySelectorAll('.budgetrow')];
+    const labels = bars.map((b) => b.querySelector('.k').textContent);
+    // The plate bar, which is the one six weapons move.
+    const widthOf = () => document.querySelectorAll('.budgetrow .budgetfill')[2].style.width;
+    const before = widthOf();
+
+    // Six weapon plates, where four used to be the wall.
+    let fitted = 0;
+    for (let i = 0; i < 8; i++) {
+      if (a.assembly.blockedBy('gatling')) break;
+      a.assembly.addEquipOnFace(a.assembly.core.id, i % 6, 'gatling', { size: 0.6 });
+      fitted++;
+    }
+    a.editor.rebuild();
+    a.ui.renderStats(a.editor.stats);
+    const grew = widthOf() !== before;
+
+    // And the way in to a run is one door, not two: the front page.
+    const soloOnBench = [...document.querySelectorAll('#topbar button')]
+      .some((b) => b.textContent.includes('ソロプレイ'));
+
+    a.loadPreset('biped', { ask: false });
+    return {
+      ok: bars.length === 4 && fitted === 6 && grew && !soloOnBench,
+      note: bars.length + ' bars (' + labels.join('/') + '), '
+        + fitted + ' weapons fitted, bar moved ' + grew
+        + ', solo button on the bench ' + soloOnBench,
+    };
+  })()`],
+
+  ['a machine cannot be built past what the game will run', `(() => {
+    const a = window.__blostom;
+    a.goTitle();
+    a.setMode('edit');
+    a.loadPreset('core', { ask: false });
+    a.editor.symmetry = false;
+
+    let why = '';
+    a.editor.onReject = (msg) => { why = msg; };
+
+    // Fill the plate budget, then ask for one more and see what it says.
+    const cap = a.assembly.usage().equip;
+    for (let i = 0; i < 40; i++) {
+      if (!a.assembly.hasRoomFor('equip')) break;
+      a.assembly.addEquipOnFace(a.assembly.core.id, i % 6, 'tank', { size: 0.5 });
+    }
+    const used = a.assembly.usage().equip;
+    const full = !a.assembly.hasRoomFor('equip');
+    const named = a.assembly.blockedBy('tank') === 'budget';
+
+    // The bar says so too, without anybody having to try.
+    a.ui.renderStats(a.editor.stats);
+    const flagged = !!document.querySelector('.budgetrow.full, .budgetrow.tight');
+
+    a.loadPreset('biped', { ask: false });
+    return {
+      ok: used > cap && full && named && flagged,
+      note: 'filled to ' + used + ' plates, refused ' + full
+        + ' and named the wall ' + named + ', bar flagged ' + flagged
+        + (why ? ' | "' + why + '"' : ''),
+    };
+  })()`],
+
+  ['a fight against other people has four ways in, and rules first', `(() => {
+    const a = window.__blostom;
+    a.goTitle();
+    const row = [...document.querySelectorAll('#titlemenu button, .ti-label')]
+      .some((b) => b.textContent.includes('対戦'));
+
+    a.openVersus();
+    const shown = !document.getElementById('versus').classList.contains('hidden');
+    // Four ways in, in the order they are likely to work.
+    const tabs = [...document.querySelectorAll('.vs-tab')].map((b) => b.textContent);
+    // And the rules, settled BEFORE anybody is matched: two people who want
+    // different round lengths are not waiting for the same game.
+    const rules = [...document.querySelectorAll('.vs-rule .k')].map((n) => n.textContent);
+    const v = a.ui.versus;
+    const was = v.rules.roundSeconds;
+    document.querySelectorAll('.vs-rule')[0].querySelectorAll('button')[1].click();
+    const moved = v.rules.roundSeconds !== was;
+
+    a.ui.versus.hide();
+    const gone = document.getElementById('versus').classList.contains('hidden');
+
+    return {
+      ok: row && shown && tabs.length === 4 && rules.length === 3 && moved && gone,
+      note: 'on the front page ' + row + ', ways in [' + tabs.join('/')
+        + '], rules [' + rules.join('/') + '] adjustable ' + moved
+        + ', closes ' + gone,
+    };
+  })()`],
+
+  ['four machines, one fight, driven by presses instead of by the game', `(() => {
+    const a = window.__blostom;
+    const N = window.__blostom_net;
+    if (!N) return { ok: false, note: 'the net modules are not in the build' };
+
+    // Two players, two copies of the fight, one process. If two copies in
+    // one process cannot agree, two computers have no hope.
+    const hub = new N.LoopbackHub({ latency: 3 });
+    const host = new N.Session({ transport: hub.connect('h'), isHost: true, name: 'HOST', delay: 5 });
+    const guest = new N.Session({ transport: hub.connect('g'), name: 'GUEST', delay: 5 });
+    hub.pump(40);
+    host.setReady(true);
+    guest.setReady(true);
+    hub.pump(60);
+    const started = host.phase === 'fight' && guest.phase === 'fight';
+    const agreed = host.seed === guest.seed && host.order.join() === guest.order.join();
+
+    // The real field, running the real fight, off the host's seat.
+    a.goTitle();
+    a.beginVersus(host);
+    const seats = a.field.netSeats.length;
+    let ran = 0;
+    for (let i = 0; i < 300; i++) {
+      // The other player is pressing forward and firing, which nothing in
+      // the game decides — it arrives.
+      const f = new N.InputFrame(N.forwardAndFire, 0, 0);
+      guest.pump(f, () => {});
+      ran += a.field.netAdvance(1 / 60);
+      hub.pump(1);
+    }
+    const moved = a.field.netSeats[1]
+      && a.field.netSeats[1].position.length() > 0;
+    const apart = seats > 1
+      ? a.field.netSeats[0].position.distanceTo(a.field.netSeats[1].position) : 0;
+
+    host.close();
+    guest.close();
+    a.goTitle();
+    return {
+      ok: started && agreed && seats === 2 && ran > 200 && apart > 1,
+      note: seats + ' seats, ' + ran + ' steps run, ' + apart.toFixed(0)
+        + 'm apart; same seed ' + agreed + ', both in ' + started
+        + ', the far machine moved ' + moved,
+    };
+  })()`],
+
+  ['a match is rounds and a score, and a leaver is picked up by the computer', `(() => {
+    const a = window.__blostom;
+    const N = window.__blostom_net;
+    if (!N) return { ok: false, note: 'the net modules are not in the build' };
+
+    const hub = new N.LoopbackHub({ latency: 3 });
+    const host = new N.Session({
+      transport: hub.connect('h'), isHost: true, name: 'HOST', delay: 5,
+      rules: { roundSeconds: 60, wins: 2, readySeconds: 0, breakSeconds: 0 },
+    });
+    const guest = new N.Session({ transport: hub.connect('g'), name: 'GUEST', delay: 5 });
+    hub.pump(40);
+    host.setReady(true);
+    guest.setReady(true);
+    hub.pump(60);
+
+    a.goTitle();
+    a.beginVersus(host);
+    const m = a.field.match;
+    const started = !!m && m.rules.wins === 2;
+
+    const run = (steps) => {
+      for (let i = 0; i < steps; i++) {
+        guest.pump(N.InputFrame.idle(), () => {});
+        a.field.netAdvance(1 / 60);
+        hub.pump(1);
+      }
+    };
+    // Last one standing takes the round, so knocking one out ends it.
+    const knockOut = (seat) => {
+      a.field.netSeats[seat].hp = 0;
+      a.field.netSeats[seat].alive = false;
+      run(30);
+    };
+
+    run(40);
+    const live = m.phase === 'live';
+    knockOut(1);
+    const afterOne = m.score.join('-');
+    // And the next round puts everybody back up on their feet.
+    const revived = a.field.netSeats[1].alive;
+    knockOut(1);
+    const over = m.over && m.winner === 0;
+
+    // Now they walk out of what is left. Their machine must not be left
+    // standing there: people and a statue is a worse fight than people.
+    guest.close();
+    hub.pump(20);
+    run(180);
+    const takenOver = a.field.taken.has(1);
+    const drivenByAi = a.field.ais.some((x) => x.robot === a.field.netSeats[1]);
+
+    host.close();
+    a.goTitle();
+    return {
+      ok: started && live && afterOne === '1-0' && revived && over
+        && takenOver && drivenByAi,
+      note: 'round one went ' + afterOne + ', everybody back up ' + revived
+        + ', match won ' + over + '; the leaver was taken over ' + takenOver
+        + ' and is being driven ' + drivenByAi,
+    };
+  })()`],
+
+  ['knocked out with the round still running, you watch somebody who is not', `(() => {
+    const a = window.__blostom;
+    const N = window.__blostom_net;
+    if (!N) return { ok: false, note: 'the net modules are not in the build' };
+
+    // Three of them: with two, being knocked out ENDS the round, so there
+    // is nothing to watch. Spectating is what a four-player fight needs.
+    const hub = new N.LoopbackHub({ latency: 2 });
+    const host = new N.Session({
+      transport: hub.connect('h'), isHost: true, name: 'HOST', delay: 4,
+      rules: { roundSeconds: 120, wins: 3, readySeconds: 0 },
+    });
+    const g1 = new N.Session({ transport: hub.connect('g1'), name: 'GUEST1', delay: 4 });
+    const g2 = new N.Session({ transport: hub.connect('g2'), name: 'GUEST2', delay: 4 });
+    hub.pump(40);
+    for (const s of [host, g1, g2]) s.setReady(true);
+    hub.pump(70);
+
+    a.goTitle();
+    a.beginVersus(host);
+    const seats = a.field.netSeats.length;
+    const mine = a.field.localSeat;
+    const run = (steps) => {
+      for (let i = 0; i < steps; i++) {
+        g1.pump(N.InputFrame.idle(), () => {});
+        g2.pump(N.InputFrame.idle(), () => {});
+        a.field.netAdvance(1 / 60);
+        hub.pump(1);
+      }
+    };
+    run(40);
+    const own = a.field.watching === mine && !a.field.spectating;
+
+    a.field.netSeats[mine].hp = 0;
+    a.field.netSeats[mine].alive = false;
+    run(40);
+    const moved = a.field.watching !== mine;
+    const spectating = a.field.spectating;
+    // The arrows walk along whoever is left.
+    const at = a.field.watching;
+    a.field.watchNext(1);
+    const cycled = a.field.watching !== at && a.field.netSeats[a.field.watching].alive;
+
+    host.close();
+    g1.close();
+    g2.close();
+    a.goTitle();
+    return {
+      ok: seats === 3 && own && moved && spectating && cycled,
+      note: seats + ' seats; own machine first ' + own
+        + ', camera left the wreck ' + moved + ' (to seat ' + at
+        + '), arrows walk along ' + cycled,
+    };
+  })()`],
+
+  ['a queue is a wait, and the wait can be spent in the field', `(() => {
+    const a = window.__blostom;
+    const v = a.ui.versus;
+    a.goTitle();
+    a.openVersus();
+
+    // Nothing to wait for yet, so nothing to wander off from.
+    v._waitInField();
+    const refused = a.mode !== 'field';
+
+    // Standing in a queue. The socket for it lives in the shell, not in
+    // this screen, so the screen can go away without the queue stopping.
+    v.maker = { state: 'queued', cancel() { this.state = 'idle'; } };
+    v._waitInField();
+    const inField = a.mode === 'field';
+    const hidden = document.getElementById('versus').classList.contains('hidden');
+    const stillQueued = v.maker.state === 'queued';
+
+    v.maker = null;
+    a.goTitle();
+    return {
+      ok: refused && inField && hidden && stillQueued,
+      note: 'refused without a queue ' + refused + ', went to the field '
+        + inField + ' with the screen away ' + hidden
+        + ', queue still running ' + stillQueued,
+    };
+  })()`],
+
+  ['a walking machine makes the noises a walking machine makes', `(() => {
+    const a = window.__blostom;
+    a.goTitle();
+    a.setMode('edit');
+    // A heavy one on purpose. Landing is gated on weight — a light machine
+    // stepping down is not a landing, and the game is right about that —
+    // so a biped would answer "no landing sound" and be correct.
+    a.loadPreset('titan', { ask: false });
+    a.goTitle();
+    a.setMode('field');
+    a.field.setArena('flats');
+    const r = a.field.player;
+    a.input.enabled = true;
+
+    // Count what is asked for rather than what is heard: there is no audio
+    // device in this harness, and whether a sound reaches a speaker is not
+    // what could be wrong here.
+    const fb = a.field.feedback;
+    // The held sounds only get as far as being asked for once there is an
+    // audio graph to ask, which is the same gate the real game has.
+    fb.init();
+    fb.setMuted(false);
+    const calls = { step: 0, land: 0, jump: 0, held: {} };
+    const realStep = fb.step;
+    const realLand = fb.land;
+    const realJump = fb.jump;
+    const realHold = fb._hold;
+    fb.step = function s2(w) { calls.step++; return realStep.call(this, w); };
+    fb.land = function l2(w) { calls.land++; return realLand.call(this, w); };
+    fb.jump = function j2(w) { calls.jump++; return realJump.call(this, w); };
+    fb._hold = function h2(n, g, p2) {
+      calls.held[n] = Math.max(calls.held[n] ?? 0, g);
+      return realHold.call(this, n, g, p2);
+    };
+
+    a.input.keys.clear();
+    a.input.keys.add('KeyW');
+    // Strides, counted the way the legs count them: the gait clock summed
+    // over the run IS the number of cycles it went through.
+    let cycles = 0;
+    for (let i = 0; i < 400; i++) {
+      a.input.update(1 / 60);
+      a.field.update(1 / 60);
+      a.field.present(1 / 60);
+      cycles += r.animator.gaitFreq / 60;
+      a.input.endFrame();
+    }
+    const walked = calls.step;
+
+    // A jump, and the landing at the end of it.
+    a.input.keys.add('Space');
+    for (let i = 0; i < 20; i++) {
+      a.input.update(1 / 60); a.field.update(1 / 60); a.input.endFrame();
+    }
+    a.input.keys.delete('Space');
+    for (let i = 0; i < 200; i++) {
+      a.input.update(1 / 60); a.field.update(1 / 60); a.field.present(1 / 60); a.input.endFrame();
+    }
+
+    fb.step = realStep; fb.land = realLand; fb.jump = realJump; fb._hold = realHold;
+    fb.setMuted(true);
+    a.input.keys.clear();
+    a.goTitle();
+
+    // One footfall per foot, per stride. Anything else means the sound has
+    // its own clock, which is the one thing it must not have.
+    const want = Math.round(cycles * r.rig.limbs.length);
+    const sane = Math.abs(walked - want) <= 2;
+    return {
+      ok: sane && calls.land > 0 && calls.jump > 0
+        && (calls.held.servo ?? 0) > 0 && (calls.held.thrust ?? 0) > 0,
+      note: walked + ' footfalls for ' + cycles.toFixed(1) + ' strides on '
+        + r.rig.limbs.length + ' legs (expected ' + want + '), '
+        + calls.jump + ' jump, ' + calls.land + ' land; servo up to '
+        + (calls.held.servo ?? 0).toFixed(3) + ', thruster '
+        + (calls.held.thrust ?? 0).toFixed(3),
     };
   })()`],
 
@@ -683,6 +1192,50 @@ const CHECKS = [
       ok: drawn > 2000 && red > 0 && cyan > 0 && midCyan > 0,
       note: 'dial at ' + where + ': ' + drawn + ' px, ' + red + ' opponent, '
         + cyan + ' player (' + midCyan + ' dead centre)',
+    };
+  })()`],
+
+  ['the lock takes the one you are looking at', `(() => {
+    const a = window.__blostom;
+    a.goTitle();
+    a.setMode('field');
+    a.field.restart();
+    const f = a.field;
+    if (f.enemies.length < 2) return { ok: false, note: 'need two opponents' };
+
+    const V = Object.getPrototypeOf(f.player.position).constructor;
+    const near = f.enemies[0];
+    const far = f.enemies[1];
+    // One close behind the player, one a long way off in front. The lock
+    // used to take the nearest whatever the player was pointing at, which
+    // meant aiming carefully and being handed the machine at your back.
+    f.player.body.reset(new V(0, f.player.position.y, 0), new V(0, 0, 1));
+    near.body.reset(new V(6, near.position.y, -14), new V(0, 0, 1));
+    far.body.reset(new V(2, far.position.y, 70), new V(0, 0, -1));
+    for (const r of [f.player, near, far]) r.syncTransform();
+    f.camera.position.set(0, 6, -12);
+    f.camera.lookAt(0, 3, 40);
+    f.camera.updateMatrixWorld(true);
+
+    const picked = f._pickTarget();
+    const behind = picked === near;
+    const ahead = picked === far;
+
+    // And the reach survives a moment of cover rather than being cancelled
+    // by it: an established lock already does.
+    f._beginLock(far);
+    const was = f.locking && f.locking.t;
+    const realBlocked = f._blocked;
+    f._blocked = () => true;
+    for (let i = 0; i < 6; i++) f._updateLock(1 / 60);
+    const stillReaching = !!f.locking;
+    f._blocked = realBlocked;
+    f._dropLock();
+
+    return {
+      ok: ahead && !behind && stillReaching,
+      note: 'picked the one ' + (ahead ? 'ahead' : behind ? 'behind' : 'neither')
+        + '; cover pauses the reach rather than cancelling it ' + stillReaching,
     };
   })()`],
 
@@ -1513,6 +2066,114 @@ const CHECKS = [
   })()`],
 ];
 
+/**
+ * Checks that belong to the shell rather than to the page.
+ *
+ * The socket lives in the main process, and the harness window has no
+ * preload bridge on purpose — so asking the page whether it can host would
+ * be asking the wrong side. This dials a real port on the loopback and
+ * watches a message go host → guest and guest → guest.
+ */
+const MAIN_CHECKS = [
+  ['a matchmaker introduces two strangers and then gets out of the way', async () => {
+    const net = require('node:net');
+    const { spawn } = require('node:child_process');
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const server = spawn(process.execPath, [
+      require('node:path').join(__dirname, '../../tools/matchmaker.js'), '45082',
+    ], { stdio: 'ignore' });
+    await wait(500);
+
+    const seen = { A: [], B: [] };
+    const dial = (name) => new Promise((resolve) => {
+      const sock = net.createConnection(45082, '127.0.0.1', () => {
+        sock.write(JSON.stringify({
+          t: 'queue', name, want: { players: 2, rules: { roundSeconds: 300, wins: 3 } },
+        }) + '\n');
+        resolve(sock);
+      });
+      let buf = '';
+      sock.on('data', (d) => {
+        buf += d;
+        let i = buf.indexOf('\n');
+        while (i >= 0) {
+          try { seen[name].push(JSON.parse(buf.slice(0, i))); } catch { /* not ours */ }
+          buf = buf.slice(i + 1);
+          i = buf.indexOf('\n');
+        }
+      });
+    });
+
+    const a = await dial('A');
+    await wait(120);
+    const b = await dial('B');
+    await wait(250);
+
+    const matchedA = seen.A.find((m) => m.t === 'matched');
+    const matchedB = seen.B.find((m) => m.t === 'matched');
+    // Somebody has to make the first offer, and the rule has to be one both
+    // ends work out the same way without asking.
+    const oneOfferer = !!matchedA && !!matchedB
+      && (matchedA.offerer ? !matchedB.offerer : matchedB.offerer);
+
+    // And it passes the introduction along without understanding it.
+    a.write(JSON.stringify({ t: 'signal', kind: 'offer', code: 'SDP-A' }) + '\n');
+    await wait(200);
+    const relayed = seen.B.some((m) => m.t === 'signal' && m.code === 'SDP-A');
+
+    a.destroy();
+    b.destroy();
+    server.kill();
+    const ok = !!matchedA && !!matchedB && oneOfferer && relayed
+      && matchedA.rules.roundSeconds === 300;
+    return {
+      ok,
+      note: 'paired ' + (matchedA?.names ?? []).join(' vs ') + ', one offerer '
+        + oneOfferer + ', carried the introduction ' + relayed
+        + ', rules travelled ' + (matchedA?.rules?.wins ?? '-'),
+    };
+  }],
+
+  ['a real socket carries a fight, and passes it on', async () => {
+    const { Lan } = await import('../../electron/lan.js');
+    const seen = { h: [], a: [], b: [] };
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const host = new Lan((f, m) => seen.h.push(`${f}:${m.t}`));
+    const info = await host.host(45071);
+    const a = new Lan((f, m) => seen.a.push(`${f}:${m.t}`));
+    await a.join('127.0.0.1', 45071);
+    const b = new Lan((f, m) => seen.b.push(`${f}:${m.t}`));
+    await b.join('127.0.0.1', 45071);
+    await wait(80);
+
+    a.send({ t: 'in' });
+    host.send({ t: 'start' });
+    await wait(150);
+    // Passed ON, not just received: with four players everybody has to hear
+    // everybody, and only the host has a wire to each of them.
+    const relayed = seen.b.includes('c1:in');
+    const fromHost = seen.a.includes('h:start') && seen.b.includes('h:start');
+    const gotIt = seen.h.includes('c1:in');
+
+    b.leave();
+    await wait(150);
+    // And somebody leaving is something everyone is told, so their machine
+    // can be left standing on the same step everywhere.
+    const toldOfLeaving = seen.h.some((x) => x.endsWith(':bye'))
+      && seen.a.some((x) => x.endsWith(':bye'));
+
+    host.leave();
+    a.leave();
+    const ok = gotIt && relayed && fromHost && toldOfLeaving && info.port === 45071;
+    return {
+      ok,
+      note: `port ${info.port}, addresses ${info.addresses.join(',') || 'none'}; `
+        + `host heard ${gotIt}, passed on ${relayed}, host to all ${fromHost}, `
+        + `told of a leaver ${toldOfLeaving}`,
+    };
+  }],
+];
+
 async function main() {
   const { preview } = await import('vite');
   const server = await preview({ root, preview: { port: 0, open: false }, logLevel: 'warn' });
@@ -1531,6 +2192,17 @@ async function main() {
   await new Promise((r) => setTimeout(r, 1200));
 
   let bad = 0;
+  for (const [name, fn] of MAIN_CHECKS) {
+    let res;
+    try {
+      res = await fn();
+    } catch (e) {
+      res = { ok: false, note: String(e?.message ?? e).slice(0, 90) };
+    }
+    if (res?.ok) console.log(`${green('ok  ')} ${name} ${dim(res.note ?? '')}`);
+    else { bad++; console.error(`${red('FAIL')} ${name} — ${res?.note ?? 'no answer'}`); }
+  }
+
   for (const [name, js] of CHECKS) {
     let res;
     try {
@@ -1543,8 +2215,8 @@ async function main() {
   }
 
   clearTimeout(deadline);
-  console.log(bad ? red(`${CHECKS.length - bad}/${CHECKS.length} ok`)
-    : green(`${CHECKS.length}/${CHECKS.length} ok`));
+  const total = CHECKS.length + MAIN_CHECKS.length;
+  console.log(bad ? red(`${total - bad}/${total} ok`) : green(`${total}/${total} ok`));
   await server.close();
   win.destroy();
   app.exit(bad ? 1 : 0);

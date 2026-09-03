@@ -86,8 +86,14 @@ export class TitleScreen {
         run: () => this.app.startSolo(),
       },
       {
+        id: 'versus',
+        label: '対戦',
+        note: 'VERSUS ・ 2-4 PLAYERS',
+        run: () => this.app.openVersus(),
+      },
+      {
         id: 'edit',
-        label: '機体を組む',
+        label: 'ガレージ',
         note: 'EDITOR',
         run: () => this.app.setMode('edit'),
       },
@@ -176,6 +182,10 @@ export class TitleScreen {
   /** Move the highlight, wrapping at both ends. */
   move(delta) {
     const n = this.items.length;
+    // The front page was silent, which reads as a page that has not
+    // finished loading. It is also the only place the player can hear that
+    // the sound is working before a fight starts.
+    this.app.field?.feedback?.ui?.('move');
     return this.highlight(((this.index + delta) % n + n) % n);
   }
 
@@ -203,6 +213,7 @@ export class TitleScreen {
   choose(id = null) {
     const item = id ? this.items.find((x) => x.id === id) : this.items[this.index];
     if (!item) return null;
+    this.app.field?.feedback?.ui?.('select');
     item.run();
     return item;
   }

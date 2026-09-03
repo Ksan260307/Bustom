@@ -951,9 +951,41 @@ export class Rig {
     this.root.updateMatrixWorld(true);
     for (const limb of limbs) {
       limb.anchor = limb.root.group.getWorldPosition(new THREE.Vector3());
+      /**
+       * How long a lever the leg is: the hip above the sole.
+       *
+       * This is what decides how far one step can reach, so the gait can
+       * ask the machine rather than a formula. Measured to the bottom of
+       * the whole machine rather than to the last joint in the chain,
+       * because the thing that touches the floor is the foot BLOCK, and it
+       * hangs below the joint that turns it.
+       */
+      limb.reach = Math.max(0.2, limb.anchor.y - this.restLowestY);
+      /**
+       * Where the sole is, in the frame of the joint at the end of the leg.
+       *
+       * The thing that has to keep up with the floor is the bottom of the
+       * foot, not the ankle above it, and the two do not travel the same
+       * distance. Taken once, at rest, so anything that wants to know where
+       * a foot actually is can transform this by the joint and have it.
+       */
+      const tip = limb.chain[limb.chain.length - 1];
+      _v.setFromMatrixPosition(tip.joint.matrixWorld);
+      limb.sole = new THREE.Vector3(_v.x, this.restLowestY, _v.z)
+        .applyMatrix4(new THREE.Matrix4().copy(tip.joint.matrixWorld).invert());
     }
     limbs.sort((a, b) => (b.anchor.z - a.anchor.z) || (a.anchor.x - b.anchor.x));
     limbs.forEach((l, i) => { l.index = i; });
+
+    /**
+     * How far apart the machine stands, left to right.
+     *
+     * A step to the side has to fit between the legs — past that the leg
+     * being swung passes through the one holding the machine up. So this,
+     * and not the length of the leg, is what limits a side-step.
+     */
+    const xs = limbs.map((l) => l.anchor.x);
+    this.stance = limbs.length > 1 ? Math.max(...xs) - Math.min(...xs) : 0.6;
 
     this._buildRings();
 

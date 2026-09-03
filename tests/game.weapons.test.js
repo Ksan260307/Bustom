@@ -969,15 +969,24 @@ describe('a locked shot can be dodged', () => {
     return t;
   };
 
-  /** Fire one pull at a target crossing at `vx` m/s, and say if it landed. */
-  const shootAt = (type, range, vx) => {
+  /**
+   * Fire one pull at a target crossing at `vx`, and say if it landed.
+   *
+   * `jinkAt` reverses the target that many seconds after the shot leaves —
+   * which is the difference between a machine walking and a machine dodging,
+   * and the only difference that ought to decide whether a round connects.
+   */
+  const shootAt = (type, range, vx, jinkAt = Infinity) => {
     const r = shooter(type);
     const p = pool(32);
     const t = mark(range, vx);
     r.weapons.update({
       firing: true, projectiles: p, targets: [t], lockTarget: t, aimPoint: null,
     }, 1 / 60);
+    let flown = 0;
     for (let i = 0; i < 300 && p.liveCount > 0; i++) {
+      flown += 1 / 60;
+      if (flown >= jinkAt) { t.velocity.x = -vx; }
       t.position.addScaledVector(t.velocity, 1 / 60);
       p.update(1 / 60, [t]);
       if (p.hits.some((h) => h.robot === t)) return true;
@@ -991,19 +1000,36 @@ describe('a locked shot can be dodged', () => {
     }
   });
 
-  it('crossing in front of one at speed is not', () => {
-    // The complaint this answers: with a lock on, every round landed, so a
-    // fight was two machines standing still trading damage. Rounds slow
-    // enough to watch, a lock that aims short of the intercept, and a target
-    // no wider than the machine actually is — between them, moving works.
+  it('so is walking past one in a straight line', () => {
+    /**
+     * This used to assert the opposite, and the opposite was the bug.
+     *
+     * The lead figures were chosen by feel, and worked out to aiming short
+     * by 2.9m at thirty metres and 8.6m at sixty — against a machine three
+     * to six metres wide. A round passing nine metres behind a target that
+     * is walking in a straight line, with a lock on it, is not the target
+     * dodging: it is the gun pointing somewhere else.
+     *
+     * A steady course is not a dodge. Holding one gets you hit.
+     */
     for (const type of [EQUIP.BEAM, EQUIP.GATLING, EQUIP.MAGNUM]) {
-      expect(shootAt(type, 25, 16), type).toBe(false);
+      expect(shootAt(type, 25, 16), type).toBe(true);
     }
   });
 
-  it('and it gets harder the further out you are', () => {
-    expect(shootAt(EQUIP.GATLING, 12, 8), 'in close, it lands').toBe(true);
-    expect(shootAt(EQUIP.GATLING, 40, 8), 'across the arena, it does not').toBe(false);
+  it('changing course inside the flight time is what saves you', () => {
+    // The same crossing target, reversing a tenth of a second after the
+    // round leaves the barrel. This is the whole of what dodging means:
+    // the shot went where you were GOING to be, so stop going there.
+    for (const type of [EQUIP.BEAM, EQUIP.GATLING, EQUIP.MAGNUM]) {
+      expect(shootAt(type, 25, 16, 0.1), type).toBe(false);
+    }
+  });
+
+  it('and the further out you are, the more time you have to do it', () => {
+    // In close there is no time to react; across the arena there is.
+    expect(shootAt(EQUIP.GATLING, 12, 8, 0.1), 'in close, it lands').toBe(true);
+    expect(shootAt(EQUIP.GATLING, 40, 8, 0.1), 'at range, the jink works').toBe(false);
   });
 
   it('the lock aims short of the intercept it can solve', () => {
@@ -1014,14 +1040,29 @@ describe('a locked shot can be dodged', () => {
     const flight = position.distanceTo(t.position) / EQUIP_META.beam.speed;
     const aimedAt = position.clone().addScaledVector(direction, flight * EQUIP_META.beam.speed);
     const perfect = t.position.x + t.velocity.x * flight;
-    expect(aimedAt.x, 'it does lead').toBeGreaterThan(1);
-    expect(aimedAt.x, 'but not all the way').toBeLessThan(perfect * 0.9);
+    expect(aimedAt.x, 'it does lead').toBeGreaterThan(perfect * 0.8);
+    // Short of the exact answer, but only just.
+    //
+    // A FRACTION of the intercept is an error proportional to range, and a
+    // machine does not get bigger with range — at 0.76 the gun missed a
+    // target walking in a straight line at sixty metres by more than the
+    // machine was wide. The dodge is the flight time now, not a built-in
+    // aiming error, so all this has to say is that the answer is not
+    // solved outright.
+    expect(aimedAt.x, 'but never exactly').toBeLessThan(perfect);
   });
 
-  it('the weapon you aim leads better than the one you spray', () => {
-    expect(weaponLead(EQUIP_META[EQUIP.SNIPER]))
-      .toBeGreaterThan(weaponLead(EQUIP_META[EQUIP.GATLING]));
+  it('the weapon that forgives a miss leads less than the one that cannot', () => {
+    // What separates them is not aimed-versus-sprayed any more — every gun
+    // that has to be exact is allowed to be. It is whether a near miss
+    // still does something: a missile turns after it, and a grenade has a
+    // seven-metre blast, so neither needs the last few per cent.
+    const lead = (t) => weaponLead(EQUIP_META[t]);
+    expect(lead(EQUIP.GATLING), 'a gun has to be right').toBeGreaterThan(lead(EQUIP.MISSILE));
+    expect(lead(EQUIP.SNIPER)).toBeGreaterThan(lead(EQUIP.GRENADE));
+
     for (const type of WEAPON_TYPES) {
+      // And none of them solves it outright, or the lock does the fighting.
       expect(weaponLead(EQUIP_META[type]), type + ' never solves it outright')
         .toBeLessThan(1);
     }
@@ -1043,7 +1084,14 @@ describe('a locked shot can be dodged', () => {
     // a hit, and no amount of dodging could change that.
     const t = mark(20);
     expect(t.hitRadius, 'as thick as the body is').toBeLessThan(t.radius * 0.5);
-    expect(t.hitHalfHeight, 'as tall as the machine is').toBeGreaterThan(t.hitRadius * 2);
+    // Taller than it is wide, which is the whole claim. This used to demand
+    // a ratio between the half-height and the radius, which is a different
+    // quantity and moved the day the column was widened to match what the
+    // player can see — the machine stayed exactly as much of a column.
+    const tall = (t.hitHalfHeight + t.hitRadius) * 2;
+    const wide = t.hitRadius * 2;
+    expect(tall / wide, `${tall.toFixed(1)}m tall by ${wide.toFixed(1)}m`)
+      .toBeGreaterThan(2);
 
     const p = pool(4);
     p.spawn({
@@ -1229,5 +1277,48 @@ describe('getting rocked', () => {
     t.revive(new THREE.Vector3(0, 4.5, 0));
     expect(t.shock).toBe(0);
     expect(t.body.stagger).toBe(0);
+  });
+});
+
+// ============================================================
+//  What a blade costs.
+// ============================================================
+
+describe('the blade runs on the tank', () => {
+  const world = testWorld();
+  const bladed = () => {
+    const a = stripEquips(PRESETS.biped.build());
+    a.addEquipOnFace(a.core.id, 4, EQUIP.BLADE, { size: 0.7 });
+    return new Robot(a, world, { isPlayer: true });
+  };
+
+  it('costs energy to hold lit', () => {
+    // It had no magazine, no reload and no heat: the one weapon with no
+    // price at all, so the answer was to hold it down and forget about it.
+    const r = bladed();
+    const before = r.body.energy;
+    for (let i = 0; i < 60; i++) {
+      r.weapons.update({ firing: true, projectiles: pool(4), targets: [] }, 1 / 60);
+    }
+    const spent = before - r.body.energy;
+    expect(spent, `a second of blade cost ${spent.toFixed(2)} of the tank`)
+      .toBeGreaterThan(0.2);
+  });
+
+  it('goes out when the tank does', () => {
+    const r = bladed();
+    r.body.energy = 0.005;
+    r.weapons.update({ firing: true, projectiles: pool(4), targets: [] }, 1 / 60);
+    expect(r.body.energy, 'nothing left to spend').toBeGreaterThanOrEqual(0);
+    expect(r.weapons.bladeGlow, 'and it is not lit').toBeLessThan(0.2);
+  });
+
+  it('costs nothing at all when it is not held', () => {
+    const r = bladed();
+    const before = r.body.energy;
+    for (let i = 0; i < 60; i++) {
+      r.weapons.update({ firing: false, projectiles: pool(4), targets: [] }, 1 / 60);
+    }
+    expect(r.body.energy).toBe(before);
   });
 });

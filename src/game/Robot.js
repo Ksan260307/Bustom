@@ -30,8 +30,20 @@ const WEAR_CAP = 0.8;
  * the body is not, so averaging the whole solid volume over the whole height
  * understates the part anyone is actually aiming at. This puts the width
  * back where the body is.
+ *
+ * Measured at 1.3: a standard two-legged machine — four metres across the
+ * shoulders — was a column 0.91m in radius. A round passing 1.1m from its
+ * centre went through the middle of the silhouette on screen and counted as
+ * a miss, which is most of the reason rounds felt like they did not connect.
+ * At 1.9 the best round of a burst still passed 1.50m out against a 1.33m
+ * column, which is a miss by seventeen centimetres on a machine four metres
+ * wide.
+ *
+ * The cap below still holds it to the machine's own narrower horizontal
+ * width, so this cannot make anything wider than it looks — it can only
+ * stop it being far thinner.
  */
-const HIT_COLUMN_SPREAD = 1.3;
+const HIT_COLUMN_SPREAD = 2.4;
 
 /**
  * How an opponent behaves, in one place.
@@ -213,7 +225,9 @@ export class Robot {
     const b = this.rig.bounds;
     const height = Math.max(0.2, b.max.y - b.min.y);
     const solid = Math.max(0.05, this.stats.solidVolume ?? 0.5);
-    // Never wider than the machine itself, however dense it is.
+    // Never wider than the machine itself, however dense it is. Measured
+    // across the NARROWER of the two horizontal axes, so a machine is not
+    // easier to hit from the side it happens to be broadest on.
     const widest = Math.max(0.35, Math.min(b.max.x - b.min.x, b.max.z - b.min.z) * 0.5);
     this.hitRadius = Math.min(widest, Math.max(0.35, Math.sqrt(solid / (Math.PI * height)) * HIT_COLUMN_SPREAD));
     // The column runs the height of the machine, its own caps taken off the
@@ -339,6 +353,8 @@ export class Robot {
       landing: b.landing,
       dashSpeed: b.dashSpeed,
       walkCap: b.groundSpeedCap,
+      /** Giving ground with a target held: the legs skate, they do not walk. */
+      retreat: b.retreat ?? 0,
       // What the machine is DOING, as opposed to where it is going. None of
       // this used to reach the animator, so no bone could react to a fight.
       boost: b.boostOutput,

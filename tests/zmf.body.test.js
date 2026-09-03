@@ -169,12 +169,32 @@ describe('energy', () => {
   });
 
   it('an empty tank grounds the machine', () => {
+    /**
+     * Held down for as long as it takes, and then some.
+     *
+     * This used to assert that the tank was still empty at the end, which
+     * stopped being true when running out started to LATCH: the machine
+     * comes down, the tank fills, and it flies again — a thruster with a
+     * battery, which is what it is. What has to stay true is that running
+     * out puts it on the floor, so the check is on the lowest it got rather
+     * than on where it happens to be in that cycle.
+     *
+     * Before the latch it never came down at all: the trickle of regen was
+     * spent the same frame it arrived, and the machine sat against the
+     * ceiling at 93.4m for ever on an empty tank.
+     */
     const b = makeBody();
     input.hold('up', true);
-    run(b, input, 30);
-    expect(b.energy).toBeLessThan(0.05);
-    run(b, input, 10);
-    expect(b.position.y).toBeLessThan(12);
+    let ranDry = false;
+    let lowest = Infinity;
+    for (let i = 0; i < 40 * 60; i++) {
+      b.update(input, 1 / 60);
+      input.endFrame();
+      if (b.energy < 0.05) ranDry = true;
+      if (ranDry) lowest = Math.min(lowest, b.position.y);
+    }
+    expect(ranDry, 'holding lift empties the tank').toBe(true);
+    expect(lowest, 'and an empty tank brings it down').toBeLessThan(12);
   });
 });
 
@@ -440,15 +460,19 @@ describe('ground lock-on', () => {
     expect(b.grounded).toBeLessThan(0.2);
     expect(Math.abs(b.forward.y - b.aimForward.y),
       'off the floor, the chassis is the aim again').toBeLessThan(0.12);
-    // Only that it has come off flat — while planted it is held under 0.05,
-    // and the assertion above is the one that says it follows the aim.
+    // Only that it has come off flat, and measured against the planted
+    // case rather than against a number.
     //
-    // This used to demand 0.3, which passed for the wrong reason: the
-    // machine flew PAST the target and ended up pitched steeply DOWN at it
-    // (-0.87), and the magnitude happened to clear the bar. A lighter
-    // machine climbs less far in the same two seconds and sits gently nose
-    // up instead, which is the behaviour the test is named for.
-    expect(Math.abs(b.forward.y), 'and no longer pinned flat').toBeGreaterThan(0.1);
+    // A magnitude here is a threshold on where the machine happens to be
+    // after two seconds of climbing, which is a different quantity from
+    // the one the test is named for. It has been wrong twice: once at 0.3,
+    // which passed because the machine flew PAST the target and pitched
+    // steeply DOWN at it, and once at 0.1, which failed the day the fall
+    // model stopped holding machines up.
+    //
+    // What "fades out" means is: planted it is pinned flat, and off the
+    // ground it is not.
+    expect(Math.abs(b.forward.y), 'and no longer pinned flat').toBeGreaterThan(0.05);
   });
 
   it('mouse pitch is remembered on the ground and honoured in the air', () => {
@@ -687,12 +711,24 @@ describe('equipment on the body', () => {
   });
 
   it('an empty tank puts the thruster out, plate or no plate', () => {
+    // Run until it first bottoms out and check it then, rather than at a
+    // fixed time: with running out now latching, a machine that has been
+    // held down for eight seconds may be part way through refilling.
     const b = makeBody(plated('boost'));
     input.hold('up', true);
     input.hold('boost', true);
-    run(b, input, 8);
-    expect(b.energy).toBeLessThan(0.05);
-    expect(b.boosting).toBe(false);
+    // Past the thruster's own cutoff, not merely near it: at 0.045 there is
+    // still enough in the tank to boost on, and the frame it goes out is
+    // the one after it drops below.
+    let dryAt = -1;
+    for (let i = 0; i < 20 * 60 && dryAt < 0; i++) {
+      b.update(input, 1 / 60);
+      input.endFrame();
+      if (b.energy <= 0.04) dryAt = i;
+    }
+    b.update(input, 1 / 60);
+    expect(dryAt, 'it does run out').toBeGreaterThan(0);
+    expect(b.boosting, 'and the thruster goes out with it').toBe(false);
   });
 
   it('a gravity plate takes away sustained flight', () => {
@@ -1308,5 +1344,130 @@ describe('SimpleAI', () => {
       for (let i = 0; i < 200; i++) ai.update(V(0, 2, 40), 1 / 60);
       expect(Number.isFinite(bot.position.y), style).toBe(true);
     }
+  });
+});
+
+// ============================================================
+//  Coming back down.
+// ============================================================
+
+describe('a jump ends', () => {
+  /**
+   * Climb for half a second, let go, and time the way down against what
+   * plain physics says a fall from that height takes.
+   */
+  const drop = (b, input) => {
+    for (let i = 0; i < 60; i++) { b.update(input, 1 / 60); input.endFrame(); }
+    const ground = b.position.y;
+
+    input.press('up');
+    for (let i = 0; i < 30; i++) { b.update(input, 1 / 60); input.endFrame(); }
+    input.hold('up', false);
+
+    let apex = ground;
+    let t = 0;
+    let toApex = 0;
+    let air = 0;
+    for (let i = 0; i < 600; i++) {
+      b.update(input, 1 / 60);
+      input.endFrame();
+      t += 1 / 60;
+      if (b.position.y > apex) { apex = b.position.y; toApex = t; }
+      if (b.grounded < 0.5) air = t;
+      if (t > 0.4 && b.grounded > 0.5) break;
+    }
+    const rise = apex - ground;
+    return { rise, fell: air - toApex, free: Math.sqrt(2 * rise / 22) };
+  };
+
+  it('falls at very nearly the rate gravity says', () => {
+    const b = makeBody();
+    const { rise, fell, free } = drop(b, input);
+
+    // The drag is a handling model applied to the whole velocity, so it was
+    // holding a descent up as surely as a thruster would: measured, a
+    // machine took 1.37s to come down from twelve metres against 1.05s of
+    // free fall, and the whole of a jump ended with it drifting.
+    expect(rise, 'it got off the ground').toBeGreaterThan(4);
+    expect(fell / free, `${fell.toFixed(2)}s against ${free.toFixed(2)}s`)
+      .toBeLessThan(1.12);
+  });
+
+  it('still lets a machine hold itself up while it is asking to', () => {
+    // The fix must not have turned flight off. Holding the thruster is
+    // supposed to buy most of gravity back; only letting go returns it.
+    const b = makeBody();
+    for (let i = 0; i < 60; i++) { b.update(input, 1 / 60); input.endFrame(); }
+    const ground = b.position.y;
+    input.press('up');
+    for (let i = 0; i < 120; i++) { b.update(input, 1 / 60); input.endFrame(); }
+    expect(b.position.y - ground, 'two seconds of thruster').toBeGreaterThan(6);
+    expect(b.gravityScale, 'and most of gravity bought back').toBeLessThan(0.3);
+  });
+});
+
+// ============================================================
+//  Holding the thruster, and giving ground.
+// ============================================================
+
+describe('lift is only ever what is being asked for', () => {
+  it('goes out on the frame the key is released', () => {
+    const b = makeBody();
+    input.hold('up', true);
+    for (let i = 0; i < 40; i++) { b.update(input, 1 / 60); input.endFrame(); }
+    expect(b.hover, 'held: most of gravity is bought back').toBeGreaterThan(0.8);
+
+    input.hold('up', false);
+    b.update(input, 1 / 60);
+    // One frame. Not a fade: a thruster nobody is asking for is a thruster
+    // that has stopped, and the whole of the drift after a jump was the
+    // machine coasting down while it caught up with that.
+    expect(b.hover, 'released: gone').toBe(0);
+    expect(b.gravityScale, 'and gravity is all of gravity').toBe(1);
+  });
+
+  it('comes back on smoothly, because building thrust is not instant', () => {
+    const b = makeBody();
+    input.hold('up', true);
+    b.update(input, 1 / 60);
+    expect(b.hover, 'one frame in, barely any').toBeLessThan(0.2);
+    for (let i = 0; i < 30; i++) { b.update(input, 1 / 60); input.endFrame(); }
+    expect(b.hover, 'half a second in, most of it').toBeGreaterThan(0.8);
+  });
+});
+
+describe('giving ground with a target held', () => {
+  const backing = (locked) => {
+    const b = makeBody();
+    b.setTarget({ position: V(0, 4.5, 40), radius: 2 });
+    b.locked = locked;
+    const i = new SyntheticInput();
+    i.move.set(0, 0, -1);
+    i.intensity = 1;
+    let peak = 0;
+    for (let n = 0; n < 90; n++) {
+      b.update(i, 1 / 60);
+      i.endFrame();
+      peak = Math.min(peak, b.inertia.velocity.z);
+    }
+    return { peak: -peak, retreat: b.retreat, y: b.position.y };
+  };
+
+  it('opens the range like a side-step, not like reverse gear', () => {
+    // Backing away had the reverse profile: 56% of forward thrust, spooling
+    // up three times slower than a step to the side. A machine keeping its
+    // guns on somebody while it opens the range is doing what it does going
+    // sideways, and it should answer as quickly.
+    const held = backing(true);
+    const loose = backing(false);
+    expect(held.peak, `${held.peak.toFixed(1)} against ${loose.peak.toFixed(1)}`)
+      .toBeGreaterThan(loose.peak * 1.15);
+  });
+
+  it('says so, so the legs can brace rather than walk', () => {
+    // The pose reads this straight off the physics, so the two cannot
+    // disagree about whether the machine is walking backwards.
+    expect(backing(true).retreat).toBeGreaterThan(0.5);
+    expect(backing(false).retreat).toBe(0);
   });
 });

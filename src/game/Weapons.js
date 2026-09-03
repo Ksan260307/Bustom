@@ -826,7 +826,20 @@ export class WeaponSystem {
       if (s !== live || !firing) continue;
 
       if (s.meta.dps) {
-        // ---- blade: no ammo, no projectile. Contact damage while held.
+        /**
+         * ---- blade: no ammo, no projectile. Contact damage while held.
+         *
+         * Paid for out of the same tank that flies the machine. It used to
+         * be free — no magazine, no reload, no heat — so the answer was
+         * always to hold it down and forget about it. Now keeping it lit is
+         * a decision against staying in the air.
+         */
+        const body = this.robot.body;
+        const drain = s.meta.drain ?? 0;
+        if (drain > 0 && body) {
+          if (body.energy <= 0.01) { s.armed = true; continue; }
+          body.energy = Math.max(0, body.energy - drain * dt);
+        }
         blade = 1;
         this._blade(s, targets, dt, effects);
         continue;

@@ -9,16 +9,9 @@ import {
   CIRCLE_RADIUS_MIN, CIRCLE_RADIUS_MAX, CIRCLE_RADIUS_STEP, EQUIP,
   RING_PLANES, RING_PLANE_DEFAULT,
   BONE_GAIN_MAX, BONE_LAG_MAX, LIMIT_MODES, CHAIN_FALLOFF_DEFAULT,
+  BUDGET, BUDGET_LABEL,
 } from '../core/constants.js';
 import { PRESETS, PRESET_LIST, SIZE_CLASSES } from '../core/Assembly.js';
-
-/**
- * How long the "there is unfinished work" bar stays up, in milliseconds.
- *
- * Long enough to read and decide, short enough that ignoring it costs you
- * nothing. The offer itself does not expire — it moves into the file menu.
- */
-const DRAFT_OFFER_MS = 14000;
 
 /** What each size class is called where a player will read it. */
 const SIZE_LABEL = {
@@ -36,6 +29,7 @@ import { Help } from './Help.js';
 import { partSketch } from './PartSketch.js';
 import { TitleScreen, ResultScreen } from './Title.js';
 import { SortieScreen } from './Sortie.js';
+import { VersusScreen } from './Versus.js';
 
 export { h, slider, vectorField };
 
@@ -59,8 +53,8 @@ export const ASSEMBLE_TOOLS = [
   { tool: TOOL.BONE_FACE, label: BONE_META.face.label, key: 'F', color: '#ff7ba6' },
   { tool: TOOL.BONE_ARM, label: BONE_META.arm.label, key: 'A', color: '#ffc861' },
   { tool: TOOL.BONE_LEG, label: BONE_META.leg.label, key: 'L', color: '#6fe3ff' },
-  { tool: TOOL.BONE_CUSTOM, label: BONE_META.custom.label, key: 'C', color: '#b98cff' },
   { tool: TOOL.BONE_WEAPON, label: BONE_META.weapon.label, key: 'W', color: '#8effc9' },
+  { tool: TOOL.BONE_CUSTOM, label: BONE_META.custom.label, key: 'C', color: '#b98cff' },
   { group: '呼び出す' },
   { tool: TOOL.STAMP, label: 'パーツ配置', key: '—', color: '#8effc9' },
 ];
@@ -245,24 +239,31 @@ export class EditorUI {
     return this;
   }
 
+  /** True while the offer to restore is on screen. */
+  get draftOpen() {
+    return !!this.draftBar && !this.draftBar.classList.contains('hidden');
+  }
+
   /**
-   * Offer the safety net back, once, on the way in.
+   * Offer the safety net back, once, when the workbench first opens.
    *
    * Only an offer: restoring over the top of what somebody meant to open
-   * would be the same mistake in the other direction. And an offer that
-   * stays until it is answered is not an offer, it is a demand — this one
-   * sat across the top of the workbench for the whole session if you simply
-   * ignored it, which is what most people do with a bar they did not ask
-   * for.
+   * would be the same mistake in the other direction.
    *
-   * Worse than being in the way, it stopped being TRUE. The autosave keeps
-   * running while the bar is up, so a minute into a new machine the draft
-   * it was offering had already been overwritten by that machine, and
-   * pressing 復元する restored the thing you were looking at.
+   * It used to be a strip across the top of the workbench, put up at launch
+   * and taken down again on a timer. Both of those were wrong. A bar at the
+   * top of the screen is the shape of a notice, so it got read as one and
+   * ignored — and being put up at launch meant it was raised behind the
+   * title screen, so by the time anybody reached the workbench the timer
+   * had run it out. The one question worth asking about the last session
+   * was being asked to nobody.
    *
-   * So it folds away on its own, it folds the moment anything makes the
-   * offer meaningless, and while it is up the autosave holds off — which
-   * makes the offer honest for exactly as long as it is on screen.
+   * So it is a small window now, in the middle, and it waits: it is asked
+   * on the way into the workbench, which is the first moment the answer
+   * means anything, and it stays until it is answered. That is affordable
+   * because while it is up the autosave holds off — the draft cannot be
+   * quietly replaced by the machine on the bench behind it, so the offer is
+   * still true whenever it is finally read.
    */
   offerDraft() {
     const d = this.app.draft();
@@ -270,8 +271,6 @@ export class EditorUI {
     this.draftWhen.textContent = new Date(d.at).toLocaleString();
     this.draftBar.classList.remove('hidden');
     this.app.holdDraft?.(true);
-    clearTimeout(this._draftFold);
-    this._draftFold = setTimeout(() => this.foldDraft(), DRAFT_OFFER_MS);
     return this;
   }
 
@@ -279,12 +278,10 @@ export class EditorUI {
    * Take the offer down without answering it.
    *
    * Not the same as declining: the draft stays on disk, and the file menu
-   * still has "前回の作業を復元" in it. Only the bar goes.
+   * still has "前回の作業を復元" in it. Only the window goes.
    */
   foldDraft() {
-    clearTimeout(this._draftFold);
-    this._draftFold = 0;
-    if (!this.draftBar || this.draftBar.classList.contains('hidden')) return this;
+    if (!this.draftOpen) return this;
     this.draftBar.classList.add('hidden');
     // The net is let go here, not before: from now on this session's own
     // work is what gets kept.
@@ -396,16 +393,29 @@ export class EditorUI {
     this.marquee = h('div', { class: 'marquee hidden' });
 
     this.draftWhen = h('span', { class: 'k' }, '');
-    this.draftBar = h('div', { id: 'draftbar', class: 'hidden' },
-      h('span', {}, '前回の作業が残っています'),
-      this.draftWhen,
-      h('button', {
-        class: 'primary',
-        onClick: () => { this.app.restoreDraft(); this.foldDraft(); },
-      }, '復元する'),
-      h('button', {
-        onClick: () => { this.app.forgetDraft(); this.foldDraft(); },
-      }, '破棄'),
+    this.draftBar = h('div', {
+      id: 'draftbar',
+      class: 'hidden',
+      // Clicking off it is the same as 「あとで」: the draft keeps, and the
+      // file menu still has it. Only a click on the dimmed part counts, or
+      // every button inside would close the window under its own answer.
+      onClick: (e) => { if (e.target === this.draftBar) this.foldDraft(); },
+    },
+      h('div', { class: 'draftbox' },
+        h('div', { class: 'drafthead' }, '前回の作業が残っています'),
+        this.draftWhen,
+        h('div', { class: 'row draftrow' },
+          h('button', {
+            class: 'primary',
+            onClick: () => { this.app.restoreDraft(); this.foldDraft(); },
+          }, '復元する'),
+          h('button', { onClick: () => this.foldDraft() }, 'あとで'),
+          h('button', {
+            class: 'danger',
+            onClick: () => { this.app.forgetDraft(); this.foldDraft(); },
+          }, '破棄'),
+        ),
+      ),
     );
 
     /**
@@ -435,9 +445,17 @@ export class EditorUI {
       h('optgroup', { label: 'まっさら' }, h('option', { value: 'core' }, 'コアのみ')),
     );
 
-    this.titleBtn = h('button', { class: 'ghost', title: 'タイトルへ', onClick: () => app.goTitle() }, '⌂');
+    /*
+     * The way back to the front page.
+     *
+     * It was a house glyph and nothing else, which is a symbol you have to
+     * already know. Everything either side of it in that bar is a word, so
+     * this is one too — a picture among words reads as decoration.
+     */
+    this.titleBtn = h('button', {
+      class: 'ghost', title: 'タイトル画面に戻ります', onClick: () => app.goTitle(),
+    }, '⌂ タイトル');
     this.editBtn = h('button', { class: 'active', onClick: () => app.setMode('edit') }, 'EDIT');
-    this.soloBtn = h('button', { onClick: () => app.startSolo() }, '⚔ ソロプレイ');
     this.partBtn = h('button', { onClick: () => app.openPartEditor() }, 'パーツ編集');
     this.testBtn = h('button', { class: 'primary', onClick: () => app.setMode('field') }, '▶ TEST FIELD');
 
@@ -490,7 +508,6 @@ export class EditorUI {
       this.titleBtn,
       this.editBtn,
       this.partBtn,
-      this.soloBtn,
       this.testBtn,
     );
 
@@ -593,13 +610,13 @@ export class EditorUI {
     /** World axes or the part's own. */
     this.spaceButtons = [
       h('button', {
-        class: 'active', title: '世界の軸で動かす',
+        class: 'active', title: '上下・前後・左右のまま動かします',
         onClick: () => this.setGizmoSpace('world'),
-      }, '世界の軸'),
+      }, '地面の向き'),
       h('button', {
-        title: 'そのパーツ自身の軸で動かす',
+        title: 'そのパーツが向いている方向に沿って動かします',
         onClick: () => this.setGizmoSpace('local'),
-      }, 'パーツの軸'),
+      }, 'パーツの向き'),
     ];
 
     // ============================================================
@@ -632,7 +649,7 @@ export class EditorUI {
       row(
         btn('中心へ', 'えらんだパーツを機体の中心線に戻します',
           () => app.editor.centreSelected()),
-        btn('世界の軸', '親の傾きを打ち消して、世界の軸に揃えます',
+        btn('傾きを戻す', '親から受け継いだ傾きを打ち消して、まっすぐにします',
           () => app.editor.straightenSelected()),
         btn('その場で反転', 'コピーせず、その場で向きを反転します（⇧F）',
           () => app.editor.flipSelected('x')),
@@ -870,7 +887,7 @@ export class EditorUI {
     // --- sculpt
     this.brushSlider = slider('ブラシ', {
       min: 1, max: 25, step: 1, value: app.editor.brushPercent, unit: '%',
-    }, (v) => { app.editor.brushPercent = v; });
+    }, (v) => { app.editor.setBrush(v); });
 
     this.resSelect = h('select', {
       onChange: (e) => app.setVoxResolution(Number(e.target.value)),
@@ -891,10 +908,58 @@ export class EditorUI {
       onChange: (e) => this.syncSymmetry(e.target.checked),
     });
 
+    /*
+     * How big the brush actually is, in the world.
+     *
+     * The slider is a percentage of a fixed metre, which is a number about
+     * the tool rather than about the machine. What a builder needs to know
+     * is whether this cut will be wider than the strut they are cutting it
+     * into, and that is a length.
+     */
+    this.brushSize = h('span', { class: 'brushsize' }, '');
+    /** How much of the block being carved is still there. */
+    this.blockLeft = h('span', { class: 'brushsize' }, '');
+
+    this.sculptAxis = h('select', {
+      onChange: (e) => { app.editor.sculptAxis = Number(e.target.value); },
+    },
+    h('option', { value: '0' }, '左右'),
+    h('option', { value: '1' }, '上下'),
+    h('option', { value: '2' }, '前後'));
+
+    /** The cuts a brush cannot make, each one press and one undo step. */
+    const once = (label, what, title) => h('button', {
+      title, onClick: () => app.editor.sculptOnce(what),
+    }, label);
+
     this.sculptBox = h('div', {},
       this.brushSlider,
+      h('div', { class: 'row tight' }, this.brushSize, this.blockLeft),
       h('label', { class: 'checkline' }, this.brushShape, '丸いブラシ'),
-      h('label', { class: 'checkline' }, this.sculptMirror, '左右対称に削る'),
+      h('label', { class: 'checkline' }, this.sculptMirror, '対称に加工する'),
+      h('label', { class: 'field' }, h('span', {}, '対称の向き'), this.sculptAxis),
+      h('div', { class: 'row tight' },
+        once('ならす', 'smooth', 'カーソルの周りの段差をなだらかにします（K）'),
+        once('平らに', 'flatten', '見ている面から手前を平らに削ります（⇧J）'),
+      ),
+      h('div', { class: 'row tight' },
+        once('穴をあける', 'drill', 'ブロックを貫通する穴をあけます（O）'),
+        once('塗りつぶし', 'fill', 'つながっている同じ色をまとめて塗ります'),
+      ),
+      h('div', { class: 'row tight' },
+        h('button', {
+          title: 'カーソルの下の色を取ります（I）',
+          onClick: () => {
+            const i = app.editor.pickColorUnderCursor();
+            if (i >= 0) app.setColor(i);
+          },
+        }, 'スポイト'),
+        h('button', {
+          class: 'danger',
+          title: 'このブロックの加工をすべて取り消し、元の形に戻します',
+          onClick: () => app.editor.resetBlock(),
+        }, '形に戻す'),
+      ),
       h('label', { class: 'field' }, h('span', {}, '加工の細かさ')),
       this.resSelect,
       h('div', { class: 'note' }, '細かいほど重くなります。'),
@@ -1158,13 +1223,14 @@ export class EditorUI {
     this.help = new Help(app);
     this.title = new TitleScreen(app);
     this.sortie = new SortieScreen(app);
+    this.versus = new VersusScreen(app);
     this.result = new ResultScreen(app);
 
     this.root.append(
       this.topbar, this.partBar, this.leftPanel, this.rightPanel, this.hint,
       this.leftTab, this.rightTab,
       this.fieldBar, this.pauseMenu, this.keyConfig.el, this.share.el,
-      this.help.el, this.title.el, this.sortie.el, this.result.el, this.toast,
+      this.help.el, this.title.el, this.sortie.el, this.versus.el, this.result.el, this.toast,
     );
 
     this._bindGestures();
@@ -1243,6 +1309,11 @@ export class EditorUI {
     this.equipSection.setVisible(tool === TOOL.EQUIP);
     this.boneSection.setVisible(isBone);
     this.sculptSection.setVisible(isSculpt);
+    if (isSculpt) {
+      this.syncBrush(this.app.editor.brushPercent, this.app.editor.brushMetres());
+      this.sculptAxis.value = String(this.app.editor.sculptAxis ?? 0);
+      this.brushShape.checked = !!this.app.editor.brushRound;
+    }
     this.stampSection.setVisible(tool === TOOL.STAMP);
 
     // Reaching a sculpt tool by keyboard should not leave its button folded away.
@@ -2678,6 +2749,7 @@ export class EditorUI {
 
       h('div', { class: 'stat' }, h('span', { class: 'k' }, '装備 / 武装'),
         h('span', { class: 'v' }, `${stats.equipCount ?? 0} / ${stats.weaponCount ?? 0}`)),
+      this._budgetBars(),
       ...(stats.dashBonus
         ? [h('div', { class: 'stat' }, h('span', { class: 'k' }, 'ダッシュ'),
           h('span', { class: 'v good' }, `+${Math.round(stats.dashBonus * 100)}%`))]
@@ -2687,6 +2759,79 @@ export class EditorUI {
           h('span', { class: 'v warn' }, `浮遊不可 / 耐久 +${Math.round(stats.hpBonus * 100)}%`))]
         : []),
     );
+  }
+
+  /**
+   * What the machine is made of, against what it is allowed to be made of.
+   *
+   * Three bars rather than three numbers. The question this answers is not
+   * "how many blocks is that" — it is "have I got room for more", and that
+   * is a question about a proportion, which a bar answers at a glance and a
+   * fraction makes you do arithmetic for.
+   *
+   * The bar turns as it fills, so running out is something you see coming
+   * rather than something you are told about when a placement is refused.
+   */
+  _budgetBars() {
+    const used = this.app.assembly.usage();
+    return h('div', { class: 'budget' },
+      ...['block', 'bone', 'equip', 'voxel'].map((kind) => {
+        const cap = BUDGET[kind];
+        const n = used[kind];
+        const frac = Math.min(1, n / cap);
+        const tone = frac >= 1 ? 'full' : frac > 0.85 ? 'tight' : '';
+        // Seven digits is not a reading. What the sculpting grid costs is
+        // worth knowing as a proportion and nothing else — the exact cell
+        // count is a number nobody can do anything with.
+        const shown = kind === 'voxel'
+          ? `${Math.round(frac * 100)}%`
+          : `${n}/${cap}`;
+        return h('div', {
+          class: `budgetrow ${tone}`,
+          title: kind === 'voxel'
+            ? `加工グリッド ${(n / 1e6).toFixed(2)}M / ${(cap / 1e6).toFixed(0)}M セル`
+            : `${BUDGET_LABEL[kind]} ${n} / ${cap}`,
+        },
+        h('span', { class: 'k' }, BUDGET_LABEL[kind]),
+        h('span', { class: 'budgetbar' },
+          h('span', { class: 'budgetfill', style: `width:${(frac * 100).toFixed(1)}%` })),
+        h('span', { class: 'v' }, shown));
+      }),
+    );
+  }
+
+  /**
+   * The brush, in metres, and how much of the block is left.
+   *
+   * The bracket keys used to move a slider nobody was looking at, so the
+   * feedback for pressing one was nothing. This is the readout they move.
+   */
+  syncBrush(percent, metres) {
+    if (this.brushSlider?.set) this.brushSlider.set(percent);
+    const ed = this.app.editor;
+    if (this.brushSize) {
+      // The brush, and how fine one cell of the grid is — the two lengths
+      // that decide whether a cut will land where it is meant to.
+      const cell = ed?.cellSize?.() ?? 0;
+      this.brushSize.textContent = `太さ ${(metres * 100).toFixed(0)}cm`
+        + (cell ? ` ・ 1マス ${(cell * 100).toFixed(1)}cm` : '');
+      // Bigger than the block is a brush that takes the whole thing out in
+      // one dab, which reads as the tool being broken.
+      const big = !!ed?.brushTooBig?.();
+      this.brushSize.classList.toggle('warn', big);
+      this.brushSize.title = big ? 'ブラシがブロックより大きくなっています' : '';
+    }
+    this.syncBlockLeft();
+    return this;
+  }
+
+  /** How much of the block being carved is still there. */
+  syncBlockLeft() {
+    if (!this.blockLeft) return this;
+    const left = this.app.editor?.blockSolidShare?.() ?? 1;
+    this.blockLeft.textContent = `残り ${Math.round(left * 100)}%`;
+    this.blockLeft.classList.toggle('warn', left < 0.15);
+    return this;
   }
 
   syncName(name) {

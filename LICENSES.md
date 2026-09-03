@@ -62,8 +62,29 @@ BLOSTOM 本体のコードとは別に、`public/kit/` 以下に外部素材を�
 | `boom.ogg` | 50 CC0 Sci-Fi SFX `explosion_02` | rubberduck | CC0 1.0 |
 | `lock-on.ogg` | 同上 `beep_01` | rubberduck | CC0 1.0 |
 | `lock-off.ogg` | 同上 `beep_03` | rubberduck | CC0 1.0 |
+| `step.ogg` | 100 CC0 SFX `metal_03` | rubberduck | CC0 1.0 |
+| `land.ogg` | 同上 `slam_03` | rubberduck | CC0 1.0 |
+| `jump.ogg` | 50 CC0 Sci-Fi SFX `misc_04` | rubberduck | CC0 1.0 |
+| `dash.ogg` | 同上 `teleport_01` | rubberduck | CC0 1.0 |
+| `servo.ogg` | 同上 `loop_machine_02` | rubberduck | CC0 1.0 |
+| `thrust.ogg` | 同上 `loop_ambient_weird` | rubberduck | CC0 1.0 |
+| `blade.ogg` | 同上 `loop_machine_03` | rubberduck | CC0 1.0 |
+| `reload.ogg` | 100 CC0 SFX `tools_02` | rubberduck | CC0 1.0 |
+| `swap.ogg` | 同上 `switch_01` | rubberduck | CC0 1.0 |
+| `round.ogg` | 同上 `gong_01` | rubberduck | CC0 1.0 |
+| `alarm.ogg` | 50 CC0 Sci-Fi SFX `retro_beep_05` | rubberduck | CC0 1.0 |
+| `wreck.ogg` | 25 CC0 bang / firework SFX `bang_09` | rubberduck | CC0 1.0 |
+| `ui-move.ogg` | 50 CC0 Sci-Fi SFX `terminal_01` | rubberduck | CC0 1.0 |
+| `ui-select.ogg` | 同上 `terminal_04` | rubberduck | CC0 1.0 |
+| `ui-back.ogg` | 同上 `terminal_05` | rubberduck | CC0 1.0 |
 
 **加工:** 改名のみ。中身は元のまま。
+
+**選び方:** ファイル名では選んでいません（`spark` という名前のスプライトが
+実際には稲妻だった、という失敗があったので）。3つのパックの **175音すべてを
+実際にデコードして測り**、長さ・立ち上がり・鳴っている長さ・明るさ（ゼロ交差）・
+両端の一致度（＝ループにできるか）から選びました。各音の測定値は
+`tools/fetch-assets.py` のコメントに残してあります。
 
 ## エフェクト — `public/kit/fx/`
 

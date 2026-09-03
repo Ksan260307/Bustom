@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Animator, waveAt } from '../src/anim/Animator.js';
 import { Rig } from '../src/core/Rig.js';
 import { Assembly, PRESETS, computeStats } from '../src/core/Assembly.js';
-import { BONE, EQUIP } from '../src/core/constants.js';
+import { BONE, EQUIP, RUN } from '../src/core/constants.js';
 
 const IDENTITY = new THREE.Quaternion();
 
@@ -960,5 +960,356 @@ describe('floating legs', () => {
     const rigged = makeAnimator(a);
     expect(() => fly(rigged, { vz: 8 })).not.toThrow();
     expect(rigged.rig.limbs).toHaveLength(0);
+  });
+});
+
+// ============================================================
+//  Giving ground.
+// ============================================================
+
+describe('backing away is its own pose, not the sideways one', () => {
+  /**
+   * Run a retreat and report where the feet ended up, in body space.
+   *
+   * @param jitter lateral speed to wobble by. A machine backing off in a
+   *   straight line still has a little sideways speed that changes sign a
+   *   few times a second, and that wobble is the whole bug: the skate reads
+   *   its direction off it, so borrowing the skate made the legs cant left,
+   *   then right, then left again.
+   */
+  const backing = (jitter = 0, frames = 90) => {
+    const a = PRESETS.biped.build();
+    const rig = new Rig(a);
+    const animator = new Animator(rig, computeStats(a, rig));
+    const s = {
+      dt: 1 / 60, speed: 9, planarSpeed: 9, grounded: 1, airborne: 0,
+      bodyQ: new THREE.Quaternion(), aimDir: null, locked: 1,
+      thrust: 0.2, jerk: 0, retreat: 1, dashSpeed: 14, walkCap: 6,
+    };
+    let rollSpan = 0;
+    let dirFlips = 0;
+    let was = animator.slideDir;
+    for (let i = 0; i < frames; i++) {
+      const wobble = Math.sin(i * 0.7) * jitter;
+      animator.update({ ...s, velocity: new THREE.Vector3(wobble, 0, -9) });
+      if (i > 20) {
+        rollSpan = Math.max(rollSpan, Math.abs(animator.bodyLean.y));
+        if (Math.sign(animator.slideDir) !== Math.sign(was)) dirFlips++;
+        was = animator.slideDir;
+      }
+    }
+    rig.root.updateMatrixWorld(true);
+    const feet = rig.limbs.map((limb) => new THREE.Vector3()
+      .setFromMatrixPosition(limb.chain[limb.chain.length - 1].joint.matrixWorld));
+    return { feet, rollSpan, dirFlips, animator };
+  };
+
+  it('reaches the feet out in front', () => {
+    // The floor holds them where they were; the machine goes back without
+    // them. Feet behind the machine would be somebody being shoved over.
+    const { feet } = backing();
+    for (const f of feet) expect(f.z).toBeGreaterThan(0.4);
+  });
+
+  it('stands the legs apart rather than together', () => {
+    // Both legs reaching the same distance is standing to attention while
+    // sliding. One foot leads.
+    const [a, b] = backing().feet;
+    expect(Math.abs(a.z - b.z), 'one foot ahead of the other').toBeGreaterThan(0.2);
+  });
+
+  it('does not lean to a side, however the lateral speed wobbles', () => {
+    // The complaint, exactly: the legs turned right, then left, then right.
+    const wobbling = backing(0.9);
+    expect(wobbling.dirFlips, 'the skate direction flipped repeatedly')
+      .toBeGreaterThan(2);
+    expect(wobbling.rollSpan, `and the body rolled by ${wobbling.rollSpan.toFixed(4)}`)
+      .toBeLessThan(0.01);
+    // The pose itself must not have moved with those flips either.
+    const still = backing(0);
+    for (let i = 0; i < still.feet.length; i++) {
+      expect(wobbling.feet[i].x).toBeCloseTo(still.feet[i].x, 2);
+    }
+  });
+
+  it('leaves the sideways skate alone', () => {
+    // Two channels, because they are two shapes. A machine doing both at
+    // once would be doing neither.
+    const { animator } = backing();
+    expect(animator.brace).toBeGreaterThan(0.9);
+    expect(animator.slide).toBe(0);
+  });
+});
+
+// ============================================================
+//  Feet that keep up with the floor.
+// ============================================================
+
+/**
+ * Run a machine at a steady speed and report how far its sole travels
+ * against how far the ground travelled under it.
+ *
+ * The difference is the foot being dragged. It used to be half of every
+ * step at every speed — the gait clock counted steps 2.16m long while the
+ * legs swung 0.9m — and that drag is what a skitter is: a machine moving
+ * three times faster than its feet.
+ */
+function footSlip(preset, v, extra = {}) {
+  const a = PRESETS[preset].build();
+  const rig = new Rig(a);
+  const animator = new Animator(rig, computeStats(a, rig));
+  const s = {
+    dt: 1 / 60, speed: v, planarSpeed: v, grounded: 1, airborne: 0,
+    velocity: new THREE.Vector3(0, 0, v), bodyQ: new THREE.Quaternion(),
+    aimDir: null, locked: 0, thrust: 0.2, jerk: 0,
+    dashSpeed: 30, walkCap: 17, ...extra,
+  };
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < 260; i++) {
+    animator.update(s);
+    // Settled: the gait clock ramps, and a span taken across the ramp
+    // measures the ramp.
+    if (i <= 150) continue;
+    rig.root.updateMatrixWorld(true);
+    const limb = rig.limbs[0];
+    const tip = limb.chain[limb.chain.length - 1];
+    const p = limb.sole.clone().applyMatrix4(tip.joint.matrixWorld);
+    lo = Math.min(lo, p.z);
+    hi = Math.max(hi, p.z);
+  }
+  const perStep = v / (animator.gaitFreq * rig.limbs.length);
+  return { slip: 1 - (hi - lo) / perStep, swing: hi - lo, perStep, animator };
+}
+
+describe('the feet keep up with the floor', () => {
+  it('plants rather than drags, at every speed it can walk', () => {
+    for (const v of [2, 4, 8, 12, 17]) {
+      const { slip, swing, perStep } = footSlip('biped', v);
+      expect(
+        Math.abs(slip),
+        `${v}m/s: the floor moved ${perStep.toFixed(2)}m under a `
+          + `${swing.toFixed(2)}m step`,
+      ).toBeLessThan(0.2);
+    }
+  });
+
+  it('and does it for a machine of any size', () => {
+    // The step comes from the leg now, so a machine five metres to the hip
+    // and one a quarter of that are both solving the same equation.
+    for (const preset of ['mite', 'biped', 'titan', 'colossus']) {
+      const { slip } = footSlip(preset, 9);
+      expect(Math.abs(slip), `${preset} slipped ${(slip * 100).toFixed(0)}%`)
+        .toBeLessThan(0.2);
+    }
+  });
+
+  it('gets BIGGER steps as it speeds up, not just faster ones', () => {
+    // The old gait had one shape played at different rates, and above about
+    // ten metres a second the joint slew ate it faster than the rate added
+    // to it — so a machine at a sprint moved its legs LESS than at a jog.
+    const jog = footSlip('biped', 6);
+    const run = footSlip('biped', 12);
+    expect(run.swing, `${run.swing.toFixed(2)}m against ${jog.swing.toFixed(2)}m`)
+      .toBeGreaterThan(jog.swing * 1.2);
+    // And the cadence stays somewhere a leg can actually go.
+    expect(run.animator.gaitFreq).toBeLessThanOrEqual(RUN.cadence + 1e-6);
+  });
+
+  it('walks at every speed the machine can reach under its own power', () => {
+    // The point of the exercise. A gait that gave up at cruise speed would
+    // trade one problem for a worse one: the walk is the workhorse and it
+    // should be what is on screen nearly all the time.
+    const { animator } = footSlip('biped', 17);
+    expect(animator.glide, 'still walking at its own top speed').toBeLessThan(0.05);
+    expect(animator.runCap, 'and the legs are good for more than that')
+      .toBeGreaterThan(17);
+  });
+});
+
+describe('carried forward faster than the legs can stride', () => {
+  const dashing = (v) => footSlip('biped', v, { velocity: new THREE.Vector3(0, 0, v) });
+
+  it('gives up the walk rather than skittering through it', () => {
+    // Above the run cap no step reaches the ground being covered — the
+    // machine would need one longer than its own leg. Pretending otherwise
+    // is exactly where the skitter came from.
+    const boosted = dashing(34);
+    expect(boosted.animator.glide, 'skating, not walking').toBeGreaterThan(0.9);
+    expect(boosted.swing, 'and the legs have stopped cycling').toBeLessThan(0.3);
+  });
+
+  it('trails its feet behind it, the opposite way a retreat plants them', () => {
+    const a = PRESETS.biped.build();
+    const rig = new Rig(a);
+    const animator = new Animator(rig, computeStats(a, rig));
+    const at = (extra) => {
+      animator.reset();
+      const s = {
+        dt: 1 / 60, grounded: 1, airborne: 0, bodyQ: new THREE.Quaternion(),
+        aimDir: null, thrust: 0.2, jerk: 0, dashSpeed: 30, walkCap: 17,
+        speed: 0, planarSpeed: 0, velocity: new THREE.Vector3(),
+        locked: 0, ...extra,
+      };
+      for (let i = 0; i < 120; i++) animator.update(s);
+      rig.root.updateMatrixWorld(true);
+      const limb = rig.limbs[0];
+      const tip = limb.chain[limb.chain.length - 1];
+      return limb.sole.clone().applyMatrix4(tip.joint.matrixWorld).z;
+    };
+    const still = at({});
+    const carried = at({
+      speed: 34, planarSpeed: 34, velocity: new THREE.Vector3(0, 0, 34),
+    });
+    const giving = at({
+      speed: 9, planarSpeed: 9, velocity: new THREE.Vector3(0, 0, -9),
+      locked: 1, retreat: 1,
+    });
+    // One shape, reflected. Feet ahead of a machine going backwards; feet
+    // behind one going forwards.
+    expect(carried, `carried: sole at ${carried.toFixed(2)}`).toBeLessThan(still - 0.3);
+    expect(giving, `giving ground: sole at ${giving.toFixed(2)}`)
+      .toBeGreaterThan(still + 0.3);
+  });
+
+  it('leaves the sideways skate to the sideways case', () => {
+    const { animator } = dashing(34);
+    expect(animator.slide).toBe(0);
+    expect(animator.brace).toBe(0);
+  });
+});
+
+describe('the gait asks the machine how long its legs are', () => {
+  it('measures the step rather than working it out on paper', () => {
+    // The hip is not the only thing turning: the knee bends on the same
+    // cycle and takes back about a third of what the hip gives. Assuming it
+    // away came out 35% short, which is a third of every step dragged.
+    const a = PRESETS.biped.build();
+    const rig = new Rig(a);
+    const animator = new Animator(rig, computeStats(a, rig));
+    const limb = rig.limbs[0];
+    expect(limb.lever, 'the measured lever is shorter than the bare geometry')
+      .toBeLessThan(limb.reach);
+    expect(limb.lever).toBeGreaterThan(limb.reach * 0.3);
+  });
+
+  it('gives the same answer however many times it is asked', () => {
+    // The measurement drives the real gait, and the real gait reads the
+    // measurement. Left to itself that chases its own tail.
+    const a = PRESETS.biped.build();
+    const rig = new Rig(a);
+    const stats = computeStats(a, rig);
+    const first = new Animator(rig, stats).legLever;
+    const second = new Animator(rig, stats).legLever;
+    const third = new Animator(rig, stats).legLever;
+    expect(second).toBeCloseTo(first, 6);
+    expect(third).toBeCloseTo(first, 6);
+  });
+
+  it('puts the machine back exactly as it found it', () => {
+    const a = PRESETS.biped.build();
+    const rig = new Rig(a);
+    const before = rig.joints.map((n) => n.joint.quaternion.clone());
+    // eslint-disable-next-line no-new
+    new Animator(rig, computeStats(a, rig));
+    rig.joints.forEach((n, i) => {
+      expect(n.joint.quaternion.angleTo(before[i]), n.part.id).toBeLessThan(1e-6);
+    });
+  });
+
+  it('leaves gaits with no stride alone', () => {
+    // A hop covers ground by leaving it. There is no foot down to keep up
+    // with the floor and nothing to solve.
+    const a = PRESETS.hopper.build();
+    const rig = new Rig(a);
+    const animator = new Animator(rig, computeStats(a, rig));
+    expect(animator.stats.gait).toBe('hop');
+    expect(animator.legLever).toBeUndefined();
+  });
+});
+
+// ============================================================
+//  Stepping sideways.
+// ============================================================
+
+describe('a step to the side is not a stride turned sideways', () => {
+  /** The widest the sole gets, across the machine, over one whole cycle. */
+  const sideStep = (preset, vx) => {
+    const a = PRESETS[preset].build();
+    const rig = new Rig(a);
+    const animator = new Animator(rig, computeStats(a, rig));
+    const s = {
+      dt: 1 / 60, speed: vx, planarSpeed: vx, grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(vx, 0, 0), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 1, thrust: 0.2, jerk: 0, dashSpeed: 30, walkCap: 17,
+    };
+    let lo = Infinity;
+    let hi = -Infinity;
+    let was = 0;
+    let widest = 0;
+    for (let i = 0; i < 900; i++) {
+      animator.update(s);
+      if (i <= 400) continue;
+      rig.root.updateMatrixWorld(true);
+      const limb = rig.limbs[0];
+      const tip = limb.chain[limb.chain.length - 1];
+      const p = limb.sole.clone().applyMatrix4(tip.joint.matrixWorld);
+      // Per whole cycle, found by watching the phase wrap: a fixed window
+      // measures the window rather than the stride.
+      if (animator.gaitPhase < was) {
+        if (lo < Infinity) widest = Math.max(widest, hi - lo);
+        lo = Infinity;
+        hi = -Infinity;
+      }
+      was = animator.gaitPhase;
+      lo = Math.min(lo, p.x);
+      hi = Math.max(hi, p.x);
+    }
+    return { widest, animator, rig };
+  };
+
+  it('fits between the machine own feet', () => {
+    // A TITAN was taking 5.31m steps across a stance 2.75m wide: two and a
+    // half metres of leg swung through the leg holding the machine up, once
+    // a second, which is what "opens wide then shuts" looks like from the
+    // outside.
+    for (const preset of ['biped', 'titan', 'colossus']) {
+      const { widest, rig } = sideStep(preset, 9);
+      expect(widest, `${preset}: ${widest.toFixed(2)}m across a ${rig.stance.toFixed(2)}m stance`)
+        .toBeLessThan(rig.stance * 1.15);
+    }
+  });
+
+  it('is shorter than the same machine step forward', () => {
+    const { animator } = sideStep('titan', 9);
+    expect(animator.sideStepMax).toBeLessThan(animator.stepMax * 0.8);
+  });
+
+  it('does not make up the difference in cadence', () => {
+    // Shortening the step without opening it sooner just moves the problem:
+    // the legs would shuffle twice as fast to cover the same ground, which
+    // is the skitter again.
+    const across = sideStep('biped', 3).animator.gaitFreq;
+    const a = PRESETS.biped.build();
+    const rig = new Rig(a);
+    const ahead = new Animator(rig, computeStats(a, rig));
+    const s = {
+      dt: 1 / 60, speed: 3, planarSpeed: 3, grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(0, 0, 3), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 0, thrust: 0.2, jerk: 0, dashSpeed: 30, walkCap: 17,
+    };
+    for (let i = 0; i < 400; i++) ahead.update(s);
+    expect(across, `sideways ${across.toFixed(2)}Hz against forward ${ahead.gaitFreq.toFixed(2)}Hz`)
+      .toBeLessThan(ahead.gaitFreq * 1.3);
+  });
+
+  it('skates once side-stepping gives out, rather than walking on', () => {
+    // The threshold used to be the machine ground speed, which is a fact
+    // about its thrust and nothing to do with its legs.
+    const { animator } = sideStep('biped', 3);
+    expect(animator.sideCap).toBeLessThan(17);
+    const fast = sideStep('biped', 16).animator;
+    expect(fast.slide, 'past its own side-step, it is being carried')
+      .toBeGreaterThan(0.5);
   });
 });

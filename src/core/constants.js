@@ -299,7 +299,7 @@ export const EQUIP_META = {
     // advantage over it imaginary.
     ammo: 5, reload: 1.4, interval: 0.55, auto: false,
     shots: 1, spread: 0, speed: 112, damage: 26, life: 1.1, radius: 0.14, mass: 0.55,
-    lead: 0.5,
+    lead: 0.95,   // aimed, and fast enough that the dodge is tight
     shape: 'beam', streak: 6,
     blurb: '長く細い一線を撃つビームライフル。連射は効かない',
   },
@@ -313,7 +313,7 @@ export const EQUIP_META = {
     // thing it is for.
     ammo: 30, reload: 3.0, interval: 0.07, auto: true,
     shots: 1, spread: 0.022, speed: 88, damage: 3.6, life: 1.9, radius: 0.13, mass: 0.7,
-    lead: 0.3,
+    lead: 0.95,   // a stream: what it needs is to be pointed right
     blurb: '押しっぱなしで連射。30発でリロード3秒',
   },
   [EQUIP.SHOT]: {
@@ -325,7 +325,7 @@ export const EQUIP_META = {
     // middle distance, against nine thrown ones up close.
     ammo: 6, reload: 3.0, interval: 0.42, auto: false,
     shots: 3, spread: 0.10, speed: 62, damage: 11, life: 1.9, radius: 0.2, mass: 0.6,
-    lead: 0.25,
+    lead: 0.95,
     blurb: '3発をまとめて撃つ。中距離向き。6発でリロード3秒',
   },
   [EQUIP.BLADE]: {
@@ -333,7 +333,18 @@ export const EQUIP_META = {
     colorable: false, bullet: 0xff5c7a,
     ammo: 0, reload: 0, interval: 0, auto: true,
     dps: 42, reach: 1.35, mass: 0.5,
-    blurb: '押している間ブロックが光り、触れた敵にダメージ',
+    /**
+     * What holding it lit costs, as a fraction of the tank per second.
+     *
+     * It had no magazine, no reload and no heat, so it was the one weapon
+     * with no price at all: hold it down for the whole fight and never
+     * think about it. Energy is the price a blade should pay — the same
+     * tank that flies the machine — so keeping it lit is a decision against
+     * staying in the air, which is exactly the trade a melee weapon ought
+     * to force.
+     */
+    drain: 0.34,
+    blurb: '押している間ブロックが光り、触れた敵にダメージ。ENを消費する',
   },
   [EQUIP.MISSILE]: {
     label: 'ミサイル', en: 'MISSILE', category: 'weapon', plate: 0x2b3a49, accent: 0xb98cff,
@@ -342,7 +353,7 @@ export const EQUIP_META = {
     // makes a salvo read as a salvo rather than one fat round.
     ammo: 2, reload: 3.4, interval: 0.5, auto: false,
     shots: 5, spread: 0.34, speed: 30, damage: 9, life: 6, radius: 0.17, mass: 0.9,
-    lead: 0.5,                     // the homing does the rest
+    lead: 0.85,   // it homes; being roughly right is enough
     turn: 2.6,                     // homing authority, rad/s
     shape: 'missile', trail: 0xffffff, scatter: 0.55,
     blurb: '小型ミサイルを5発ばらまく。白い航跡を引いて追尾する',
@@ -377,7 +388,7 @@ export const EQUIP_META = {
     //     long way from the 0.6 it had.
     ammo: 3, reload: 2.6, interval: 1.0, auto: false,
     shots: 1, spread: 0, speed: 240, damage: 96, life: 3.2, radius: 0.14, mass: 0.9,
-    lead: 0.9,                     // the best-aimed shot there is, still dodgeable
+    lead: 0.95,                     // the best-aimed shot there is, still dodgeable
     shape: 'beam', streak: 20,
     blurb: '超長射程の一撃。当てれば大きい',
   },
@@ -398,7 +409,7 @@ export const EQUIP_META = {
     // nothing.
     ammo: 8, reload: 2.4, interval: 0.5, auto: false,
     shots: 9, spread: 0.30, speed: 54, damage: 5, life: 0.9, radius: 0.16, mass: 0.75,
-    lead: 0.25,
+    lead: 0.95,   // nine pellets, and they all want the same answer
     streak: 1.1,                   // pellets, not tracers
     blurb: '9発を大きく拡散。至近距離なら全弾当たるが、遠くには届かない',
   },
@@ -408,7 +419,7 @@ export const EQUIP_META = {
     // Short life is the range limit: the round simply stops existing.
     ammo: 4, reload: 2.0, interval: 0.7, auto: false,
     shots: 1, spread: 0.01, speed: 70, damage: 44, life: 0.5, radius: 0.34, mass: 0.85,
-    lead: 0.2,
+    lead: 0.95,   // one heavy round, and it should land
     streak: 1.6,                   // a fat slug
     blurb: '至近距離用の一撃。射程は短いが非常に重い',
   },
@@ -417,7 +428,7 @@ export const EQUIP_META = {
     colorable: true, bullet: 0x8effc9,
     ammo: 3, reload: 2.8, interval: 0.8, auto: false,
     shots: 1, spread: 0.02, speed: 40, damage: 16, life: 4, radius: 0.3, mass: 0.95,
-    lead: 0.45,
+    lead: 0.88,   // a seven-metre blast forgives the rest
     shape: 'grenade', gravity: 14, blast: { radius: 7, damage: 34 },
     blurb: '山なりに飛ぶ爆弾。着弾点で小爆発を起こす',
   },
@@ -512,12 +523,41 @@ export const SPIN_RPM_MAX = 400;
  * intercept is what turns "the shot lands" into "the shot is going THERE —
  * move", which is the only version of this that is worth playing.
  *
- * Per weapon, because the ones you point should be allowed to be right and
- * the ones you spray should not. Together with rounds slow enough to watch
- * cross the gap, sidestepping and dashing become the answer to being shot
- * at, rather than decoration on a fight that was already decided.
+ * ---- how short, exactly
+ *
+ * These were 0.2 to 0.5, chosen by feel, and the feel was wrong. Worked out
+ * rather than guessed, against a machine crossing at fifteen metres a
+ * second — which is a walk, not a sprint:
+ *
+ *     weapon    aimed short by
+ *     gatling   2.9m at 30m,  8.6m at 60m
+ *     shot      4.4m at 30m, 13.1m at 60m
+ *     magnum    4.1m at 30m
+ *     missile   6.0m at 30m
+ *
+ * A machine is three to six metres across. Missing by nine is not the
+ * target dodging — it is the gun pointing somewhere else, at a target
+ * walking in a straight line, with a lock on it. That is the whole of the
+ * complaint that rounds do not connect.
+ *
+ * The first fix aimed short by about the width of a machine. That was still
+ * wrong, and wrong in a way worth writing down: a FRACTION of the intercept
+ * is an error PROPORTIONAL TO RANGE, and the target does not get bigger with
+ * range. Whatever fraction is chosen, there is a distance past which every
+ * shot misses a target walking in a straight line — measured, a gatling at
+ * 0.72 hit 7% of its rounds against a steady target at thirty-five metres.
+ *
+ * So the aim is allowed to be right, and the DODGE IS THE FLIGHT TIME. A
+ * gatling round takes two thirds of a second to cross sixty metres; the
+ * solution was computed for the course the target was on when it left the
+ * barrel, and a target that changes course inside that time is not there any
+ * more. That is dodging, and it is a decision the player makes rather than
+ * an error the gun makes for them.
+ *
+ * Held just under one so that a target which is merely turning — rather than
+ * reversing — is still clipped rather than cleanly missed.
  */
-export const WEAPON_LEAD_DEFAULT = 0.4;
+export const WEAPON_LEAD_DEFAULT = 0.95;
 export const weaponLead = (meta) =>
   Math.min(1, Math.max(0, meta?.lead ?? WEAPON_LEAD_DEFAULT));
 
@@ -651,10 +691,17 @@ export const DRIFT = {
  * come down off a rooftop and never once looked like it was falling.
  */
 export const FALL = {
-  /** Below this the drag model has it, and nothing here applies. */
-  softFrom: 12,
+  /**
+   * Below this the drag model has it, and nothing here applies.
+   *
+   * Measured at 12: the drag settles a machine at about 14 m/s, and the
+   * ramp had only reached 3% of its strength by then — so the counter to
+   * the drag was, at exactly the speed the drag mattered, worth 0.8 m/s²
+   * against a gravity of 22. A jump ended with the machine drifting down.
+   */
+  softFrom: 8,
   /** Where the extra pull is at full strength. */
-  terminal: 46,
+  terminal: 26,
   /** How hard, in m/s². Enough to feel, not enough to be a second gravity. */
   pull: 26,
 };
@@ -683,6 +730,120 @@ export const AIR = {
 export const HOVER = {
   hold: 2.6,
 };
+
+/**
+ * Giving ground with a target held.
+ *
+ * The retreat borrowed the sideways skate to begin with, and it was wrong
+ * in a way you could see: that pose cants the legs onto whichever side the
+ * machine is being carried toward, and a machine going straight backwards
+ * has no side. The tiny left-right jitter in its lateral speed decided the
+ * lean, so the legs flicked between canting left and canting right.
+ *
+ * A retreat is a shape of its own. The feet are held out AHEAD — the floor
+ * keeping them where they were while the body is taken back — and the body
+ * leans into the direction it came from. Nothing in it is left or right.
+ */
+export const RETREAT = {
+  /** On fast, off slowly: the same reasoning as the skate. */
+  riseHalfLife: 0.05,
+  fallHalfLife: 0.16,
+  /** How far the legs reach out in front, in degrees. */
+  plant: 26,
+  /** How much the knee gives under it, in degrees. */
+  knee: 18,
+  /** How much of the plant each joint further down the leg takes. */
+  taper: 0.55,
+  /**
+   * How much the two legs disagree about the plant, as a fraction of it.
+   * Both legs reaching out by exactly the same amount is a machine standing
+   * to attention while it slides; one foot ahead of the other is a stance.
+   */
+  stagger: 0.4,
+  /** Body pitch into the retreat, in radians. */
+  lean: 0.1,
+};
+
+/**
+ * How the walk turns into a run, and where it gives out.
+ *
+ * The gait used to pick its stride length out of a formula — leg count and
+ * machine size — and its swing out of a second, unrelated one. The two
+ * disagreed. The clock was counting steps 2.16m long while the legs were
+ * swinging 0.9m, so more than half of every step was the planted foot being
+ * dragged across the floor. That drag is what a skitter IS: the machine
+ * moving three times faster than its feet.
+ *
+ * So the step comes from the leg now, and the swing is solved for the
+ * ground rather than chosen. What is left over is the interesting part —
+ * above the speed the legs can honestly carry, there is no stride that
+ * works, and pretending otherwise is where the skittering came from.
+ */
+export const RUN = {
+  /** The widest a hip swings from centre, in degrees. */
+  swing: 46,
+  /**
+   * The shortest step, as a fraction of the longest.
+   *
+   * Below this the machine keeps its stride and slows its feet, which is
+   * what walking slowly is. Above it the stride opens instead.
+   */
+  minStep: 0.3,
+  /**
+   * Where the stride is fully open, as a fraction of the machine's own
+   * ground speed. Under that it lengthens its step; over it, it can only
+   * take them faster.
+   */
+  openAt: 0.5,
+  /**
+   * The fastest the legs will cycle, in strides per second.
+   *
+   * Not a taste: past about this the joint slew cannot deliver the swing
+   * being asked for, so the pose gets quietly smaller the harder it is
+   * driven. A cadence nobody can reach is the same as no cadence.
+   *
+   * Set where the fastest thing a machine can do UNDER ITS OWN POWER is
+   * still a run. Measured in the arena: a two-legger holding forward
+   * settles around 21 m/s, and a cap that gave up below that would have
+   * handed normal running to the skate — which is the opposite of the
+   * point. Above it is a dash or a boost, and nothing else.
+   */
+  cadence: 4.0,
+  /**
+   * How far the slew compensation may push a commanded swing.
+   *
+   * A joint stops at 70 degrees, and a swing driven past that arrives with
+   * its peaks cut flat — which is its own kind of wrong. So the legs were
+   * given a faster slew instead (LEG_SLEW), and what is left to make up
+   * fits inside the stops.
+   */
+  maxDrive: 1.9,
+  /**
+   * How far a machine may step sideways, as a multiple of how wide it
+   * stands.
+   *
+   * A side-step is not a stride turned ninety degrees. The stride is as
+   * long as the leg reaches, and reaching that far sideways swings the leg
+   * straight through the other one: a TITAN was taking 4.8m steps across a
+   * stance 2.75m wide, which is two metres of leg passing through leg. It
+   * opened wide, shut, and looked wrong, because it was.
+   */
+  sideStep: 1.0,
+  /** Rise and fall half-lives of the forward skate. Snaps on, eases off. */
+  riseHalfLife: 0.03,
+  fallHalfLife: 0.14,
+  /** How far past the honest top speed the skate takes over completely. */
+  overrun: 0.3,
+};
+
+/**
+ * How hard a leg joint chases its pose, as a multiple of the standard slew.
+ *
+ * Shared between the slew itself and the gait's compensation for it: the
+ * gait has to know exactly how much of its swing the filter is going to
+ * eat, and two copies of this number would drift apart.
+ */
+export const LEG_SLEW = 3.0;
 
 export const LANDING = {
   /**
@@ -718,10 +879,96 @@ export const EQUIP_TYPES = Object.keys(EQUIP_META);
  * There was no limit, and plate mass is under a tenth of what a machine
  * weighs — so bolting on all ten and cycling through them was strictly
  * better than choosing, and the ten different cost structures never became
- * a question anybody had to answer. Four is enough for a close weapon, a
- * long one and two opinions.
+ * a question anybody had to answer. Six leaves room for a close weapon, a
+ * long one and a spread of opinions, and is still a rack somebody picked
+ * rather than the whole shop.
  */
-export const WEAPON_SLOTS = 4;
+export const WEAPON_SLOTS = 6;
+
+/**
+ * What one machine is allowed to be made of.
+ *
+ * Everything on a machine costs something every frame — a block is a mesh
+ * to draw and a body to test against, a bone is a joint to pose and slew,
+ * a plate is a weapon or a system to run — and four machines are on the
+ * field at once. Left open, one build could make the fight stutter for
+ * everybody in it.
+ *
+ * Set above the largest machine that ships (the LEVIATHAN, at 48 blocks
+ * and 16 bones), with room to design past it. A limit that the shipped
+ * examples already break is not a limit, it is a bug.
+ */
+export const BUDGET = {
+  block: 80,
+  bone: 32,
+  equip: 16,
+  /**
+   * Cells of sculpting grid across the whole machine.
+   *
+   * Counting blocks is not enough. A block holds the same grid however
+   * large it is made, but the RESOLUTION multiplies every block at once —
+   * and rebuilding a machine costs about what its cell count says it will.
+   * Measured, on the shipped machines:
+   *
+   *     0.2M cells   0.18s      1.6M cells   0.42s
+   *     6.0M cells   1.33s      48M cells    8.06s
+   *
+   * That rebuild runs every time a block is placed. Eight seconds is not a
+   * setting anybody would want and half a second is already a hitch, so the
+   * ceiling sits where the worst case is under a second.
+   *
+   * It leaves the standard grid unaffected — at 32 cells the block limit is
+   * reached first — and turns the higher ones into a trade: a finely
+   * carved machine is a smaller one.
+   */
+  voxel: 4000000,
+};
+
+/** What each budget is called where a player will read it. */
+export const BUDGET_LABEL = {
+  block: 'ブロック',
+  bone: 'ボーン',
+  equip: 'プレート',
+  voxel: '細かさ',
+};
+
+/**
+ * Which actions travel on the wire, and in what order.
+ *
+ * The order IS the format: bit 0 is the first entry, and changing the order
+ * changes what every frame in flight means. Append, never insert.
+ *
+ * Not every action is here. `reset` respawns and `camera` swings the view —
+ * neither is part of the fight, and a networked fight only carries what the
+ * simulation reads.
+ */
+/**
+ * The size of one simulation step, in seconds.
+ *
+ * Fixed, and the same everywhere. It lives down here rather than beside the
+ * game loop because it is not a fact about the loop — it is the unit the
+ * whole simulation is measured in, and a match clock counting ticks has to
+ * read the same one the physics does.
+ */
+export const STEP = 1 / 60;
+
+export const ACTION_BITS = [
+  'forward', 'back', 'left', 'right', 'up', 'down',
+  'boost', 'fire', 'weaponNext', 'weaponPrev',
+  'lock', 'cycleTarget', 'lockLeft', 'lockRight',
+  'layerA', 'layerB', 'layerC',
+];
+
+/**
+ * How finely a look is measured before it is sent, in units per radian.
+ *
+ * A mouse produces a double, and a double does not survive a round trip
+ * through a wire unchanged. So it is rounded to a grid FIRST, and everybody
+ * — the player who moved the mouse included — turns by the rounded amount.
+ * At this scale one unit is about a thousandth of a degree, which nobody
+ * can feel and every machine agrees on.
+ */
+export const LOOK_SCALE = 16384;
 
 export const WEAPON_TYPES = EQUIP_TYPES.filter((t) => EQUIP_META[t].category === 'weapon');
 export const SYSTEM_TYPES = EQUIP_TYPES.filter((t) => EQUIP_META[t].category === 'system');

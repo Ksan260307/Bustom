@@ -204,6 +204,7 @@ export class Hud {
     this._drawWeapons(s, ctx);
     this._drawThreats(s, ctx);
     this._drawMinimap(s, ctx);
+    if (s.match) this._drawMatch(s.match, ctx, s.topInset ?? 0);
     if (s.mission) this._drawMission(s.mission, ctx, s.topInset ?? 0);
     if (s.mission?.offer) this._drawOffer(s.mission.offer, ctx, s.player);
     // Last, over everything: how close you are to losing is not a detail to
@@ -553,6 +554,83 @@ export class Hud {
    * while actually fighting — speed, energy, the rack — is already along the
    * bottom, and the middle belongs to the reticle.
    */
+  /**
+   * The match: the clock, the rounds each side has, and whose fight this is.
+   *
+   * Across the top middle, where a fighting game puts it, because that is
+   * where people already look for it. The clock is the big thing — it is
+   * the number that changes what you should be doing when it gets low.
+   */
+  _drawMatch(m, ctx, inset = 0) {
+    const cx = this.w / 2;
+    const top = inset + 20;
+    ctx.save();
+    ctx.textAlign = 'center';
+
+    // The clock.
+    const secs = Math.ceil(m.secondsLeft);
+    const low = m.phase === 'live' && secs <= 15;
+    ctx.font = '700 28px ui-monospace, Menlo, Consolas, monospace';
+    ctx.fillStyle = low ? '#ff8a5c' : '#dff0ff';
+    ctx.globalAlpha = low ? 0.6 + Math.abs(Math.sin(this.time * 6)) * 0.4 : 0.9;
+    const mm = Math.floor(secs / 60);
+    const ss = `${secs % 60}`.padStart(2, '0');
+    ctx.fillText(`${mm}:${ss}`, cx, top + 24);
+
+    // Rounds won, as pips: a number you can read without reading.
+    ctx.globalAlpha = 0.9;
+    const n = m.score.length;
+    const pip = 7;
+    const gap = 5;
+    for (let seat = 0; seat < n; seat++) {
+      const side = seat === m.seat ? -1 : 1;
+      const lane = seat === m.seat ? 0 : Math.max(0, seat - (seat > m.seat ? 1 : 0));
+      const baseX = cx + side * (74 + lane * 46);
+      for (let i = 0; i < m.wins; i++) {
+        const x = baseX + (i - (m.wins - 1) / 2) * (pip + gap);
+        ctx.beginPath();
+        ctx.arc(x, top + 16, pip / 2, 0, TAU);
+        ctx.fillStyle = i < m.score[seat] ? (seat === m.seat ? '#4fd2ff' : '#ff8a5c') : '#2a3a48';
+        ctx.fill();
+      }
+      const label = m.names?.[seat] ?? `P${seat + 1}`;
+      ctx.font = '600 9px ui-monospace, Menlo, Consolas, monospace';
+      ctx.globalAlpha = seat === m.watching ? 0.95 : 0.5;
+      ctx.fillStyle = seat === m.seat ? '#4fd2ff' : '#dff0ff';
+      ctx.fillText(label.slice(0, 10), baseX, top + 34);
+    }
+
+    // What the match is doing, when it is not simply running.
+    let banner = '';
+    if (m.phase === 'ready') banner = `ROUND ${m.round}`;
+    else if (m.phase === 'done') {
+      banner = m.lastWinner < 0 ? 'DRAW'
+        : `${m.names?.[m.lastWinner] ?? `P${m.lastWinner + 1}`} WINS THE ROUND`;
+    } else if (m.phase === 'match') {
+      banner = m.winner < 0 ? 'DRAW'
+        : `${m.names?.[m.winner] ?? `P${m.winner + 1}`} WINS`;
+    }
+    if (banner) {
+      ctx.globalAlpha = 0.95;
+      ctx.font = '700 22px ui-monospace, Menlo, Consolas, monospace';
+      ctx.fillStyle = '#ffd166';
+      ctx.fillText(banner, cx, this.h * 0.42);
+    }
+
+    // Watching somebody else is a thing you must be able to tell you are
+    // doing, or the HUD is quietly about a machine that is not yours.
+    if (m.spectating) {
+      ctx.globalAlpha = 0.8;
+      ctx.font = '600 11px ui-monospace, Menlo, Consolas, monospace';
+      ctx.fillStyle = '#ffd166';
+      ctx.fillText(
+        `SPECTATING ${m.names?.[m.watching] ?? `P${m.watching + 1}`}  ←/→`,
+        cx, this.h - 26,
+      );
+    }
+    ctx.restore();
+  }
+
   _drawMission(m, ctx, inset = 0) {
     // Below the control legend, and all of it in one column.
     //

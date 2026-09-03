@@ -9,7 +9,7 @@ import {
   BONE, SIZE_MIN, SIZE_MAX, BONE_LENGTH_MAX, BONE_RADIUS_MAX,
   EQUIP, EQUIP_META, EQUIP_SIZE_MIN, EQUIP_SIZE_MAX, equipShape,
   SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, BONE_GAIN_MAX, BONE_LAG_MAX,
-  CIRCLE_RADIUS_DEFAULT,
+  CIRCLE_RADIUS_DEFAULT, BUDGET,
 } from '../src/core/constants.js';
 import { STANDARD_COLORS } from '../src/core/Palette.js';
 import { SHAPE, SHAPE_DEFAULT, shapeMask } from '../src/core/Shapes.js';
@@ -1228,3 +1228,52 @@ describe('a preset never shows its bare core', () => {
   });
 });
 
+
+// ============================================================
+//  What one machine may be made of.
+// ============================================================
+
+describe('the parts budget', () => {
+  it('counts what is on the machine, by kind', () => {
+    const a = PRESETS.biped.build();
+    const used = a.usage();
+    expect(used.block + used.bone + used.equip).toBe(a.parts.size);
+  });
+
+  it('is roomier than every machine that ships', () => {
+    // A limit the shipped examples already break is not a limit, it is a
+    // bug — somebody loads the LEVIATHAN and cannot add one block to it.
+    for (const name of Object.keys(PRESETS)) {
+      const used = PRESETS[name].build().usage();
+      for (const kind of ['block', 'bone', 'equip']) {
+        expect(used[kind], `${name} ${kind}`).toBeLessThan(BUDGET[kind]);
+      }
+    }
+  });
+
+  it('says there is no room once there is none', () => {
+    const a = PRESETS.core.build();
+    expect(a.hasRoomFor('equip')).toBe(true);
+    for (let i = 0; i < BUDGET.equip; i++) {
+      a.addEquipOnFace(a.core.id, i % 6, EQUIP.TANK, { size: 0.5 });
+    }
+    expect(a.usage().equip).toBe(BUDGET.equip);
+    expect(a.hasRoomFor('equip')).toBe(false);
+    // And it says WHICH wall was hit, so "take one off" has somewhere to
+    // point.
+    expect(a.blockedBy(EQUIP.TANK)).toBe('budget');
+  });
+
+  it('counts a subtree on its own, for anything about to be grafted', () => {
+    const a = PRESETS.biped.build();
+    const whole = a.usage();
+    const branch = a.usage(a.core.id);
+    expect(branch.block).toBe(whole.block);
+    const leg = a.bonesByType('leg')[0];
+    if (leg) {
+      const part = a.usage(leg.id);
+      expect(part.bone).toBeGreaterThan(0);
+      expect(part.bone).toBeLessThanOrEqual(whole.bone);
+    }
+  });
+});

@@ -1,4 +1,6 @@
 import { app, BrowserWindow, protocol, net, shell, ipcMain } from 'electron';
+import { Lan, DEFAULT_PORT } from './lan.js';
+import { SteamNet, steamNetSupport } from './steamnet.js';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openSteam } from './steam.js';
@@ -104,6 +106,89 @@ function wireBridge(steam) {
   }));
 
   ipcMain.on('steam:unlock', (event, id) => { steam.unlock(id); });
+
+  /*
+   * The socket a networked fight runs over.
+   *
+   * The renderer sends and receives objects and never sees a socket. Note
+   * that `net:send` takes only what the game itself put in the message —
+   * there is no address in it, no path, nothing the page could aim
+   * somewhere. Where it goes was settled when the game was hosted or
+   * joined, by a person, and cannot be changed by a message.
+   */
+  let lan = null;
+  const post = (from, msg) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      w.webContents.send('net:message', from, msg);
+    }
+  };
+
+  ipcMain.handle('net:host', async (event, port) => {
+    lan?.leave();
+    lan = new Lan(post);
+    return lan.host(Number(port) || DEFAULT_PORT);
+  });
+
+  ipcMain.handle('net:join', async (event, host, port) => {
+    lan?.leave();
+    lan = new Lan(post);
+    return lan.join(String(host ?? '').slice(0, 64), Number(port) || DEFAULT_PORT);
+  });
+
+  ipcMain.on('net:send', (event, msg) => { lan?.send(msg); });
+  ipcMain.on('net:leave', () => { lan?.leave(); lan = null; });
+
+  /*
+   * A second socket, to the matchmaker.
+   *
+   * Kept apart from the game one on purpose. The matchmaker is a stranger
+   * that introduces people; the game socket is the fight. Mixing them would
+   * mean the fight and the introductions could be confused for each other,
+   * and would leave the matchmaker connected for the whole match when its
+   * job ended before the first shot.
+   */
+  let mm = null;
+  ipcMain.handle('net:mm-connect', async (event, host, port) => {
+    mm?.leave();
+    mm = new Lan((from, msg) => {
+      for (const w of BrowserWindow.getAllWindows()) w.webContents.send('net:mm-message', msg);
+    });
+    return mm.join(String(host ?? '').slice(0, 128), Number(port) || 45080);
+  });
+  ipcMain.on('net:mm-send', (event, msg) => { mm?.send(msg); });
+  ipcMain.on('net:mm-close', () => { mm?.leave(); mm = null; });
+
+  /*
+   * And through Steam, where Steam is there.
+   *
+   * Steam already knows who is online and how to get a packet between two
+   * machines behind routers, so there is no queue to run and no way through
+   * the network to arrange. The messages are the same messages: a lobby is
+   * a room and the packets are the fight, exactly as over a socket.
+   */
+  let sn = null;
+  const steamPost = (from, msg) => {
+    for (const w of BrowserWindow.getAllWindows()) w.webContents.send('net:message', from, msg);
+  };
+  ipcMain.handle('net:steam-support', () => steamNetSupport(steam.client ?? null));
+  ipcMain.handle('net:steam-host', async (event, players, name, rules) => {
+    sn?.leave();
+    sn = new SteamNet(steam.client, steamPost);
+    const info = await sn.host(Number(players) || 2);
+    sn.describe(name, rules);
+    return info;
+  });
+  ipcMain.handle('net:steam-list', async () => {
+    const probe = sn ?? new SteamNet(steam.client, () => {});
+    return probe.list();
+  });
+  ipcMain.handle('net:steam-join', async (event, lobbyId) => {
+    sn?.leave();
+    sn = new SteamNet(steam.client, steamPost);
+    return sn.join(String(lobbyId ?? ''));
+  });
+  ipcMain.on('net:steam-send', (event, msg) => { sn?.send(msg); });
+  ipcMain.on('net:steam-leave', () => { sn?.leave(); sn = null; });
 }
 
 function createWindow(steam) {

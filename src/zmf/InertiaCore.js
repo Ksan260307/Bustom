@@ -110,10 +110,19 @@ export class InertiaCore {
 
   /**
    * §3.2 — directional spool control.
+   *
    * @param {THREE.Vector3} cmd  normalised local command (x=right, y=up, z=forward)
+   * @param {number} dt
+   * @param {number} jerkScale
+   * @param {boolean} strafing  true while the machine is holding a target
+   *   and giving ground. Backing away from something you are facing is not
+   *   walking backwards — it is a side-step aimed behind you, and it gets
+   *   the side-step's profile rather than the reverse gear's.
    */
-  spoolTo(cmd, dt, jerkScale = 1) {
-    const zProf = cmd.z >= 0 ? SPOOL_PROFILE.forward : SPOOL_PROFILE.backward;
+  spoolTo(cmd, dt, jerkScale = 1, strafing = false) {
+    const zProf = cmd.z >= 0
+      ? SPOOL_PROFILE.forward
+      : (strafing ? SPOOL_PROFILE.lateral : SPOOL_PROFILE.backward);
     const tz = clamp(cmd.z, -1, 1) * zProf.aMax;
     const tx = clamp(cmd.x, -1, 1) * SPOOL_PROFILE.lateral.aMax;
     const ty = clamp(cmd.y, -1, 1) * SPOOL_PROFILE.vertical.aMax;

@@ -9,8 +9,12 @@ import { makeSky, EDITOR_SKY } from '../game/Sky.js';
 import { PostFX } from '../game/PostFX.js';
 import { VoxelBlock } from '../core/VoxelBlock.js';
 import {
+  lineCells, fillRegion, smooth as smoothCells, flatten as flattenCells,
+  drill as drillThrough, solidShare, resetToShape,
+} from './Sculpt.js';
+import {
   SIZE_STEP, SIZE_MAX, EQUIP, EQUIP_META, EQUIP_THICKNESS, EQUIP_SIZE_DEFAULT,
-  FACE_NORMAL, FACE_AXIS, WEAPON_SLOTS, BONE,
+  FACE_NORMAL, FACE_AXIS, WEAPON_SLOTS, BUDGET, BUDGET_LABEL, BONE,
 } from '../core/constants.js';
 
 // ============================================================
@@ -156,7 +160,27 @@ export class EditorScene {
      * The ordinary brush measures the longest side, so every cut has hard
      * corners in it — a drilled hole or a curved recess was not available.
      */
-    this.brushRound = false;
+    /*
+     * Round by default.
+     *
+     * The square brush cuts cubes, so every carved edge had corners in it
+     * and the first thing anybody did was turn this on. A default nobody
+     * keeps is not a default.
+     */
+    this.brushRound = true;
+    /** Which way symmetry mirrors: 0 = left/right, 1 = up/down, 2 = front/back. */
+    this.sculptAxis = 0;
+    /** Where the last dab landed, so a fast drag can be joined up. */
+    this._lastDab = null;
+    /** What the current stroke has changed, for the read-out. */
+    this.strokeCells = 0;
+    /**
+     * A brush size per tool.
+     *
+     * Carving wants a big brush and painting a small one, so one shared
+     * number meant re-setting the slider every time the tool changed.
+     */
+    this.brushFor = {};
     this.hoverVoxel = null;
     this.previewMotion = false;
     /** Circle lines are a building aid, so they are on while building. */
@@ -496,6 +520,12 @@ export class EditorScene {
     this.voxCursor.visible = false;
     this.voxCursor.renderOrder = 11;
     this.scene.add(this.voxCursor);
+    // The other end of a symmetrical cut, shown before it is made.
+    this.voxMirror = this.voxCursor.clone();
+    this.voxMirror.material = this.voxCursor.material.clone();
+    this.voxMirror.material.opacity = (this.voxCursor.material.opacity ?? 1) * 0.5;
+    this.voxMirror.visible = false;
+    this.scene.add(this.voxMirror);
   }
 
   /**
@@ -2930,7 +2960,7 @@ export class EditorScene {
     const ids = this._dragRoots().filter((id) => id !== this.assembly.rootId);
     if (!ids.length) return false;
     this._restPose();
-    this.onBeforeChange('世界の軸に戻す');
+    this.onBeforeChange('傾きを戻す');
     for (const id of ids) {
       const part = this.assembly.get(id);
       const host = this.rig.nodes.get(part?.parent);
@@ -3138,12 +3168,25 @@ export class EditorScene {
       // a poor way to answer "a bit smaller than that".
       const carving = SCULPT_TOOLS.has(this.tool);
       if (e.code === 'BracketLeft') {
-        if (carving) this.brushPercent = Math.max(1, this.brushPercent - 1);
+        if (carving) this.setBrush(this.brushPercent - 1);
         else if (this.selection.length) { e.preventDefault(); this.scaleSelected(1 / 1.1); }
       }
       if (e.code === 'BracketRight') {
-        if (carving) this.brushPercent = Math.min(25, this.brushPercent + 1);
+        if (carving) this.setBrush(this.brushPercent + 1);
         else if (this.selection.length) { e.preventDefault(); this.scaleSelected(1.1); }
+      }
+      // The one-off cuts, on the keys nearest the tools they belong with.
+      if (carving && !e.ctrlKey && !e.metaKey) {
+        if (e.code === 'KeyK') { e.preventDefault(); this.sculptOnce('smooth'); }
+        if (e.code === 'KeyJ' && e.shiftKey) { e.preventDefault(); this.sculptOnce('flatten'); }
+        if (e.code === 'KeyO') { e.preventDefault(); this.sculptOnce('drill'); }
+        if (e.code === 'KeyU') { e.preventDefault(); this.repeatCut(); }
+        if (e.code === 'KeyI') {
+          e.preventDefault();
+          const idx = this.pickColorUnderCursor();
+          if (idx >= 0) this.onPickColor?.(idx);
+        }
+        if (e.code === 'Escape' && this.painting) { e.preventDefault(); this.cancelStroke(); }
       }
     };
 
@@ -3185,6 +3228,7 @@ export class EditorScene {
 
   _hover() {
     this.voxCursor.visible = false;
+    if (this.voxMirror) this.voxMirror.visible = false;
     this.ghost.visible = false;
     this.ghostTwin.visible = false;
     this.hostOutline.visible = false;
@@ -3883,6 +3927,15 @@ export class EditorScene {
 
     const cell = this._voxelAt(node, hits[0], this.tool === TOOL.ADD);
     if (!cell) return;
+    // Which way the face you are pointing at looks, in the block's own
+    // frame. A flat cut and a drilled hole both need it, and it is free
+    // here and expensive to work out later.
+    if (hits[0].face) {
+      const nrm = _v.copy(hits[0].face.normal);
+      const ax = [Math.abs(nrm.x), Math.abs(nrm.y), Math.abs(nrm.z)];
+      this._hoverAxis = ax.indexOf(Math.max(...ax));
+      this._hoverDir = [nrm.x, nrm.y, nrm.z][this._hoverAxis] >= 0 ? 1 : -1;
+    }
 
     const vox = node.part.vox;
     const n = vox.n;
@@ -3901,6 +3954,28 @@ export class EditorScene {
             : this.assembly.palette.get(this.colorIndex),
     );
     this.voxCursor.visible = true;
+
+    /*
+     * And where the mirrored cut will land.
+     *
+     * Symmetry doubles every stroke, and until now the second half of it
+     * was invisible until it had happened. Being able to see both ends of
+     * a cut before making it is the difference between symmetry being
+     * useful and it being a thing you switch off.
+     */
+    if (this.symmetry && SCULPT_TOOLS.has(this.tool) && !cell.grow) {
+      const k = ['x', 'y', 'z'][this.sculptAxis];
+      const m = { x: cell.x, y: cell.y, z: cell.z };
+      m[k] = n - 1 - cell[k];
+      if (m[k] !== cell[k]) {
+        node.mesh.localToWorld(_v.set((m.x + 0.5) / n, (m.y + 0.5) / n, (m.z + 0.5) / n));
+        this.voxMirror.position.copy(_v);
+        this.voxMirror.quaternion.copy(this.voxCursor.quaternion);
+        this.voxMirror.scale.copy(this.voxCursor.scale);
+        this.voxMirror.material.color.copy(this.voxCursor.material.color);
+        this.voxMirror.visible = true;
+      } else this.voxMirror.visible = false;
+    } else this.voxMirror.visible = false;
   }
 
   /**
@@ -3999,13 +4074,42 @@ export class EditorScene {
   beginStroke() {
     if (!SCULPT_TOOLS.has(this.tool)) return false;
     if (this.hoverVoxel) {
+      // Named after what it did and how big, so a long undo list is a list
+      // of things you recognise rather than ten rows saying "削る".
+      const mm = (this.brushMetres() * 100).toFixed(0);
       this.onBeforeChange(this.hoverVoxel.grow && this.tool === TOOL.ADD
         ? '盛る（ブロック拡張）'
-        : { carve: '削る', add: '盛る', paint: '塗る' }[this.tool]);
+        : `${{ carve: '削る', add: '盛る', paint: '塗る' }[this.tool]} ${mm}cm`);
     }
     this.painting = true;
+    this._lastDab = null;
+    this.strokeCells = 0;
     this._applySculpt();
     return true;
+  }
+
+  /**
+   * Abandon a stroke that is going wrong, without lifting the mouse.
+   *
+   * A carve is the slowest thing anybody does to get back, so being able to
+   * stop one halfway is worth a key. It is one undo step, so undoing it is
+   * exactly what stopping means.
+   */
+  cancelStroke() {
+    if (!this.painting) return false;
+    this.painting = false;
+    this._lastDab = null;
+    this.onCancelChange?.();
+    return true;
+  }
+
+  /** The brush, in metres, which is the only unit anybody can picture. */
+  brushMetres() { return (this.brushPercent / 100) * BRUSH_REFERENCE * 2; }
+
+  /** How much of the block being carved is left, 0..1. */
+  blockSolidShare() {
+    const part = this.assembly.get(this.selected);
+    return part?.vox ? solidShare(part.vox) : 1;
   }
 
   _applySculpt() {
@@ -4021,45 +4125,179 @@ export class EditorScene {
       if (!node || !this.hoverVoxel || this.hoverVoxel.grow) return;
     }
 
-    const { x, y, z } = this.hoverVoxel;
+    const here = this.hoverVoxel;
     const vox = node.part.vox;
     const r = this.brushRadiusCells(vox, node.part);
     let changed = false;
 
     const value = this.tool === TOOL.CARVE ? 0
       : this.tool === TOOL.ADD ? this.colorIndex + 1 : this.colorIndex;
-    const cut = (cx) => {
-      if (this.tool === TOOL.PAINT) return vox.paint(cx, y, z, r, this.colorIndex);
+    const dab = (c) => {
+      if (this.tool === TOOL.PAINT) {
+        return vox.paint(c.x, c.y, c.z, r, this.colorIndex, this.brushRound);
+      }
       return this.brushRound
-        ? vox.ball(cx, y, z, r, value)
-        : vox.brush(cx, y, z, r, value);
+        ? vox.ball(c.x, c.y, c.z, r, value)
+        : vox.brush(c.x, c.y, c.z, r, value);
     };
-    changed = cut(x);
-    // The same cut on the other side of the block, when symmetry is on.
-    // Carving one side of a chest and then doing it again by eye is the
-    // slowest work in the editor and the least likely to match.
-    if (this.symmetry) {
-      const mirrored = vox.n - 1 - x;
-      if (mirrored !== x && cut(mirrored)) changed = true;
+    /** The same dab reflected, when symmetry is on. */
+    const mirror = (c) => {
+      const m = { ...c };
+      const k = ['x', 'y', 'z'][this.sculptAxis];
+      m[k] = vox.n - 1 - c[k];
+      return m;
+    };
+
+    /*
+     * Every cell between the last dab and this one.
+     *
+     * A dab lands where the pointer was when the frame ran, so a quick drag
+     * used to leave a row of separate holes with the block still solid
+     * between them — and the faster you worked the worse it looked, which
+     * is exactly backwards.
+     */
+    const path = this._lastDab && !here.grow
+      ? lineCells(this._lastDab, here)
+      : [here];
+    for (const c of path) {
+      if (dab(c)) changed = true;
+      if (this.symmetry) {
+        const m = mirror(c);
+        if (m[['x', 'y', 'z'][this.sculptAxis]] !== c[['x', 'y', 'z'][this.sculptAxis]]
+          && dab(m)) changed = true;
+      }
     }
+    this._lastDab = { x: here.x, y: here.y, z: here.z };
 
     if (!changed) return;
+    this.strokeCells += path.length;
 
-    // Never let a block be carved out of existence — an invisible mount point
-    // is confusing rather than clever.
-    if (vox.solid === 0) {
-      const c = Math.floor(vox.n / 2);
-      vox.set(c, c, c, this.colorIndex + 1);
-    }
+    // Never let a block be carved out of existence — an invisible mount
+    // point is confusing rather than clever. It says so now, rather than
+    // quietly putting a cell back and leaving you wondering.
+    this._guardEmpty(vox);
 
     this.rig.refreshBlock(node.part.id);
   }
 
+  /**
+   * The cuts a brush cannot make, each in one go.
+   *
+   * All four are things people were doing by hand with a round brush and
+   * patience: filling a patch, taking the steps off a surface, squaring one
+   * off, and drilling through. Each is one undo step.
+   *
+   * @param {'fill'|'smooth'|'flatten'|'drill'} what
+   */
+  sculptOnce(what) {
+    const node = this.selected ? this.rig.nodes.get(this.selected) : null;
+    if (!node?.part.vox || !this.hoverVoxel || this.hoverVoxel.grow) return false;
+    const vox = node.part.vox;
+    const { x, y, z } = this.hoverVoxel;
+    const r = Math.max(1, this.brushRadiusCells(vox, node.part));
+    const label = {
+      fill: '塗りつぶし', smooth: 'ならす', flatten: '平らに', drill: '穴をあける',
+    }[what];
+    if (!label) return false;
+    this.onBeforeChange(label);
+
+    let changed = 0;
+    if (what === 'fill') changed = fillRegion(vox, x, y, z, this.colorIndex);
+    else if (what === 'smooth') changed = smoothCells(vox, x, y, z, r, this.colorIndex);
+    else {
+      // Along whichever way the face you clicked is pointing, which is the
+      // direction anybody drilling or flattening actually means.
+      const axis = this._hoverAxis ?? 2;
+      const dir = this._hoverDir ?? 1;
+      changed = what === 'drill'
+        ? drillThrough(vox, x, y, z, r, axis)
+        : flattenCells(vox, x, y, z, r, axis, dir);
+    }
+    if (!changed) { this.onCancelChange?.(); return false; }
+    // What was done last, so doing it again is a key rather than a trip
+    // back to the panel. Carving a row of identical holes is common.
+    this._lastCut = what;
+    this._guardEmpty(vox);
+    this.rig.refreshBlock(node.part.id);
+    this.refreshStats();
+    return true;
+  }
+
+  /** The same one-off cut again, wherever the cursor is now. */
+  repeatCut() {
+    return this._lastCut ? this.sculptOnce(this._lastCut) : false;
+  }
+
+  /**
+   * Is the brush wider than the thing it is cutting into?
+   *
+   * A brush bigger than the block takes the whole block out in one dab and
+   * leaves the single cell the guard puts back — which looks like the tool
+   * broke rather than like a brush that was too big.
+   */
+  brushTooBig() {
+    const part = this.assembly.get(this.selected);
+    if (!part?.vox) return false;
+    return this.brushMetres() > Math.min(...part.size) * 1.1;
+  }
+
+  /** Put the block back to the shape it was cut from. */
+  resetBlock() {
+    const node = this.selected ? this.rig.nodes.get(this.selected) : null;
+    if (!node?.part.vox) return false;
+    this.onBeforeChange('加工を取り消す');
+    resetToShape(node.part);
+    this.rig.refreshBlock(node.part.id);
+    this.refreshStats();
+    return true;
+  }
+
+  /** The colour under the cursor, so a shade can be matched without hunting. */
+  pickColorUnderCursor() {
+    const node = this.selected ? this.rig.nodes.get(this.selected) : null;
+    if (!node?.part.vox || !this.hoverVoxel) return -1;
+    const { x, y, z } = this.hoverVoxel;
+    const v = node.part.vox.get(x, y, z);
+    return v > 0 ? v - 1 : -1;
+  }
+
+  /** Never let a block be carved out of existence. */
+  _guardEmpty(vox) {
+    if (vox.solid > 0) return;
+    const c = Math.floor(vox.n / 2);
+    vox.set(c, c, c, this.colorIndex + 1);
+    this.onHint?.('ブロックが消えないよう、中心を1マス残しました');
+  }
+
   // ---------------------------------------------------------- click
 
+  /**
+   * The brush, in one place, so everything that changes it also says so.
+   *
+   * Resizing with the bracket keys used to move a slider nobody was looking
+   * at, on a cursor that only redrew when the mouse next moved — so the
+   * feedback for a keypress was nothing at all.
+   */
+  setBrush(percent) {
+    const v = Math.max(1, Math.min(25, Math.round(percent)));
+    if (v === this.brushPercent) return this;
+    this.brushPercent = v;
+    this.brushFor[this.tool] = v;
+    this.onBrush?.(v, this.brushMetres());
+    this._hoverVoxel();
+    return this;
+  }
+
   setTool(tool) {
+    // Carving wants a wide brush and painting a fine one. One shared number
+    // meant resetting the slider every time the tool changed.
+    if (SCULPT_TOOLS.has(tool) && this.brushFor[tool] !== undefined) {
+      this.brushPercent = this.brushFor[tool];
+      this.onBrush?.(this.brushPercent, this.brushMetres());
+    }
     this.tool = tool;
     this.voxCursor.visible = false;
+    if (this.voxMirror) this.voxMirror.visible = false;
     this.ghost.visible = false;
     this.placeTurn = 0;
     if (SCULPT_TOOLS.has(tool) && !this.selected) this.select(this.assembly.rootId);
@@ -4190,6 +4428,28 @@ export class EditorScene {
       const plan = this.pendingPlacement ?? this.proposePlacement();
       if (!plan) return null;
       if (this.tool === TOOL.STAMP && !this.stampSource) return null;
+      // Room on the machine at all, before anything about what it is.
+      // Symmetry lays two, and a stamp lays a whole subtree, so what gets
+      // asked for is what is actually about to be placed.
+      const twins = (this.symmetry && this.tool !== TOOL.STAMP) ? 2 : 1;
+      const want = this.tool === TOOL.STAMP
+        ? this.assembly.usage(this.stampSource)
+        : {
+          block: this.tool === TOOL.BLOCK ? twins : 0,
+          bone: (this.tool !== TOOL.BLOCK && this.tool !== TOOL.EQUIP) ? twins : 0,
+          equip: this.tool === TOOL.EQUIP ? twins : 0,
+          // Each block brings a whole grid with it, at whatever resolution
+          // the build is set to.
+          voxel: this.tool === TOOL.BLOCK ? twins * this.assembly.voxRes ** 3 : 0,
+        };
+      const full = this._overBudget(want);
+      if (full) {
+        this.onReject?.(
+          `${BUDGET_LABEL[full]}は${BUDGET[full]}個までです。どれかを外してください`,
+          [],
+        );
+        return null;
+      }
       if (this.tool === TOOL.EQUIP) {
         const blocked = this.assembly.blockedBy(this.equipType);
         if (blocked) {
@@ -4198,6 +4458,8 @@ export class EditorScene {
             ? `${label}は1枚しか付けられません`
             : blocked === 'rack'
               ? `武器は${WEAPON_SLOTS}枚までです。どれかを外してください`
+              : blocked === 'budget'
+                ? `${BUDGET_LABEL.equip}は${BUDGET.equip}個までです`
               : `${label}は${EQUIP_META[blocked]?.label ?? blocked}と一緒には付けられません`;
           // Which plates it means, so "take one off" has somewhere to point.
           const blame = blocked === 'rack'
@@ -4272,6 +4534,24 @@ export class EditorScene {
    * Twenty entries all reading "配置" tell you nothing about how far back
    * you have gone, which is the one thing the label is for.
    */
+  /**
+   * Which budget this placement would break, if any.
+   *
+   * Returns the kind that has no room rather than a boolean, so whoever
+   * asked can say WHICH thing there is no more room for. "Cannot place" on
+   * its own is the worst kind of no.
+   *
+   * @param {{block:number, bone:number, equip:number}} want
+   */
+  _overBudget(want) {
+    const used = this.assembly.usage();
+    for (const kind of ['block', 'bone', 'equip', 'voxel']) {
+      if (!want[kind]) continue;
+      if (used[kind] + want[kind] > BUDGET[kind]) return kind;
+    }
+    return null;
+  }
+
   _changeLabel() {
     if (this.tool === TOOL.STAMP) return 'パーツ配置';
     if (this.tool === TOOL.EQUIP) return `配置 ${EQUIP_META[this.equipType]?.label ?? ''}`;

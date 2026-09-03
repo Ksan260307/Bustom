@@ -10,7 +10,10 @@ import { PostFX } from './PostFX.js';
 import { Random, seedFromClock } from '../core/Random.js';
 import { CameraDynamics } from '../zmf/CameraDynamics.js';
 import { PRESETS } from '../core/Assembly.js';
-import { clamp01 } from '../zmf/math.js';
+import { clamp, clamp01 } from '../zmf/math.js';
+import { InputFrame, FrameInput } from '../net/InputFrame.js';
+import { hashFight } from '../net/StateHash.js';
+import { Match, ROUND } from './Match.js';
 
 // ============================================================
 //  Debug field : flat plane, one player machine, three opponents.
@@ -43,7 +46,41 @@ const HUD_INTERVAL = 1 / 30;
  * Short enough that it never feels like a wait, long enough that switching
  * targets in the middle of a fight is a decision with a price.
  */
-const LOCK_TIME = 0.35;
+/**
+ * How long acquiring a lock takes.
+ *
+ * It used to be instant, free and permanent, so with six machines on the
+ * field there was never a question about who to shoot. Paying for it makes
+ * choosing one a choice — but a third of a second was paying twice, because
+ * the lock was also picking the wrong machine.
+ */
+const LOCK_TIME = 0.22;
+
+/**
+ * How far off the middle of the screen a target may be and still be one.
+ *
+ * Sixty degrees either side: everything the player can comfortably see, and
+ * nothing they cannot.
+ */
+const LOCK_CONE = (60 * Math.PI) / 180;
+
+/**
+ * How much a metre of range counts against a degree off the crosshair.
+ *
+ * Small on purpose. Aim decides who; range only settles a tie between two
+ * machines the player is pointing at equally.
+ */
+const LOCK_RANGE_BIAS = 0.06;
+
+/**
+ * How long a target may be behind cover before acquisition gives up.
+ *
+ * Instantly was wrong: a machine crossing behind a crate for two frames
+ * cancelled the acquisition, and the player pressed the key again, and
+ * again. An established lock already survives cover — reaching for one
+ * should too.
+ */
+const LOCK_GRACE = 0.4;
 
 /**
  * The actions that take the three offers between waves.
@@ -94,6 +131,30 @@ export class FieldScene {
      * lock, the hit tests.
      */
     this.enemies = [];
+    /** The session, while a fight against other people is on. */
+    this.netplay = null;
+    /** Every seat in that fight, in the order every client agrees on. */
+    this.netSeats = [];
+    /** One frame-driven input per seat, the local one included. */
+    this.netInputs = [];
+    /** This step's presses, while a networked step is running. */
+    this.netFrames = null;
+    /** The match being fought: rounds, clock and score. */
+    this.match = null;
+    /**
+     * Seats whose player has gone and whose machine the computer now has.
+     * Keyed by seat so the takeover can be checked, not just done.
+     */
+    this.taken = new Set();
+    /**
+     * Which seat the camera is on. Normally your own; while watching, any
+     * of them.
+     */
+    this.watching = 0;
+    /** Which seat is ours. */
+    this.localSeat = 0;
+    /** The step being simulated right now, in a networked fight. */
+    this.netTick = 0;
     /** Nobody is on the field until a machine is loaded onto it. */
     this.player = null;
     /** Which of the four corners the player starts from. */
@@ -163,6 +224,218 @@ export class FieldScene {
   static get RESPAWN_DELAY() { return 2.6; }
 
   // ---------------------------------------------------------- lifecycle
+
+  /**
+   * Hand the field over to a fight between people on other machines.
+   *
+   * Everything the AI decided is decided by somebody else now, so the AI is
+   * simply not run. The rest of the field — rounds, damage, wreckage, the
+   * arena — is the same code doing the same thing, which is the point: a
+   * networked fight that ran through a second, parallel set of rules would
+   * be a second game to keep correct.
+   *
+   * Seats, not opponents. Everybody has a number every machine agrees on,
+   * including whoever is watching, and the corners are handed out by that
+   * number so all four clients put all four machines in the same place.
+   *
+   * @param session   the Session; null hands the field back to solo play.
+   * @param builds    one Assembly per seat, in seat order.
+   * @param localSeat which of them is the person at this keyboard.
+   */
+  setNetplay(session, builds = [], localSeat = 0) {
+    this.netplay = session;
+    this.netFrames = null;
+    if (!session) {
+      this.netSeats = [];
+      this.netInputs = [];
+      return this;
+    }
+
+    this.setDirector(null);
+    this.retireEnemies();
+    this.ais.length = 0;
+
+    this.netSeats = [];
+    this.netInputs = [];
+    for (let i = 0; i < builds.length; i++) {
+      if (i === localSeat) {
+        this.load(builds[i]);
+        this.netSeats.push(this.player);
+      } else {
+        const asm = builds[i].clone();
+        const bot = new Robot(asm, this.world, { name: asm.name, random: this.random });
+        this.scene.add(bot.object3D);
+        this.enemies.push(bot);
+        this.netSeats.push(bot);
+      }
+      // Every seat is driven by a frame, the local one included. That is
+      // not tidiness: a player who acted on their own raw mouse while
+      // everybody else acted on the rounded copy of it would have forked
+      // the fight on the first step.
+      this.netInputs.push(new FrameInput(this.input.profile));
+    }
+
+    // Corners by seat number, so every client agrees about who is where.
+    for (let i = 0; i < this.netSeats.length; i++) {
+      const r = this.netSeats[i];
+      const lift = Math.max(0.5, -r.rig.restLowestY);
+      r.revive(this.cornerSpawn(i, lift + 0.2));
+    }
+    this.playerCorner = localSeat;
+    this.localSeat = localSeat;
+    this.watching = localSeat;
+    this.taken.clear();
+    this.match = new Match(session.rules, this.netSeats.length);
+    this.cameraRig.snap(this.player.position, this.player.body.forward);
+    return this;
+  }
+
+  /**
+   * Hand a seat to the computer, on the step everybody agreed on.
+   *
+   * A player leaving mid-fight used to leave a machine standing still,
+   * which is a worse fight for everybody left in it — three people and a
+   * statue. The computer picks it up instead, and plays it the way it plays
+   * anything else.
+   *
+   * The step matters more than the fact. The AI draws two numbers from the
+   * fight's own stream when it is built, so building it one step earlier on
+   * one client would put every later dice roll out of step and fork the
+   * fight. It is built when the agreed step arrives, on every client.
+   */
+  _takeOver(seat) {
+    if (this.taken.has(seat)) return this;
+    const robot = this.netSeats[seat];
+    if (!robot) return this;
+    this.taken.add(seat);
+    if (robot !== this.player) {
+      // Middling everything: this is somebody's machine being kept in the
+      // fight, not a designed opponent, and a stand-in that suddenly plays
+      // like an ace is a worse surprise than one that stands still.
+      this.ais.push(new SimpleAI(robot, {
+        style: 'orbit', range: 26, aggression: 0.8, habit: 'steady',
+      }));
+    }
+    return this;
+  }
+
+  /**
+   * One step of the match: the clock, the score, and putting people back.
+   *
+   * Inside the simulated step, off the tick, using only what every client
+   * already has. A match clock fed by real seconds would give four
+   * computers four different answers about when the round ended, and the
+   * round ending is a thing they all have to agree about.
+   */
+  _matchStep(dt) {
+    const m = this.match;
+    if (!m || m.over) return this;
+    const alive = this.netSeats.map((r) => !!r?.alive);
+    const health = this.netSeats.map((r) => (r ? Math.max(0, r.hp) / Math.max(1, r.maxHp) : 0));
+    const was = m.phase;
+    const ev = m.update(alive, health);
+
+    // A round starting is the field's cue to put everybody back on a corner.
+    if (ev.started) this._resetRound();
+    // And a round ending stops the shooting without ending the fight: the
+    // machines stay where they fell so the result can be looked at.
+    if (ev.roundOver) {
+      this.lock = null;
+      this.player?.setLocked(false);
+      this.feedback.bell?.(0.5);
+    }
+    if (ev.started) this.feedback.bell?.(0.35);
+    if (was !== m.phase && m.phase === ROUND.MATCH) {
+      this.onMatchOver?.(m.status());
+    }
+    // Knocked out with the round still running: watch somebody who is not.
+    if (!this.player?.alive && this.watching === this.localSeat
+      && m.phase === ROUND.LIVE) this.watchNext(1);
+    return this;
+  }
+
+  /**
+   * Everybody back on their corner, wreckage cleared, guns reloaded.
+   *
+   * Off seat numbers again, and off nothing else: the corners have to come
+   * out the same on every client, and a corner picked from who won the last
+   * round would be a corner picked from something that could differ.
+   */
+  _resetRound() {
+    this.projectiles.clear();
+    this.debris.clear();
+    this.effects.clear();
+    this._flushRespawns();
+    for (let i = 0; i < this.netSeats.length; i++) {
+      const r = this.netSeats[i];
+      if (!r) continue;
+      const lift = Math.max(0.5, -r.rig.restLowestY);
+      r.wrecked = false;
+      r.revive(this.cornerSpawn(i + this.match.round, lift + 0.2));
+      r.rearm?.();
+    }
+    this.lock = null;
+    this.player?.setTarget(null);
+    this.player?.setLocked(false);
+    this.cameraRig.recenter();
+    const seen = this.netSeats[this.watching] ?? this.player;
+    if (seen) this.cameraRig.snap(seen.position, seen.body.forward);
+    return this;
+  }
+
+  /** Whose eyes we are looking through. Your own unless you chose otherwise. */
+  watch(seat) {
+    if (!this.netSeats.length) return this;
+    const n = this.netSeats.length;
+    this.watching = ((seat % n) + n) % n;
+    const r = this.netSeats[this.watching];
+    if (r) this.cameraRig.snap(r.position, r.body.forward);
+    return this;
+  }
+
+  /** The next one along, skipping anybody who is out of the round. */
+  watchNext(dir = 1) {
+    const n = this.netSeats.length;
+    for (let i = 1; i <= n; i++) {
+      const at = this.watching + dir * i;
+      const r = this.netSeats[((at % n) + n) % n];
+      if (r?.alive) return this.watch(at);
+    }
+    return this.watch(this.watching + dir);
+  }
+
+  /** True while the local player has no machine of their own left in it. */
+  get spectating() {
+    return !!this.netplay && (!this.player?.alive || this.watching !== this.localSeat);
+  }
+
+  /**
+   * One networked step: everybody's presses, then the fight.
+   *
+   * Called instead of `update` while a session is on. It runs zero steps
+   * while waiting on somebody and more than one while catching up, which is
+   * why it returns the count — the caller draws once either way.
+   */
+  netAdvance(dt) {
+    if (!this.netplay) return 0;
+    const mine = InputFrame.capture(this.input);
+    const ran = this.netplay.pump(mine, (frames, tick) => {
+      this.netFrames = frames;
+      this.netTick = tick;
+      this.update(dt);
+      this.netFrames = null;
+    });
+    // A fingerprint now and then, so a fight that has quietly forked says
+    // so rather than drifting into two different fights nobody can tell
+    // apart until somebody dies in only one of them.
+    const net = this.netplay.net;
+    if (net && net.shouldCheck(net.tick)) {
+      this.netplay.reportHash(net.tick, hashFight({
+        robots: this.netSeats, projectiles: this.projectiles, random: this.random,
+      }));
+    }
+    return ran;
+  }
 
   load(assembly) {
     // The wreckage borrows the rig's geometry, so it cannot outlive the rig.
@@ -446,15 +719,52 @@ export class FieldScene {
    * had drifted rather than on where the machines were. Nearest is a rule
    * anybody can predict, and the arrows are there to disagree with it.
    */
+  /**
+   * Whichever opponent the player is looking at.
+   *
+   * This used to be the NEAREST one, full stop — which meant that aiming
+   * carefully at somebody across the arena and pressing the key locked
+   * whoever happened to be closest, including one directly behind you. The
+   * lock ignored the one input the player had actually given it.
+   *
+   * Ranked by how far off the crosshair a target is, not by range. Distance
+   * only breaks ties, and only gently: between two machines the same few
+   * degrees off the middle of the screen, the near one is the one you meant.
+   *
+   * @param {boolean} cycle skip whoever is already locked
+   */
   _pickTarget(cycle = false) {
-    let best = null;
-    let bestD = Infinity;
     const current = this.lock?.robot ?? this.locking?.robot;
+    this.camera.getWorldDirection(_dir);
+
+    let best = null;
+    let bestScore = Infinity;
     for (const e of this.enemies) {
       if (!e.alive) continue;
       if (cycle && e === current) continue;
-      const d = e.position.distanceTo(this.player.position);
-      if (d < bestD) { bestD = d; best = e; }
+
+      _v.copy(e.position).sub(this.camera.position);
+      const range = _v.length();
+      if (range < 1e-3) continue;
+      const off = Math.acos(clamp(_v.dot(_dir) / range, -1, 1));
+      // Nothing behind you, ever. Past this the player cannot see it, and
+      // a lock on something off screen is a lock nobody asked for.
+      if (off > LOCK_CONE) continue;
+
+      // Degrees off the middle, plus a metre-per-degree nudge for range.
+      const score = (off * 180) / Math.PI + range * LOCK_RANGE_BIAS;
+      if (score < bestScore) { bestScore = score; best = e; }
+    }
+
+    // Nothing in front: fall back to the nearest, so the key always does
+    // something rather than nothing.
+    if (!best) {
+      let bestD = Infinity;
+      for (const e of this.enemies) {
+        if (!e.alive || (cycle && e === current)) continue;
+        const d = e.position.distanceTo(this.player.position);
+        if (d < bestD) { bestD = d; best = e; }
+      }
     }
     return best;
   }
@@ -545,10 +855,14 @@ export class FieldScene {
     // and makes changing your mind mid-fight cost the same again.
     if (this.locking) {
       const t = this.locking.robot;
-      if (!t.alive || this._blocked(this.player.position, t.position)) {
+      // Cover pauses the reach rather than cancelling it; only a target
+      // that is gone, or one that stays hidden, ends it.
+      const hidden = this._blocked(this.player.position, t.position);
+      this.locking.hidden = hidden ? (this.locking.hidden ?? 0) + dt : 0;
+      if (!t.alive || this.locking.hidden > LOCK_GRACE) {
         this.locking = null;
         this.hud.lockProgress = 0;
-      } else {
+      } else if (!hidden) {
         this.locking.t += dt;
         if (this.locking.t >= LOCK_TIME) {
           this.lock = { robot: t, aimPoint: t.position.clone() };
@@ -749,6 +1063,9 @@ export class FieldScene {
       this.debris.burst(robot, { power: mine ? 1.15 : 1 });
       this.hitPulse = Math.max(this.hitPulse, mine ? 0.9 : 0.55);
       this.feedback.boom?.(mine ? 1 : 0.75);
+      // A machine coming apart is bigger than any single hit on it, so it
+      // gets a sound of its own on top of the blast.
+      this.feedback.wreck?.(mine ? 1 : 0.7);
       // A kill is the one moment the whole loop pays out, and it used to
       // look exactly like taking a hit. It gets a ring of its own, a bigger
       // shake, and a mark where it happened.
@@ -1031,7 +1348,49 @@ export class FieldScene {
         power,
       });
       // A landing you can feel is a landing that shook something.
-      if (robot === this.player) this.hitPulse = Math.max(this.hitPulse, power * 0.45);
+      if (robot === this.player) {
+        this.hitPulse = Math.max(this.hitPulse, power * 0.45);
+        // Pitched by the machine's own weight: a five-tonne landing and a
+        // one-tonne landing are not the same note.
+        this.feedback.land?.(clamp01(robot.stats.weightClass ?? 0.5));
+      }
+    }
+  }
+
+  /**
+   * A footfall, once per foot, per stride.
+   *
+   * Taken from the gait clock the animator is already running rather than
+   * from anything new: each limb reads the cycle at its own point in it, so
+   * a foot lands when its own phase passes the bottom of the swing. Which
+   * means the sound cannot drift out of step with the legs — it is the same
+   * number that put them there.
+   *
+   * Only the machine being watched. Four machines' worth of footsteps is a
+   * stampede, and three of them are somewhere else.
+   */
+  _footfalls() {
+    const robot = (this.netplay && this.netSeats[this.watching]) || this.player;
+    const an = robot?.animator;
+    if (!an || !robot.alive) return;
+    const grounded = robot.body.env?.grounded ?? 0;
+    // Off the ground, or barely moving: no feet are being put anywhere.
+    if (grounded < 0.5 || an.gaitFreq < 0.35) { this._stepPhase = null; return; }
+
+    const limbs = robot.rig.limbs ?? [];
+    if (!this._stepPhase || this._stepPhase.length !== limbs.length) {
+      this._stepPhase = limbs.map(() => 0);
+    }
+    const weight = clamp01(robot.stats.weightClass ?? 0.5);
+    for (let i = 0; i < limbs.length; i++) {
+      // Where this leg is in the cycle, its own offset included.
+      const p = ((an.gaitPhase + (limbs[i].phaseOffset ?? 0)) % 1 + 1) % 1;
+      const was = this._stepPhase[i];
+      this._stepPhase[i] = p;
+      // The wrap is the plant. Comparing against the previous frame rather
+      // than against a threshold means a slow gait cannot fire twice and a
+      // fast one cannot be missed.
+      if (p < was) this.feedback.step?.(weight);
     }
   }
 
@@ -1052,12 +1411,60 @@ export class FieldScene {
     this.time += dt;
     const p = this.player;
 
-    if (this.input.consume('reset', 0.2)) this.respawn();
+    /*
+     * A magazine going back in, and a plate being wired to the trigger.
+     *
+     * Both are watched rather than announced: the weapon system already
+     * knows, and asking it once a step is cheaper than a callback through
+     * three objects that would have to be kept in step with respawns.
+     */
+    const act = p.weapons?.active;
+    const reloading = (act?.reloadT ?? 0) > 0;
+    if (this._wasReloading && !reloading && p.alive) this.feedback.reload?.();
+    this._wasReloading = reloading;
+    const armed = p.weapons?.activeIndex ?? 0;
+    if (this._wasArmed !== undefined && armed !== this._wasArmed) this.feedback.swap?.();
+    this._wasArmed = armed;
+
+    /*
+     * Leaving the ground, and being thrown sideways.
+     *
+     * Taken from the machine actually leaving the floor rather than from
+     * the key that asked it to: a machine that pressed jump into a ceiling
+     * did not jump, and a machine thrown off a ledge did — the sound
+     * belongs to the event, not to the request.
+     */
+    const onFloor = (p.body.env?.grounded ?? 0) > 0.5;
+    if (this._wasOnFloor && !onFloor && p.body.inertia.velocity.y > 1) {
+      this.feedback.jump?.(clamp01(p.stats.weightClass ?? 0.5));
+    }
+    this._wasOnFloor = onFloor;
+    if (this.input.dash && !this._dashWas) this.feedback.dash?.();
+    this._dashWas = !!this.input.dash;
+
+    if (this.netplay) {
+      // Out of the round, but not out of the match: the arrows move which
+      // machine you are watching, the way they move the lock while you are
+      // still in it.
+      if (!this.player?.alive || this.watching !== this.localSeat) {
+        if (this.input.consume('lockLeft', 0.2)) this.watchNext(-1);
+        if (this.input.consume('lockRight', 0.2)) this.watchNext(1);
+        // And back to your own, once there is a your-own to go back to.
+        if (this.input.consume('reset', 0.2) && this.player?.alive) this.watch(this.localSeat);
+      } else if (!this.player.alive) {
+        this.watchNext(1);
+      }
+    } else if (this.input.consume('reset', 0.2)) this.respawn();
 
     this._updateOffer();
     this._updateLock(dt);
     this._shareOutWork();
-    p.update(this.input, dt);
+    // In a networked fight even the local machine runs off its frame — see
+    // setNetplay. Everywhere else the keyboard drives it directly.
+    const own = this.netFrames
+      ? this.netInputs[this.netSeats.indexOf(p)].apply(this.netFrames[this.netSeats.indexOf(p)], dt)
+      : this.input;
+    p.update(own, dt);
 
     // Everything an opponent needs to shoot back, built once per step
     // rather than per machine.
@@ -1071,9 +1478,41 @@ export class FieldScene {
       // close, still take cover. They just do not pull the trigger.
       enemyFire: this.enemyFire,
     };
-    for (const ai of this.ais) {
-      if (!ai.robot.alive) continue;
-      ai.update(p.position, dt, this._aiContext);
+    if (this.netFrames) {
+      // Anybody who has gone, handed over on the step everybody agreed on.
+      const net = this.netplay?.net;
+      if (net) {
+        for (const who of net.goneAt(this.netTick)) {
+          this._takeOver(this.netplay.slotOf(who));
+        }
+      }
+      // Nobody is deciding anything here: every other machine is somebody
+      // else, and what they pressed already arrived.
+      for (let i = 0; i < this.netSeats.length; i++) {
+        const r = this.netSeats[i];
+        if (r === p || !r.alive) continue;
+        // A seat the computer has taken over is driven by the same AI that
+        // drives everything else, off the same stream, so every client's
+        // copy of it does the same thing.
+        if (this.taken.has(i)) continue;
+        const input = this.netInputs[i].apply(this.netFrames[i], dt);
+        r.update(input, dt);
+        r.weapons.update({
+          firing: input.isDown('fire'),
+          projectiles: this.projectiles,
+          targets: this._machines().filter((m) => m !== r),
+          aimPoint: r.aimPoint ?? null,
+        }, dt);
+      }
+      for (const ai of this.ais) {
+        if (!ai.robot.alive) continue;
+        ai.update(p.position, dt, this._aiContext);
+      }
+    } else {
+      for (const ai of this.ais) {
+        if (!ai.robot.alive) continue;
+        ai.update(p.position, dt, this._aiContext);
+      }
     }
 
     this._checkDeaths();
@@ -1117,8 +1556,13 @@ export class FieldScene {
       }
     }
 
+    // After everything that could kill somebody, and inside the same step,
+    // so the round ends on the tick the last machine actually fell.
+    if (this.netFrames) this._matchStep(dt);
+
     this._readBlows();
     this._groundDust(dt);
+    this._footfalls();
     this._landings();
     this.effects.track(this._machines());
     this.effects.update(dt);
@@ -1140,7 +1584,20 @@ export class FieldScene {
     if (!this.active) return;
     if (this.paused) { this._drawHud(0); return; }
     const dt = Math.max(1e-4, Math.min(elapsed, 1 / 15));
-    const p = this.player;
+    /*
+     * Whose fight we are looking at.
+     *
+     * Normally your own machine, and in a solo game there is nothing else
+     * it could be. In a fight between four people, watching somebody else
+     * is the difference between a game that is over for you and a game you
+     * are still in — so being knocked out puts the camera on whoever is
+     * left rather than on your own wreckage.
+     *
+     * Only the CAMERA moves. The fight is the same fight for everyone
+     * watching it, because everyone is simulating all of it anyway; there
+     * is no second copy to keep in step.
+     */
+    const p = (this.netplay && this.netSeats[this.watching]) || this.player;
 
 
     // ---- camera
@@ -1182,6 +1639,12 @@ export class FieldScene {
     this.feedback.update({
       thrust: tel.thrust, jerk: tel.jerk, speed: tel.speed,
       impact: Math.max(tel.impact, this.hitPulse, tel.stagger ?? 0), strain: tel.strain,
+      // What the three held sounds follow. All read off things the fight is
+      // already computing — a servo that had its own clock would drift away
+      // from the legs it is supposed to belong to.
+      gait: clamp01((p.animator?.gaitFreq ?? 0) / 3),
+      grounded: p.body.env?.grounded ?? 0,
+      blade: p.weapons?.bladeGlow ?? 0,
     }, dt);
 
     // ---- post uniforms: thrust direction projected to screen
@@ -1208,11 +1671,15 @@ export class FieldScene {
   }
 
   _drawHud(dt) {
-    const p = this.player;
+    // Whoever is being watched. In a solo game there is nobody else it
+    // could be; in a match it is the machine whose fight is on screen.
+    const p = (this.netplay && this.netSeats[this.watching]) || this.player;
     this.hud.draw({
       camera: this.camera,
       player: p,
-      targets: this.enemies.filter((e) => e.alive),
+      targets: this.netplay
+        ? this.netSeats.filter((r) => r !== p && r.alive)
+        : this.enemies.filter((e) => e.alive),
       lock: this.lock,
       locking: this.locking ? this.locking.t / LOCK_TIME : 0,
       threats: this._threats(),
@@ -1224,6 +1691,17 @@ export class FieldScene {
       legs: p.stats.legs,
       weapons: p.weapons.readout(),
       mission: this.director?.readout ?? null,
+      // Rounds, score and the clock. Null everywhere but a match, so the
+      // free field stays as bare as it was.
+      match: this.match ? {
+        ...this.match.status(),
+        seat: this.localSeat,
+        watching: this.watching,
+        names: this.netplay
+          ? this.netplay.order.map((id) => this.netplay.players.get(id)?.name ?? '?')
+          : [],
+        spectating: this.watching !== this.localSeat,
+      } : null,
       // The motion model's tuning numbers belong on the practice field,
       // where somebody is deliberately watching how a machine behaves.
       // In a run they are six rows of nothing where something could be.

@@ -71,6 +71,43 @@ SFX = [
     ('sci-fi-sfx.zip', 'explosion_02.ogg', 'boom.ogg'),
     ('sci-fi-sfx.zip', 'beep_01.ogg', 'lock-on.ogg'),
     ('sci-fi-sfx.zip', 'beep_03.ogg', 'lock-off.ogg'),
+
+    # ---- what makes it sound like a machine rather than a shooter.
+    #
+    # Chosen by DECODING all 175 sounds in these packs and measuring them —
+    # length, how fast they get loud, how long they stay loud, how bright
+    # they are, and whether the two ends match well enough to be held down.
+    # Picking by filename is how a sprite called `spark` turned out to be
+    # lightning; the numbers are in the comment beside each one.
+    #
+    # 0.35s, 11ms attack, dark: a short metal knock, one per footfall.
+    ('100-CC0-SFX_0.zip', 'metal_03.ogg', 'step.ogg'),
+    # 0.57s, 293ms of body, the loudest low slam in the pack.
+    ('100-CC0-SFX_0.zip', 'slam_03.ogg', 'land.ogg'),
+    # Loops cleanly (0.80), low and mechanical: joints, while they move.
+    ('sci-fi-sfx.zip', 'loop_machine_02.ogg', 'servo.ogg'),
+    # Loops (0.70) and broadband, which is what a thruster actually is.
+    ('sci-fi-sfx.zip', 'loop_ambient_weird.ogg', 'thrust.ogg'),
+    # Loops almost perfectly (0.96) and bright: an energy blade held lit.
+    ('sci-fi-sfx.zip', 'loop_machine_03.ogg', 'blade.ogg'),
+    # 130ms swell, low: a whoosh rather than a bang.
+    ('sci-fi-sfx.zip', 'teleport_01.ogg', 'dash.ogg'),
+    # 0.81s, 29ms attack, low: a whoomph as the legs let go.
+    ('sci-fi-sfx.zip', 'misc_04.ogg', 'jump.ogg'),
+    # 291ms of bright mechanical body: a ratchet.
+    ('100-CC0-SFX_0.zip', 'tools_02.ogg', 'reload.ogg'),
+    # 12ms of body: a clean click, and nothing after it.
+    ('100-CC0-SFX_0.zip', 'switch_01.ogg', 'swap.ogg'),
+    # The loudest beep in either pack, and bright with it.
+    ('sci-fi-sfx.zip', 'retro_beep_05.ogg', 'alarm.ogg'),
+    # 888ms of tail: a real gong, for the top and bottom of a round.
+    ('100-CC0-SFX_0.zip', 'gong_01.ogg', 'round.ogg'),
+    # 3ms attack, dark, loud: a machine coming apart.
+    ('25-CC0-bang-sfx.zip', 'bang_09.ogg', 'wreck.ogg'),
+    # The quiet one, because it plays on every arrow key.
+    ('sci-fi-sfx.zip', 'terminal_01.ogg', 'ui-move.ogg'),
+    ('sci-fi-sfx.zip', 'terminal_04.ogg', 'ui-select.ogg'),
+    ('sci-fi-sfx.zip', 'terminal_05.ogg', 'ui-back.ogg'),
 ]
 
 # ---- the two faces, and their licences

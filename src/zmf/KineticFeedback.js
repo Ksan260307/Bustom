@@ -32,6 +32,18 @@ export class KineticFeedback {
      */
     this.samples = new Map();
     this.sampleGain = null;
+
+    /**
+     * The sounds that are HELD rather than struck.
+     *
+     * A servo is not an event. It runs for as long as the joint is moving,
+     * and firing a one-shot every frame would be a machine gun made of
+     * whirring. So these are one looping source each, started once and left
+     * running, with only their volume moved — which is also the cheapest
+     * thing to do sixty times a second.
+     */
+    this.loops = new Map();
+    this.loopGain = null;
   }
 
   /** Must be called from inside a user gesture. */
@@ -106,6 +118,18 @@ export class KineticFeedback {
     samples.gain.value = 0.42;
     samples.connect(master);
     this.sampleGain = samples;
+
+    /*
+     * And a quieter trim for the ones that are held.
+     *
+     * A servo and a thruster are running most of the time, so they sit a
+     * long way under the things that happen — a hum at the volume of a
+     * gunshot is a hum you turn the game off over.
+     */
+    const held = ctx.createGain();
+    held.gain.value = 0.3;
+    held.connect(master);
+    this.loopGain = held;
     this.noiseBuffer = buf;
 
     this.master = master;
@@ -338,6 +362,95 @@ export class KineticFeedback {
    * @param {number} s.impact  0..1 one-shot
    * @param {number} s.strain  0..1 energy-limit proximity
    */
+  /**
+   * Turn a held sound up or down.
+   *
+   * The source is started the first time it is asked for and never stopped:
+   * starting and stopping a buffer source on every gust would click, and a
+   * silent looping source costs almost nothing.
+   *
+   * @param {string} name  which file
+   * @param {number} gain  0..1 — where it should be now
+   * @param {number} pitch playback rate, for the ones that ride a speed
+   */
+  _hold(name, gain, pitch = 1) {
+    if (!this.audible || !this.loopGain) return false;
+    const ctx = this.ctx;
+    let entry = this.loops.get(name);
+
+    if (entry === undefined) {
+      const bytes = sfxBytes(name);
+      if (!bytes) { this.loops.set(name, null); return false; }
+      this.loops.set(name, null);
+      // A copy, because decodeAudioData is entitled to detach what it is
+      // given and these bytes are wanted again if the context is rebuilt.
+      ctx.decodeAudioData(bytes.slice(0)).then((buf) => {
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.loop = true;
+        const g = ctx.createGain();
+        g.gain.value = 0;
+        src.connect(g);
+        g.connect(this.loopGain);
+        src.start();
+        this.loops.set(name, { src, gain: g });
+      }).catch(() => { this.loops.set(name, null); });
+      return false;
+    }
+    if (!entry) return false;
+
+    const t = ctx.currentTime;
+    // Ramped, not set: a held sound that jumps in volume is a click, and
+    // this is called every frame.
+    entry.gain.gain.setTargetAtTime(clamp01(gain), t, 0.05);
+    entry.src.playbackRate.setTargetAtTime(pitch, t, 0.08);
+    return true;
+  }
+
+  /** A footfall. Pitched down for a heavy machine, up for a light one. */
+  step(weight = 0.5) {
+    if (!this.audible) return;
+    this._sample('step', 0.16 + weight * 0.2, 1.25 - weight * 0.5);
+  }
+
+  /** Landing, which is a footfall with the whole machine behind it. */
+  land(weight = 0.5) {
+    if (!this.audible) return;
+    this._sample('land', 0.2 + weight * 0.34, 1.2 - weight * 0.45);
+  }
+
+  /** Leaving the ground, and being thrown sideways. */
+  jump(weight = 0.5) {
+    if (!this.audible) return;
+    this._sample('jump', 0.18 + weight * 0.2, 1.15 - weight * 0.35);
+  }
+
+  dash() {
+    if (!this.audible) return;
+    this._sample('dash', 0.3, 1.05);
+  }
+
+  /** A magazine going back in, and a plate being wired to the trigger. */
+  reload() { if (this.audible) this._sample('reload', 0.26); }
+
+  swap() { if (this.audible) this._sample('swap', 0.3); }
+
+  /** A machine coming apart. Bigger than any single hit on it. */
+  wreck(weight = 1) { if (this.audible) this._sample('wreck', 0.4 + weight * 0.25, 0.95); }
+
+  /** Something the player has to be told rather than shown. */
+  alarm(gain = 0.3) { if (this.audible) this._sample('alarm', gain); }
+
+  /** The top and bottom of a round. */
+  bell(gain = 0.45) { if (this.audible) this._sample('round', gain); }
+
+  /** The menus. Quiet: these play on every arrow key. */
+  ui(which = 'move') {
+    if (!this.audible) return;
+    const at = { move: 0.13, select: 0.22, back: 0.18 }[which] ?? 0.15;
+    this._sample(`ui-${which}`, at);
+  }
+
   update(s, dt) {
     const jerkN = clamp01(s.jerk / 300);
 
@@ -365,5 +478,19 @@ export class KineticFeedback {
 
     n.noiseFilter.frequency.setTargetAtTime(600 + jerkN * 3400, t, 0.04);
     n.noiseGain.gain.setTargetAtTime(jerkN * 0.14 + impact * 0.35, t, 0.03);
+
+    /*
+     * The three held sounds, moved rather than fired.
+     *
+     * Servos follow how hard the legs are working, the thruster follows
+     * what it is actually being asked for, and the blade is on or off. All
+     * three ride their own pitch as well, because a machine that whirrs at
+     * one note however hard it is working is a machine with a tape recorder
+     * in it.
+     */
+    const gait = clamp01(s.gait ?? 0);
+    this._hold('servo', gait * 0.16 * (s.grounded ?? 1), 0.85 + gait * 0.5);
+    this._hold('thrust', clamp01(s.thrust) * 0.3, 0.9 + clamp01(s.thrust) * 0.4);
+    this._hold('blade', clamp01(s.blade ?? 0) * 0.24, 1);
   }
 }

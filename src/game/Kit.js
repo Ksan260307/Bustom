@@ -78,10 +78,31 @@ export const KIT_SKIES = [
  */
 export const SKY_MEAN = 0.32;
 
-/** The one-shot sounds. Everything else stays synthesised. */
+/**
+ * The recorded sounds. The synthesised ones stay underneath every one of
+ * them, and are what plays when a file is missing.
+ *
+ * Every one was picked by DECODING all 175 sounds in the CC0 packs and
+ * measuring them — length, attack, body, brightness, and whether the two
+ * ends match well enough to be held down. See tools/fetch-assets.py for the
+ * numbers beside each choice. Picking by filename is how a sprite called
+ * `spark` turned out to be lightning.
+ */
 export const KIT_SFX = [
+  // What was already here: the fight.
   'fire-light', 'fire-heavy', 'hit-landed', 'hit-taken', 'boom', 'lock-on', 'lock-off',
+  // What makes it a machine rather than a shooter.
+  'step', 'land', 'jump', 'dash', 'reload', 'swap', 'wreck',
+  // Held down for as long as the thing is happening.
+  'servo', 'thrust', 'blade',
+  // Told, rather than shown.
+  'alarm', 'round',
+  // The menus.
+  'ui-move', 'ui-select', 'ui-back',
 ];
+
+/** The three that are held rather than struck. */
+export const KIT_LOOPS = new Set(['servo', 'thrust', 'blade']);
 
 /**
  * What a detail map averages out to, from the bake.

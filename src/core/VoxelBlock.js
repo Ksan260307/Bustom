@@ -457,16 +457,27 @@ export class VoxelBlock {
   }
 
   /** Recolour solid cells under the brush without changing occupancy. */
-  paint(cx, cy, cz, radius, colorIndex) {
+  /**
+   * @param round whether the brush is a ball rather than a cube.
+   *
+   * It used to be a cube always, whatever the "round brush" tick said —
+   * so carving and painting the same stroke left a round cut with a square
+   * patch of colour in it, and the tick appeared to be broken.
+   */
+  paint(cx, cy, cz, radius, colorIndex, round = false) {
     let changed = false;
     const v = colorIndex + 1;
     const r = Math.max(0, radius);
     const lo = (a) => Math.max(0, Math.ceil(a - r));
     const hi = (a) => Math.min(this.n - 1, Math.floor(a + r));
+    const rr = r * r;
     for (let z = lo(cz); z <= hi(cz); z++) {
       for (let y = lo(cy); y <= hi(cy); y++) {
         for (let x = lo(cx); x <= hi(cx); x++) {
-          if (!inBrush(x - cx, y - cy, z - cz, r)) continue;
+          if (round) {
+            const d = (x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2;
+            if (d > rr) continue;
+          } else if (!inBrush(x - cx, y - cy, z - cz, r)) continue;
           const i = this.index(x, y, z);
           if (this.data[i] && this.data[i] !== v) {
             this.data[i] = v;

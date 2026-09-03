@@ -6,6 +6,7 @@ import {
   EQUIP, EQUIP_META, EQUIP_SIZE_DEFAULT, snapEquipSize,
   CIRCLE_RADIUS_DEFAULT, snapCircleRadius,
   SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, SIZE_STEP, SIZE_MAX, WEAPON_SLOTS,
+  BUDGET,
   BONE_GAIN_MAX, BONE_LAG_MAX, BONE_MOTION_DEFAULT,
   WEAPON_BONE_DEFAULT, BONE_FOLLOW_DEFAULT, CHAIN_FALLOFF_DEFAULT,
 } from './constants.js';
@@ -410,6 +411,54 @@ export class Assembly {
   }
 
   /**
+   * How much of each budget this machine is using.
+   *
+   * Counted here rather than taken off `computeStats`, because the editor
+   * asks before every placement and the stats are a much bigger sum.
+   */
+  usage(from = this.rootId) {
+    const used = {
+      block: 0, bone: 0, equip: 0, voxel: 0,
+    };
+    this.walk((p) => {
+      if (p.kind === 'equip') used.equip++;
+      else if (p.kind === 'bone') used.bone++;
+      else {
+        used.block++;
+        // What it actually costs to rebuild, rather than how many things
+        // there are: one enormous finely-carved block is more work than
+        // twenty plain ones.
+        used.voxel += p.vox?.total ?? 0;
+      }
+    }, from);
+    return used;
+  }
+
+  /**
+   * Would the whole machine still fit at this sculpting resolution?
+   *
+   * The resolution is a property of the build, not of one block, so turning
+   * it up multiplies every block at once — which is exactly how a machine
+   * that rebuilt in half a second comes to take eight.
+   */
+  fitsAtResolution(n) {
+    let blocks = 0;
+    this.walk((p) => { if (p.vox) blocks++; });
+    return blocks * n ** 3 <= BUDGET.voxel;
+  }
+
+  /**
+   * Is there room for one more of this kind?
+   *
+   * @param {'block'|'bone'|'equip'} kind
+   */
+  hasRoomFor(kind, n = 1) {
+    const cap = BUDGET[kind];
+    if (!cap) return true;
+    return this.usage()[kind] + n <= cap;
+  }
+
+  /**
    * Why this plate cannot be fitted, as something worth showing the player.
    * Some plates argue with each other — a machine cannot both refuse to
    * leave the ground and never touch it — so saying which one is in the way
@@ -420,6 +469,7 @@ export class Assembly {
     if (!meta) return 'unknown';
     if (meta.unique && this.countEquip(type) >= 1) return 'unique';
     if (meta.category === 'weapon' && this.weaponCount() >= WEAPON_SLOTS) return 'rack';
+    if (!this.hasRoomFor('equip')) return 'budget';
     for (const other of meta.conflicts ?? []) {
       if (this.countEquip(other) > 0) return other;
     }
