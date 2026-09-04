@@ -400,6 +400,24 @@ export class Robot {
   rearm() { this.weapons.reset(); return this; }
 
   /**
+   * Plant the machine while a beam is lit.
+   *
+   * The body knows nothing about weapons and should not — it is the layer
+   * underneath them. So the robot, which owns both, tells it.
+   */
+  syncBrace(dt) {
+    const want = this.weapons?.beaming ? 1 : 0;
+    const b = this.body;
+    if (!b) return this;
+    // On quickly and off slowly: a brace that let go the instant the
+    // trigger came up would snap the nose round at exactly the moment the
+    // player is looking to see whether the shot landed.
+    const rate = want > b.bracing ? 14 : 4;
+    b.bracing += (want - b.bracing) * Math.min(1, rate * dt);
+    return this;
+  }
+
+  /**
    * Scale how much punishment this machine takes before it comes apart.
    *
    * Always measured against the durability it was BUILT with, never against
@@ -829,6 +847,7 @@ export class SimpleAI {
     /** True while this machine is actually shooting at you — the HUD reads it. */
     this.aiming = firing;
 
+    r.syncBrace?.(dt);
     r.weapons.update({
       firing,
       aimPoint: target.position,

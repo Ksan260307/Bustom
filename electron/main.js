@@ -1,9 +1,11 @@
-import { app, BrowserWindow, protocol, net, shell, ipcMain } from 'electron';
+import { app, BrowserWindow, protocol, net, shell, ipcMain, screen, dialog } from 'electron';
 import { Lan, DEFAULT_PORT } from './lan.js';
 import { SteamNet, steamNetSupport } from './steamnet.js';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openSteam } from './steam.js';
+import { loadWindowState, trackWindowState, writeCrash, crashLogPath } from './session.js';
 
 // ============================================================
 //  BLOSTOM — the desktop shell.
@@ -191,12 +193,36 @@ function wireBridge(steam) {
   ipcMain.on('net:steam-leave', () => { sn?.leave(); sn = null; });
 }
 
+/**
+ * The window's icon.
+ *
+ * Set here rather than stamped onto the executable, because stamping it
+ * means letting electron-builder edit the .exe, which means downloading a
+ * code-signing bundle full of macOS symlinks that Windows will not extract
+ * without the symlink privilege. That fails, retries three times, and
+ * fails — which is why `signAndEditExecutable` is off in package.json.
+ *
+ * This covers the window and the taskbar, which is where anybody actually
+ * looks. Steam supplies its own library art.
+ */
+function windowIcon() {
+  const file = path.join(ROOT, 'build', process.platform === 'win32' ? 'icon.ico' : 'icon.png');
+  return fs.existsSync(file) ? file : undefined;
+}
+
 function createWindow(steam) {
+  // Where it was last time, if that place still exists. The game used to
+  // open at 1600x900 in the middle of the primary screen every single
+  // launch, whatever you had done with it before.
+  const state = loadWindowState(app, screen);
+
   const win = new BrowserWindow({
-    width: 1600,
-    height: 900,
+    width: state.width,
+    height: state.height,
+    ...(state.x !== undefined ? { x: state.x, y: state.y } : {}),
     minWidth: 960,
     minHeight: 540,
+    icon: windowIcon(),
     backgroundColor: '#070a10',       // the game's own background, not white
     show: false,                      // no empty frame while it boots
     autoHideMenuBar: true,
@@ -212,7 +238,52 @@ function createWindow(steam) {
     },
   });
 
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => {
+    // Applied after the window exists rather than in the options above,
+    // because neither of these is a constructor option.
+    if (state.maximized) win.maximize();
+    if (state.fullscreen) win.setFullScreen(true);
+    win.show();
+  });
+  trackWindowState(app, win);
+
+  /*
+   * The renderer dying, in the SHIPPED game.
+   *
+   * This handler existed already — inside `smokeTest`, which only runs on a
+   * build machine. So the one situation it was written for, a player's game
+   * falling over, was the one situation it was not attached for: the window
+   * simply stopped and sat there looking fine.
+   *
+   * Now it is written down and the player is told, with the path to the
+   * file, because "it crashed" with nothing attached is not a bug report.
+   */
+  win.webContents.on('render-process-gone', (event, details) => {
+    writeCrash(app, 'render-process-gone', details);
+    const { response } = { response: dialog.showMessageBoxSync(win, {
+      type: 'error',
+      title: 'BLOSTOM',
+      message: 'ゲームが停止しました / The game stopped',
+      detail: `${details.reason} (exit ${details.exitCode})
+
+`
+        + `作業中の内容は自動保存されています。
+Your work was saved automatically.
+
+`
+        + `${crashLogPath(app)}`,
+      buttons: ['再起動 / Restart', '終了 / Quit'],
+      defaultId: 0,
+      cancelId: 1,
+    }) };
+    if (response === 0) win.reload();
+    else app.quit();
+  });
+
+  win.webContents.on('unresponsive', () => writeCrash(app, 'unresponsive', {}));
+  win.webContents.on('preload-error', (e, file, error) => writeCrash(app, 'preload-error', {
+    file, message: String(error?.message ?? error),
+  }));
 
   // The game asks for pointer lock the moment it takes you into the field.
   // Everything else a page can ask for — camera, microphone, location — this
@@ -269,9 +340,21 @@ function createWindow(steam) {
  * the press lands on one element and the release on its replacement, so the
  * browser never fires a click at all.
  */
-async function clickTitleEntry(win, index) {
+/**
+ * Click one row of the front page, by what it DOES.
+ *
+ * It used to click a row by index, and the index it used was wrong: entry 1
+ * is 「対戦」, and the check asserted that clicking it opened the workbench.
+ * Nothing runs this — there is no npm script for it — so a self-check that
+ * could never pass sat in the shipped shell unnoticed. Choosing by id
+ * cannot go stale when a row is added, which is exactly what happened.
+ */
+async function clickTitleEntry(win, wantId) {
   const at = await win.webContents.executeJavaScript(`(() => {
-    const b = document.querySelectorAll('#title .titleitem')[${index}];
+    const items = window.__blostom?.ui?.title?.items ?? [];
+    const i = items.findIndex((e) => e.id === ${JSON.stringify(wantId)});
+    if (i < 0) return null;
+    const b = document.querySelectorAll('#title .titleitem')[i];
     if (!b) return null;
     const r = b.getBoundingClientRect();
     return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
@@ -336,12 +419,21 @@ function smokeTest(win) {
       win.setFullScreen(false);
       if (!wentFull) return fail('the window will not go fullscreen');
 
+      // Let the page lay out again before anything is measured against it.
+      // Leaving fullscreen resizes the window, and the DOM catches up a
+      // frame or two later — so a rect read immediately is a rect from the
+      // wrong size, and a click at those coordinates lands on the row
+      // below. Which is exactly what it did.
+      await win.webContents.executeJavaScript(
+        'new Promise((r) => setTimeout(() => requestAnimationFrame(() => r(1)), 250))',
+      );
+
       // And it has to answer a real click. Not a dispatched event — an
       // actual press and release through the input pipeline, because the
       // ways a menu goes dead (something covering it, a button rebuilt
       // between the press and the release) are invisible to anything that
       // calls the handler directly.
-      const clicked = await clickTitleEntry(win, 1);
+      const clicked = await clickTitleEntry(win, 'edit');
       if (clicked !== 'edit') return fail(`the front page ignored a mouse click (mode: ${clicked})`);
 
       const steam = state.steam.available

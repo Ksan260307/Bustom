@@ -56,6 +56,15 @@ export function steamNetSupport(client) {
  * One machine's place in a Steam game — the room it is in, and the packets
  * going in and out of it.
  */
+/**
+ * The most Steam will carry in one reliable packet.
+ *
+ * Steam's own documented ceiling. Nothing the game sends comes close now
+ * that machines are packed, which is the point of checking rather than
+ * hoping.
+ */
+const STEAM_PACKET_MAX = 1 << 20;
+
 export class SteamNet {
   /**
    * @param client the live steamworks client.
@@ -162,6 +171,19 @@ export class SteamNet {
     const net = this.client?.networking;
     if (!net || !this.lobby) return this;
     const text = Buffer.from(JSON.stringify(msg), 'utf8');
+    /*
+     * Steam's reliable P2P packet tops out around a megabyte, and this used
+     * to hand it whatever it was given. A machine that serialised past that
+     * was simply not delivered — no error, no retry, no clue. Machines are
+     * packed now and come to about 45 KB, so this should never fire; if it
+     * ever does, it says which message and how big, which is the whole
+     * difference between a bug report and a mystery.
+     */
+    if (text.length > STEAM_PACKET_MAX) {
+      console.warn(`steam: refusing a ${text.length}B '${msg?.t}' packet (max ${STEAM_PACKET_MAX})`);
+      this.onMessage?.(this.id, { t: 'error', why: 'oversize' });
+      return this;
+    }
     const members = (this.lobby.getMembers?.() ?? []).map((m) => m);
     for (const m of members) {
       const id = String(m.steamId64 ?? m);

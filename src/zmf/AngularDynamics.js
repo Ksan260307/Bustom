@@ -104,7 +104,6 @@ export class AngularDynamics {
     _qPrev.copy(this.quaternion);
 
     const speed = p.velocity.length();
-    const speedNorm = clamp01(speed / 30);
 
     // ---------------------------------------------------- 1. free look
     // Yaw about the *world* up rather than the body up. This is the single
@@ -143,11 +142,24 @@ export class AngularDynamics {
         this.freeForward.lerp(_fwd, clamp01(dt * 6 * a)).normalize();
       }
     } else if (p.grounded > 0.5 && speed > 1.2 && !p.look.yaw && !p.look.pitch) {
-      // Grounded and coasting: settle the nose onto the travel direction.
+      /*
+       * Grounded and coasting: settle the nose onto the travel direction.
+       *
+       * Right for a machine that is running, and wrong for one holding a
+       * beam on something — a shot that is aimed for as long as it is held
+       * cannot survive its own nose being pulled toward wherever the feet
+       * happen to be going. Sidestepping while lit wandered the beam off
+       * the target and there was nothing the player could do about it.
+       *
+       * So the pull is taken out in proportion to how hard the machine is
+       * bracing. Not switched off — a brace is a resistance, and the
+       * machine still turns when it is asked to.
+       */
+      const settle = clamp01(dt * 1.8) * (1 - clamp01(p.bracing ?? 0));
       _tmp.copy(p.velocity); _tmp.y = 0;
-      if (_tmp.lengthSq() > 0.25) {
+      if (_tmp.lengthSq() > 0.25 && settle > 1e-4) {
         _tmp.normalize();
-        _fwd.lerp(_tmp, clamp01(dt * 1.8)).normalize();
+        _fwd.lerp(_tmp, settle).normalize();
         this.freeForward.copy(_fwd);
       }
     }

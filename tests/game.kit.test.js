@@ -52,11 +52,17 @@ whenFetched('everything the game asks for is actually here', () => {
     for (const name of KIT_ENVS) {
       expect(fs.existsSync(path.join(KIT, 'env', `${name}.hdr`)), name).toBe(true);
     }
-    for (const name of KIT_SFX) {
-      const file = path.join(KIT, 'sfx', `${name}.ogg`);
-      expect(fs.existsSync(file), name).toBe(true);
-      // Ogg, and actually Ogg: a renamed WAV plays on nothing.
-      expect(read(path.join('sfx', `${name}.ogg`)).subarray(0, 4).toString()).toBe('OggS');
+    for (const file of KIT_SFX) {
+      expect(fs.existsSync(path.join(KIT, 'sfx', file)), file).toBe(true);
+      // And actually the thing it claims to be. A renamed file plays on
+      // nothing, and the four bytes at the front cannot lie about it.
+      //
+      // Two formats on purpose: the packs ship Ogg, and the sounds cut out
+      // of field recordings are written as plain WAV because there is no
+      // Vorbis encoder in the toolchain and a one-second mono clip does not
+      // need one.
+      const tag = read(path.join('sfx', file)).subarray(0, 4).toString();
+      expect(tag, file).toBe(file.endsWith('.wav') ? 'RIFF' : 'OggS');
     }
   });
 

@@ -308,11 +308,12 @@ const CHECKS = [
       // the last time a sound was added, this said 7 and the check that
       // exists to notice a half-fetched kit was the thing that broke.
       ok: kit.surfaces === 8 && kit.envs === 3 && kit.sfx === a.KIT_SFX.length
-        && kit.fx === 9 && kit.space === 3 && kit.skies === 4 && kit.failed === 0,
+        && kit.fx === a.KIT_FX.length && kit.space === 3 && kit.skies === 4
+        && kit.failed === 0,
       note: kit.surfaces + '/8 surfaces, ' + kit.envs + '/3 reflected skies, '
         + kit.skies + '/4 drawn skies, ' + kit.sfx + '/' + a.KIT_SFX.length
         + ' sounds, ' + kit.fx
-        + '/9 sprites, ' + kit.space + '/3 space, ' + kit.failed + ' failed',
+        + '/' + a.KIT_FX.length + ' sprites, ' + kit.space + '/3 space, ' + kit.failed + ' failed',
     };
   })()`],
 
@@ -462,7 +463,7 @@ const CHECKS = [
     for (const n of a.KIT_SFX) fb._sample(n, 0);
     // And the three that are HELD rather than struck go through their own
     // path, which has its own way of failing.
-    for (const n of ['servo', 'thrust', 'blade']) fb._hold(n, 0);
+    for (const n of a.KIT_LOOPS) fb._hold(n, 0);
     await new Promise((r) => setTimeout(r, 1400));
     const decoded = [...fb.samples.entries()].filter(([, v]) => v && v.duration > 0);
     const held = [...fb.loops.entries()].filter(([, v]) => v && v.src);
@@ -477,9 +478,11 @@ const CHECKS = [
     fb.setMuted(true);
 
     return {
-      ok: decoded.length >= a.KIT_SFX.length - 3 && held.length === 3 && !threw,
+      ok: decoded.length >= a.KIT_SFX.length - a.KIT_LOOPS.size
+        && held.length === a.KIT_LOOPS.size && !threw,
       note: decoded.length + ' of ' + a.KIT_SFX.length + ' struck, '
-        + held.length + '/3 held (' + held.map(([k]) => k).join(',') + ')'
+        + held.length + '/' + a.KIT_LOOPS.size + ' held ('
+        + held.map(([k]) => k).join(',') + ')'
         + (threw ? ' THREW ' + threw : ''),
     };
   })()`],
@@ -759,12 +762,25 @@ const CHECKS = [
     const widthOf = () => document.querySelectorAll('.budgetrow .budgetfill')[2].style.width;
     const before = widthOf();
 
-    // Six weapon plates, where four used to be the wall.
+    // Six weapon plates, where four used to be the wall — and six DIFFERENT
+    // ones, because there is now a second rule: at most three of any one
+    // kind, so that the best loadout is not six copies of the best gun.
+    const kinds = ['gatling', 'beam', 'shot', 'missile', 'sniper', 'magnum', 'spread', 'grenade'];
     let fitted = 0;
     for (let i = 0; i < 8; i++) {
+      const kind = kinds[i];
+      if (a.assembly.blockedBy(kind)) break;
+      a.assembly.addEquipOnFace(a.assembly.core.id, i % 6, kind, { size: 0.6 });
+      fitted++;
+    }
+
+    // And the same-kind rule actually holds, on a fresh machine.
+    a.loadPreset('core', { ask: false });
+    let same = 0;
+    for (let i = 0; i < 6; i++) {
       if (a.assembly.blockedBy('gatling')) break;
       a.assembly.addEquipOnFace(a.assembly.core.id, i % 6, 'gatling', { size: 0.6 });
-      fitted++;
+      same++;
     }
     a.editor.rebuild();
     a.ui.renderStats(a.editor.stats);
@@ -776,9 +792,9 @@ const CHECKS = [
 
     a.loadPreset('biped', { ask: false });
     return {
-      ok: bars.length === 4 && fitted === 6 && grew && !soloOnBench,
+      ok: bars.length === 4 && fitted === 6 && same === 3 && grew && !soloOnBench,
       note: bars.length + ' bars (' + labels.join('/') + '), '
-        + fitted + ' weapons fitted, bar moved ' + grew
+        + fitted + ' different weapons fitted, ' + same + ' of one kind, bar moved ' + grew
         + ', solo button on the bench ' + soloOnBench,
     };
   })()`],
@@ -845,7 +861,77 @@ const CHECKS = [
     };
   })()`],
 
-  ['four machines, one fight, driven by presses instead of by the game', `(() => {
+  /*
+   * The claim replays rest on, checked against the real simulation.
+   *
+   * A fight here is a function of the seed and the presses and nothing
+   * else — that is what lockstep needed, and a replay is the same trick
+   * with the second computer taken away. This records one fight and runs
+   * the recording twice, then compares the state hashes: if anything in
+   * the simulation reads the wall clock, `Math.random`, or the frame rate,
+   * these three numbers stop agreeing.
+   */
+  ['a recorded fight replays into the same fight', `(async () => {
+    const a = window.__blostom;
+    const N = window.__blostom_net;
+    if (!N || !N.Replay) return { ok: false, note: 'the replay module is not in the build' };
+
+    const hub = new N.LoopbackHub({ latency: 2 });
+    const host = new N.Session({ transport: hub.connect('h'), isHost: true, name: 'HOST', delay: 4 });
+    const guest = new N.Session({ transport: hub.connect('g'), name: 'GUEST', delay: 4 });
+    hub.pump(40);
+    host.setReady(true);
+    guest.setReady(true);
+    hub.pump(60);
+
+    a.goTitle();
+    await a.beginVersus(host);
+    const tape = a.field.recorder;
+    if (!tape) return { ok: false, note: 'nothing was recorded' };
+
+    // Play it, with the other seat pressing things.
+    for (let i = 0; i < 240; i++) {
+      guest.pump(new N.InputFrame(i % 23 < 14 ? N.forwardAndFire : 0, (i % 9) - 4, 0), () => {});
+      a.field.netAdvance(1 / 60);
+      hub.pump(1);
+    }
+    const recorded = tape.length;
+    const live = N.hashFight({
+      robots: a.field.netSeats, projectiles: a.field.projectiles, random: a.field.random,
+    });
+    const doc = tape.toJSON();
+
+    // And now run the recording twice, from nothing.
+    const runOnce = () => {
+      a.goTitle();
+      a.setMode('field');
+      const replay = new N.Replay(doc);
+      a.field.restart(replay.seed);
+      a.field.setReplay(replay, a.field.netSeats.length
+        ? a.field.netSeats.map((r) => r.assembly)
+        : [a.mainAssembly, a.mainAssembly]);
+      let ran = 0;
+      for (let i = 0; i < 400 && !replay.done; i++) ran += a.field.netAdvance(1 / 60);
+      const h = N.hashFight({
+        robots: a.field.netSeats, projectiles: a.field.projectiles, random: a.field.random,
+      });
+      a.field.setReplay(null);
+      return { ran, h };
+    };
+
+    const first = runOnce();
+    const second = runOnce();
+    a.goTitle();
+
+    return {
+      ok: recorded > 200 && first.ran === recorded && first.h === second.h,
+      note: recorded + ' ticks recorded, replayed ' + first.ran
+        + '; two replays agree: ' + (first.h === second.h)
+        + ' (live ' + live + ', replay ' + first.h + ')',
+    };
+  })()`],
+
+  ['four machines, one fight, driven by presses instead of by the game', `(async () => {
     const a = window.__blostom;
     const N = window.__blostom_net;
     if (!N) return { ok: false, note: 'the net modules are not in the build' };
@@ -864,7 +950,7 @@ const CHECKS = [
 
     // The real field, running the real fight, off the host's seat.
     a.goTitle();
-    a.beginVersus(host);
+    await a.beginVersus(host);
     const seats = a.field.netSeats.length;
     let ran = 0;
     for (let i = 0; i < 300; i++) {
@@ -891,7 +977,7 @@ const CHECKS = [
     };
   })()`],
 
-  ['a match is rounds and a score, and a leaver is picked up by the computer', `(() => {
+  ['a match is rounds and a score, and a leaver is picked up by the computer', `(async () => {
     const a = window.__blostom;
     const N = window.__blostom_net;
     if (!N) return { ok: false, note: 'the net modules are not in the build' };
@@ -908,7 +994,7 @@ const CHECKS = [
     hub.pump(60);
 
     a.goTitle();
-    a.beginVersus(host);
+    await a.beginVersus(host);
     const m = a.field.match;
     const started = !!m && m.rules.wins === 2;
 
@@ -954,7 +1040,7 @@ const CHECKS = [
     };
   })()`],
 
-  ['knocked out with the round still running, you watch somebody who is not', `(() => {
+  ['knocked out with the round still running, you watch somebody who is not', `(async () => {
     const a = window.__blostom;
     const N = window.__blostom_net;
     if (!N) return { ok: false, note: 'the net modules are not in the build' };
@@ -973,7 +1059,7 @@ const CHECKS = [
     hub.pump(70);
 
     a.goTitle();
-    a.beginVersus(host);
+    await a.beginVersus(host);
     const seats = a.field.netSeats.length;
     const mine = a.field.localSeat;
     const run = (steps) => {
@@ -1113,6 +1199,125 @@ const CHECKS = [
         + calls.jump + ' jump, ' + calls.land + ' land; servo up to '
         + (calls.held.servo ?? 0).toFixed(3) + ', thruster '
         + (calls.held.thrust ?? 0).toFixed(3),
+    };
+  })()`],
+
+  ['the interface is set in the faces the game carries, Japanese included', `(async () => {
+    const a = window.__blostom;
+    a.goTitle();
+    await document.fonts.ready;
+
+    // Every face the stylesheet asks for, actually loaded.
+    const loaded = [...document.fonts].filter((f) => f.status === 'loaded')
+      .map((f) => f.family + ' ' + f.weight);
+    const jp = [...document.fonts].filter((f) => f.family.includes('Zen Kaku'));
+
+    /*
+     * And it can actually draw the game's own text.
+     *
+     * Not by measuring: every CJK glyph is exactly one em wide, so a string
+     * of them is the same width in every face on earth and a width check
+     * answers "yes" whatever happens. So this DRAWS the same characters
+     * twice and compares the pixels.
+     */
+    const has = document.fonts.check("64px 'Zen Kaku Gothic New'", '機体を組む加工設定');
+    const ink = (family) => {
+      const c = document.createElement('canvas');
+      c.width = 640; c.height = 96;
+      const g = c.getContext('2d');
+      g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height);
+      g.fillStyle = '#fff';
+      g.font = '64px ' + family;
+      g.textBaseline = 'top';
+      g.fillText('機体を組む加工設定', 2, 8);
+      const d = g.getImageData(0, 0, c.width, c.height).data;
+      let on = 0;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) { if (d[i] > 40) on++; sum += d[i] * (i / 4); }
+      return { on, sig: Math.round(sum % 1e7) };
+    };
+    const shipped = ink("'Zen Kaku Gothic New', serif");
+    const fallback = ink('serif');
+
+    return {
+      ok: jp.length >= 2 && has && shipped.on > 500 && shipped.sig !== fallback.sig,
+      note: loaded.length + ' faces loaded, ' + jp.length + ' Japanese; can draw '
+        + has + '; the same string inks ' + shipped.on + ' pixels in the shipped face '
+        + 'against ' + fallback.on + ' in the fallback (different shapes: '
+        + (shipped.sig !== fallback.sig) + ')',
+    };
+  })()`],
+
+  ['there is music, and it changes with where you are', `(async () => {
+    const a = window.__blostom;
+    if (!a.music) return { ok: false, note: 'no music at all' };
+    const seen = [];
+    const at = () => (a.music.current ? a.music.current.src.split('/').pop() : 'silence');
+
+    a.goTitle();
+    seen.push('title=' + at());
+    a.setMode('edit');
+    seen.push('garage=' + at());
+    a.goTitle();
+    a.setMode('field');
+    a.field.setArena('flats');
+    a._syncMusic('field');
+    seen.push('fight=' + at());
+    // Space gets its own: a piece written for a fight on a hillside is the
+    // wrong thing over somewhere with no air in it. Set AFTER entering,
+    // because entering replaces the arena with the saved one.
+    a.field.setArena('orbit');
+    a._syncMusic('field');
+    seen.push('orbit=' + at());
+    a.goTitle();
+
+    const distinct = new Set(seen.map((x) => x.split('=')[1]));
+    // And it fades rather than cutting — a track that stops dead reads as
+    // the game having crashed.
+    const before = a.music.current ? a.music.current.volume : 0;
+    a.music.play(null);
+    a.music.update(0.05);
+    const after = a.music.current ? 1 : 0;
+    return {
+      ok: distinct.size === 4 && !distinct.has('silence') && after === 0,
+      note: seen.join(' ') + ' | ' + distinct.size + ' distinct',
+    };
+  })()`],
+
+  ['every place has a sound, and space has none', `(() => {
+    const a = window.__blostom;
+    const N = a.field;
+    const fb = N.feedback;
+    fb.init();
+    fb.setMuted(false);
+    const held = {};
+    const real = fb._hold;
+    fb._hold = function h(n, g, p) { held[n] = Math.max(held[n] ?? 0, g); return real.call(this, n, g, p); };
+
+    const sample = (arena) => {
+      a.goTitle();
+      a.setMode('field');
+      // After entering: entering the field sets the saved arena.
+      a.field.setArena(arena);
+      held.air = 0; held.deep = 0;
+      for (let i = 0; i < 20; i++) { a.field.update(1 / 60); a.field.present(1 / 60); }
+      return { air: held.air ?? 0, deep: held.deep ?? 0 };
+    };
+    const flats = sample('flats');
+    const works = sample('works');
+    const orbit = sample('orbit');
+
+    fb._hold = real;
+    fb.setMuted(true);
+    a.goTitle();
+    return {
+      // A salt flat is wind; a scrapped factory is a low hum; space is
+      // nothing, because a vacuum that hums has something in it.
+      ok: flats.air > works.air && works.deep > flats.deep
+        && orbit.air === 0 && orbit.deep === 0,
+      note: 'flats air ' + flats.air.toFixed(3) + '/deep ' + flats.deep.toFixed(3)
+        + ', works air ' + works.air.toFixed(3) + '/deep ' + works.deep.toFixed(3)
+        + ', orbit ' + orbit.air.toFixed(3) + '/' + orbit.deep.toFixed(3),
     };
   })()`],
 

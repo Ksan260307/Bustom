@@ -1,6 +1,7 @@
 import { Lockstep } from './Lockstep.js';
 import { InputFrame } from './InputFrame.js';
 import { normaliseRules, DEFAULT_RULES } from '../game/Match.js';
+import { t } from '../ui/i18n.js';
 
 /** How many machines one fight will hold. */
 export const MAX_PLAYERS = 4;
@@ -169,7 +170,7 @@ export class Session {
     if (this.net.desync) {
       this._setPhase(PHASE.BROKEN);
       const d = this.net.desync;
-      this._notify(`同期がずれました（${d.tick}歩目）`);
+      this._notify(t('同期がずれました（{0}歩目）', [d.tick]));
     }
     return ran;
   }
@@ -258,7 +259,7 @@ export class Session {
         const bad = this.net?.reportHash(from, msg.k | 0, msg.v);
         if (bad) {
           this._setPhase(PHASE.BROKEN);
-          this._notify(`同期がずれました（${bad.tick}歩目）`);
+          this._notify(t('同期がずれました（{0}歩目）', [bad.tick]));
         }
         return;
       }
@@ -323,10 +324,10 @@ export class Session {
      * nobody left to watch it.
      */
     if (this.phase === PHASE.FIGHT) {
-      this._notify(`${p?.name ?? '相手'}が抜けました（CPUが引き継ぎます）`);
+      this._notify(t('{0}が抜けました（CPUが引き継ぎます）', [p?.name ?? '相手']));
       if (!this.roster.some((x) => x.here)) this._setPhase(PHASE.OVER);
     } else if (this.phase === PHASE.LOBBY && !this.roster.some((x) => x.here && x.id !== this.id)) {
-      this._notify('相手が抜けました');
+      this._notify(t('相手が抜けました'));
     }
     return this;
   }

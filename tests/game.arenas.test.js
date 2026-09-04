@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import { ARENAS, ARENA_ORDER, DEFAULT_ARENA, getArena, CELL, GAUGE } from '../src/game/Arenas.js';
-import { KITS, buildProp, variantAt } from '../src/game/Props.js';
+import { KITS, variantAt } from '../src/game/Props.js';
 import { ZMFBody } from '../src/zmf/ZMFBody.js';
 import { SyntheticInput } from '../src/game/Robot.js';
-import { Assembly, PRESETS, computeStats } from '../src/core/Assembly.js';
+import { PRESETS, computeStats } from '../src/core/Assembly.js';
 import { testWorld, stripEquips } from './helpers/dom.js';
 
 const STATS = computeStats(stripEquips(PRESETS.biped.build()));

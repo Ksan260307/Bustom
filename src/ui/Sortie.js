@@ -2,10 +2,11 @@ import { h } from './dom.js';
 import { Assembly, computeStats, PRESET_LIST, PRESETS } from '../core/Assembly.js';
 import { machinePortrait } from './PartSketch.js';
 import {
-  DIFFICULTIES, DIFFICULTY_ORDER, SOLO_STAGES, SOLO_WAVES, getDifficulty, powerAt,
+  DIFFICULTIES, DIFFICULTY_ORDER, SOLO_STAGES, SOLO_WAVES, powerAt,
 } from '../game/SoloRun.js';
 import { ARENAS } from '../game/Arenas.js';
 import { EQUIP_META } from '../core/constants.js';
+import { t } from './i18n.js';
 
 // ============================================================
 //  The last screen before a run.
@@ -66,7 +67,7 @@ export class SortieScreen {
       h('div', { class: 'sortiebox' },
         h('div', { class: 'sortiehead' },
           h('h2', {}, 'SORTIE'),
-          h('span', { class: 'sortiesub' }, 'ENTER 出撃 ・ ESC 戻る'),
+          h('span', { class: 'sortiesub' }, t('ENTER 出撃 ・ ESC 戻る')),
         ),
         h('div', { class: 'sortiebody' },
           h('div', { class: 'sortiecol' },
@@ -87,10 +88,10 @@ export class SortieScreen {
           ),
         ),
         h('div', { class: 'sortiefoot' },
-          h('button', { class: 'ghost', onClick: () => this.back() }, '← 戻る'),
-          h('button', { class: 'ghost', onClick: () => this.toEditor() }, '機体を組み直す'),
+          h('button', { class: 'ghost', onClick: () => this.back() }, t('← 戻る')),
+          h('button', { class: 'ghost', onClick: () => this.toEditor() }, t('機体を組み直す')),
           h('div', { class: 'spacer' }),
-          h('button', { class: 'primary', onClick: () => this.launch() }, '出撃 ▶'),
+          h('button', { class: 'primary', onClick: () => this.launch() }, t('出撃 ▶')),
         ),
       ),
     );
@@ -183,7 +184,7 @@ export class SortieScreen {
     // Where it came from. A run fought with the wrong machine is a run
     // wasted, and "the one on the bench" and "the one I saved as ACE" are
     // easy to confuse when neither is named on screen.
-    const SOURCE = { bench: '編集中', slot: '保存', preset: 'プリセット' };
+    const SOURCE = { bench: t('編集中'), slot: t('保存'), preset: t('プリセット') };
 
     this.machineEl.replaceChildren(
       h('div', { class: 'sortiesource' }, SOURCE[this.pickedFrom] ?? ''),
@@ -192,7 +193,7 @@ export class SortieScreen {
         ...(s.weapons.length
           ? s.weapons.map((w) => h('span', { class: 'chip' },
             EQUIP_META[w.equipType]?.label ?? w.equipType))
-          : [h('span', { class: 'chip warn' }, '武器なし')]),
+          : [h('span', { class: 'chip warn' }, t('武器なし'))]),
       ),
     );
 
@@ -209,10 +210,10 @@ export class SortieScreen {
     // Said here rather than found out in wave one. Both of these are the
     // difference between a run and a walk to the wreck.
     const problems = [];
-    if (!s.weapons.length) problems.push('武器プレートがありません。素の機関砲だけで戦うことになります。');
-    if (!s.dashBonus) problems.push('ブーストプレートがありません。ダッシュもブーストも使えません。');
-    if (!s.legs && !s.floatPlates) problems.push('脚もフロートもありません。まともに動けません。');
-    this.warnEl.replaceChildren(...problems.map((t) => h('div', {}, t)));
+    if (!s.weapons.length) problems.push(t('武器プレートがありません。素の機関砲だけで戦うことになります。'));
+    if (!s.dashBonus) problems.push(t('ブーストプレートがありません。ダッシュもブーストも使えません。'));
+    if (!s.legs && !s.floatPlates) problems.push(t('脚もフロートもありません。まともに動けません。'));
+    this.warnEl.replaceChildren(...problems.map((msg) => h('div', {}, msg)));
     this.warnEl.classList.toggle('hidden', !problems.length);
 
     this.diffEl.replaceChildren(...DIFFICULTY_ORDER.map((id, i) => {
@@ -221,14 +222,14 @@ export class SortieScreen {
         class: `sortiediff${i === this.index ? ' active' : ''}`,
         onClick: () => { this.index = i; this.app.setDifficulty(id); this.render(); },
       },
-        h('span', { class: 'dl' }, d.label),
-        h('span', { class: 'dn' }, d.blurb),
+        h('span', { class: 'dl' }, t(d.label)),
+        h('span', { class: 'dn' }, t(d.blurb)),
         // The curve, in the only two places that matter: where it starts and
         // where it ends. A setting you cannot see the effect of is a setting
         // you argue with rather than answer.
         h('span', { class: 'dv' },
           `×${powerAt(id, 1).toFixed(1)} → ×${powerAt(id, SOLO_WAVES).toFixed(1)}`,
-          h('br'), `残機 ${d.lives} ・ スコア ${d.score}倍`),
+          h('br'), t('残機 {0} ・ スコア {1}倍', [d.lives, d.score])),
       );
     }));
 
@@ -246,20 +247,20 @@ export class SortieScreen {
     );
 
     this.pickerEl.replaceChildren(
-      entry(this.app.mainAssembly.name, '編集中', this.app.mainAssembly.toJSON(), 'bench',
+      entry(this.app.mainAssembly.name, t('編集中'), this.app.mainAssembly.toJSON(), 'bench',
         this.pickedFrom === 'bench'),
-      ...slots.map((sl) => entry(sl.name, '保存', sl.json, 'slot',
+      ...slots.map((sl) => entry(sl.name, t('保存'), sl.json, 'slot',
         this.pickedFrom === 'slot' && this.picked?.name === sl.json.name)),
       ...PRESET_LIST.map((p) => {
         const json = PRESETS[p.id].build().toJSON();
-        return entry(p.label, SIZE_LABEL[p.size] ?? '', json, 'preset',
+        return entry(t(p.label), SIZE_LABEL[p.size] ?? '', json, 'preset',
           this.pickedFrom === 'preset' && this.picked?.name === json.name);
       }),
     );
 
     this.stagesEl.replaceChildren(...SOLO_STAGES.map((st, i) => h('div', { class: 'sortiestage' },
       h('span', { class: 'sn' }, String(i + 1).padStart(2, '0')),
-      h('span', { class: 'sl' }, ARENAS[st.arena].label),
+      h('span', { class: 'sl' }, t(ARENAS[st.arena].label)),
       h('span', { class: 'sw' }, `${st.waves}W`))));
     return this;
   }

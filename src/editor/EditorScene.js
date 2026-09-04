@@ -6,7 +6,6 @@ import { Assembly, computeStats, faceAnchor, alignYToFace } from '../core/Assemb
 import { Animator } from '../anim/Animator.js';
 import { SHAPE_DEFAULT, SHAPES } from '../core/Shapes.js';
 import { makeSky, EDITOR_SKY } from '../game/Sky.js';
-import { PostFX } from '../game/PostFX.js';
 import { VoxelBlock } from '../core/VoxelBlock.js';
 import {
   lineCells, fillRegion, smooth as smoothCells, flatten as flattenCells,
@@ -14,8 +13,9 @@ import {
 } from './Sculpt.js';
 import {
   SIZE_STEP, SIZE_MAX, EQUIP, EQUIP_META, EQUIP_THICKNESS, EQUIP_SIZE_DEFAULT,
-  FACE_NORMAL, FACE_AXIS, WEAPON_SLOTS, BUDGET, BUDGET_LABEL, BONE,
+  FACE_NORMAL, FACE_AXIS, WEAPON_SLOTS, WEAPON_SAME_MAX, BUDGET, BUDGET_LABEL, BONE,
 } from '../core/constants.js';
+import { t } from '../ui/i18n.js';
 
 // ============================================================
 //  Editor : place parts anywhere, drag them anywhere, carve them.
@@ -590,8 +590,8 @@ export class EditorScene {
     const arc = this.jointArc.geometry.attributes.position;
     const n = arc.count - 1;
     for (let i = 0; i <= n; i++) {
-      const t = -lim + (2 * lim * i) / n;
-      _v.set(0, r, 0).applyQuaternion(_q.setFromAxisAngle(axis, t));
+      const ang = -lim + (2 * lim * i) / n;
+      _v.set(0, r, 0).applyQuaternion(_q.setFromAxisAngle(axis, ang));
       arc.setXYZ(i, _v.x, _v.y + mid, _v.z);
     }
     arc.needsUpdate = true;
@@ -955,7 +955,7 @@ export class EditorScene {
    */
   selectBack() {
     const prev = this._selectionWas;
-    if (!prev?.length) { this.onReject?.('戻れる選択がありません'); return false; }
+    if (!prev?.length) { this.onReject?.(t('戻れる選択がありません')); return false; }
     this._selectionWas = [...this.selection];
     this.select(prev);
     return true;
@@ -1008,7 +1008,7 @@ export class EditorScene {
   selectByColor(index = null) {
     const want = index ?? this.assembly.get(this.selected)?.vox?.dominantColor?.();
     if (typeof want !== 'number' || want < 0) {
-      this.onReject?.('色を持つブロックを選んでください');
+      this.onReject?.(t('色を持つブロックを選んでください'));
       return false;
     }
     const out = [];
@@ -1030,7 +1030,7 @@ export class EditorScene {
    */
   selectTwin() {
     const ids = [...this.selection].map((id) => this._twinOf(id)).filter(Boolean);
-    if (!ids.length) { this.onReject?.('反対側のパーツが見つかりません'); return false; }
+    if (!ids.length) { this.onReject?.(t('反対側のパーツが見つかりません')); return false; }
     this.select(ids);
     return true;
   }
@@ -1038,7 +1038,7 @@ export class EditorScene {
   /** Back to whatever was put down last, wherever the view has wandered to. */
   selectLastPlaced() {
     if (!this._lastPlaced || !this.assembly.get(this._lastPlaced)) {
-      this.onReject?.('最後に置いたパーツがありません');
+      this.onReject?.(t('最後に置いたパーツがありません'));
       return false;
     }
     this.select(this._lastPlaced);
@@ -1056,7 +1056,7 @@ export class EditorScene {
   keepSelection(name) {
     const clean = String(name ?? '').trim();
     if (!clean) return false;
-    if (!this.selection.size) { this.onReject?.('保存する選択がありません'); return false; }
+    if (!this.selection.size) { this.onReject?.(t('保存する選択がありません')); return false; }
     this.selectionSets.set(clean, [...this.selection]);
     this.onSelectionSets([...this.selectionSets.keys()]);
     return true;
@@ -1064,7 +1064,7 @@ export class EditorScene {
 
   useSelection(name) {
     const ids = (this.selectionSets.get(name) ?? []).filter((id) => this.assembly.get(id));
-    if (!ids.length) { this.onReject?.('そのまとまりのパーツはもうありません'); return false; }
+    if (!ids.length) { this.onReject?.(t('そのまとまりのパーツはもうありません')); return false; }
     this.select(ids);
     return true;
   }
@@ -1098,9 +1098,9 @@ export class EditorScene {
         if (b.box.containsBox(a.box)) { buried.push(a.id); break; }
       }
     }
-    if (!buried.length) { this.onReject?.('埋まっているブロックはありません'); return []; }
+    if (!buried.length) { this.onReject?.(t('埋まっているブロックはありません')); return []; }
     this.select(buried);
-    this.onReject?.(`${buried.length} 個が他のブロックの中に完全に埋まっています`);
+    this.onReject?.(t('{0} 個が他のブロックの中に完全に埋まっています', [buried.length]));
     return buried;
   }
 
@@ -1117,9 +1117,9 @@ export class EditorScene {
       const p = this.assembly.get(id);
       return p?.mount?.face !== undefined && this.assembly.get(p.parent);
     });
-    if (!ids.length) { this.onReject?.('面につけたパーツを選んでください'); return false; }
+    if (!ids.length) { this.onReject?.(t('面につけたパーツを選んでください')); return false; }
     this._restPose();
-    this.onBeforeChange('別の面へ');
+    this.onBeforeChange(t('別の面へ'));
     for (const id of ids) {
       const part = this.assembly.get(id);
       const host = this.assembly.get(part.parent);
@@ -1275,7 +1275,7 @@ export class EditorScene {
     const doomed = [...this.selection].filter((id) => id !== this.assembly.rootId);
     if (!doomed.length) return false;
     const n = this.doomedCount();
-    this.onBeforeChange(n > doomed.length ? `削除 (${n})` : '削除');
+    this.onBeforeChange(n > doomed.length ? t('削除 ({0})', [n]) : t('削除'));
     for (const id of doomed) this.assembly.remove(id);
     this.selection.clear();
     this.rebuild();
@@ -1462,12 +1462,12 @@ export class EditorScene {
    * expressed by being where it was.
    */
   pasteHere(entries) {
-    if (!entries?.length) { this.onReject?.('コピーしたパーツがありません'); return []; }
+    if (!entries?.length) { this.onReject?.(t('コピーしたパーツがありません')); return []; }
     const hits = _ray.intersectObjects(this.rig.pickables, false);
     const host = hits.length ? this.assembly.get(hits[0].object.userData.partId) : null;
-    if (!host) { this.onReject?.('貼り付ける面にカーソルを合わせてください'); return []; }
+    if (!host) { this.onReject?.(t('貼り付ける面にカーソルを合わせてください')); return []; }
     this._restPose();
-    this.onBeforeChange('カーソルの面に貼り付け');
+    this.onBeforeChange(t('カーソルの面に貼り付け'));
     const made = [];
     for (const entry of entries) {
       const size = Array.isArray(entry.size) ? entry.size : [entry.size ?? 0.4, 0.1, entry.size ?? 0.4];
@@ -1574,7 +1574,7 @@ export class EditorScene {
     // Only the topmost selected parts move; their children come with them,
     // which keeps any structure you already built intact.
     const movers = this._dragRoots().filter((id) => id !== anchor);
-    if (movers.length) this.onBeforeChange('連結');
+    if (movers.length) this.onBeforeChange(t('連結'));
     const done = [];
     let skipped = 0;
     for (const id of movers) {
@@ -1597,7 +1597,7 @@ export class EditorScene {
       return part && id !== root && part.parent !== root;
     });
     if (!movers.length) return 0;
-    this.onBeforeChange('連結解除');
+    this.onBeforeChange(t('連結解除'));
     this._restPose();
     let disconnected = 0;
     for (const id of this._dragRoots()) {
@@ -1630,7 +1630,7 @@ export class EditorScene {
   }
 
   _beginDrag() {
-    this.onBeforeChange(this.gizmoMode === 'rotate' ? '回転' : '移動');
+    this.onBeforeChange(this.gizmoMode === 'rotate' ? t('回転') : t('移動'));
     this.rig.root.updateMatrixWorld(true);
     this._dragStart = {
       pivotInverse: this.pivot.matrixWorld.clone().invert(),
@@ -1675,11 +1675,11 @@ export class EditorScene {
     if (this.gizmoMode === 'rotate') {
       _q.setFromRotationMatrix(_delta);
       const deg = THREE.MathUtils.radToDeg(2 * Math.acos(Math.min(1, Math.abs(_q.w))));
-      this._sayHint(`回転 ${deg.toFixed(1)}°`);
+      this._sayHint(t('回転 {0}°', [deg.toFixed(1)]));
       return;
     }
     const f = (n) => (Math.abs(n) < 0.005 ? '0' : n.toFixed(2));
-    this._sayHint(`移動 ${f(_v.x)}, ${f(_v.y)}, ${f(_v.z)} ・ 計 ${moved.toFixed(2)}m`);
+    this._sayHint(t('移動 {0}, {1}, {2} ・ 計 {3}m', [f(_v.x), f(_v.y), f(_v.z), moved.toFixed(2)]));
   }
 
   /** Outlines follow, but the gizmo must not be re-attached mid-drag. */
@@ -1829,7 +1829,7 @@ export class EditorScene {
       return p && p.kind !== 'bone' && Array.isArray(p.size);
     });
     if (!ids.length || !(factor > 0)) return false;
-    this.onBeforeChange(`寸法 x${factor.toFixed(2)}`);
+    this.onBeforeChange(t('寸法 x{0}', [factor.toFixed(2)]));
     let moved = false;
     for (const id of ids) {
       const part = this.assembly.get(id);
@@ -1881,8 +1881,8 @@ export class EditorScene {
       const p = this.assembly.get(id);
       return p && p.kind === 'block' && Array.isArray(p.size) && p.mount?.face !== undefined;
     });
-    if (!ids.length) { this.onReject?.('面につけたブロックを選んでください'); return false; }
-    this.onBeforeChange('面に合わせる');
+    if (!ids.length) { this.onReject?.(t('面につけたブロックを選んでください')); return false; }
+    this.onBeforeChange(t('面に合わせる'));
     let done = 0;
     for (const id of ids) {
       const part = this.assembly.get(id);
@@ -1900,7 +1900,7 @@ export class EditorScene {
       this._reseatAfterResize(part, before);
       done++;
     }
-    if (!done) { this.onReject?.('合わせられる面がありません'); return false; }
+    if (!done) { this.onReject?.(t('合わせられる面がありません')); return false; }
     this.rebuild();
     return true;
   }
@@ -1908,11 +1908,11 @@ export class EditorScene {
   /** Give every selected bone the anchor bone's length and thickness. */
   matchBoneSelected() {
     const anchor = this.assembly.get(this.anchorId);
-    if (anchor?.kind !== 'bone') { this.onReject?.('基準にするボーンを最後に選んでください'); return false; }
+    if (anchor?.kind !== 'bone') { this.onReject?.(t('基準にするボーンを最後に選んでください')); return false; }
     const ids = this._withTwins(this.selection)
       .filter((id) => this.assembly.get(id)?.kind === 'bone' && id !== anchor.id);
-    if (!ids.length) { this.onReject?.('揃えるボーンを選んでください'); return false; }
-    this.onBeforeChange('ボーンを揃える');
+    if (!ids.length) { this.onReject?.(t('揃えるボーンを選んでください')); return false; }
+    this.onBeforeChange(t('ボーンを揃える'));
     for (const id of ids) {
       const bone = this.assembly.get(id);
       bone.length = anchor.length;
@@ -1945,7 +1945,7 @@ export class EditorScene {
       return p && p.kind !== 'bone';
     });
     if (!ids.length) return false;
-    this.onBeforeChange('寸法変更');
+    this.onBeforeChange(t('寸法変更'));
     let moved = false;
     for (const id of ids) {
       const part = this.assembly.get(id);
@@ -1968,9 +1968,9 @@ export class EditorScene {
     const id = this.selected;
     const part = this.assembly.get(id);
     if (!part || part.kind !== 'equip') return false;
-    this.onBeforeChange('装備変更');
+    this.onBeforeChange(t('装備変更'));
     if (!this.assembly.setEquipType(id, type)) {
-      this.onReject?.(`${EQUIP_META[type]?.label ?? type}は1枚しか付けられません`);
+      this.onReject?.(t('{0}は1枚しか付けられません', [EQUIP_META[type]?.label ?? type]));
       return false;
     }
     if (!this.rig.refreshEquip(id)) this.rebuild();
@@ -1983,7 +1983,7 @@ export class EditorScene {
   setEquipSizeSelected(size) {
     const ids = [...this.selection].filter((id) => this.assembly.get(id)?.kind === 'equip');
     if (!ids.length) return false;
-    this.onBeforeChange('装備の大きさ');
+    this.onBeforeChange(t('装備の大きさ'));
     let rebuilt = false;
     for (const id of ids) {
       this.assembly.setEquipSize(id, size);
@@ -2058,7 +2058,7 @@ export class EditorScene {
     const ids = [...this.selection]
       .filter((id) => { const p = this.assembly.get(id); return p?.kind === 'equip' && p.spin; });
     if (!ids.length) return false;
-    this.onBeforeChange('回転設定');
+    this.onBeforeChange(t('回転設定'));
     for (const id of ids) this.assembly.setEquipSpin(id, spin);
     this.refreshStats();
     return true;
@@ -2079,8 +2079,8 @@ export class EditorScene {
       if (!part.vox) continue;
       if (part.vox.recolor?.(from, to)) n++;
     }
-    if (!n) { this.onReject?.('その色は使われていません'); return 0; }
-    this.onBeforeChange('色の置き換え');
+    if (!n) { this.onReject?.(t('その色は使われていません')); return 0; }
+    this.onBeforeChange(t('色の置き換え'));
     this.rebuild();
     return n;
   }
@@ -2091,8 +2091,15 @@ export class EditorScene {
    * The block eyedropper brings the shape and the size across as well, which
    * is right when copying a block and wrong when all you wanted was to match
    * a shade.
+   *
+   * This was called `pickColorUnderCursor` — and so is the SCULPT
+   * eyedropper four hundred lines below, which meant this one had been
+   * unreachable since the day that was written: two methods, one name, and
+   * the later definition wins silently. The sculpt picker needs a selected
+   * block and a hovered cell, so on the assemble side the eyedropper
+   * button did nothing at all.
    */
-  pickColorUnderCursor() {
+  pickPartColorUnderCursor() {
     const hits = _ray.intersectObjects(this.rig.pickables, false);
     const part = hits.length ? this.assembly.get(hits[0].object.userData.partId) : null;
     const c = part?.vox?.dominantColor?.();
@@ -2108,7 +2115,7 @@ export class EditorScene {
     let changed = false;
     for (const p of this.selectedParts()) {
       if (p.kind !== 'equip') continue;
-      if (!changed) this.onBeforeChange('弾の色');
+      if (!changed) this.onBeforeChange(t('弾の色'));
       if (this.assembly.setBulletColor(p.id, hex)) {
         this.rig.refreshEquip(p.id);
         changed = true;
@@ -2127,7 +2134,7 @@ export class EditorScene {
     const id = this.selected;
     const bone = this.assembly.get(id);
     if (!bone || bone.kind !== 'bone') return false;
-    this.onBeforeChange('ボーン追加');
+    this.onBeforeChange(t('ボーン追加'));
     const made = this.assembly.addBoneOnTip(id, opts.boneType ?? bone.boneType, {
       ...this.boneOpts, ...opts,
     });
@@ -2138,17 +2145,17 @@ export class EditorScene {
   }
 
   /**
-   * Slide a bone's child along the shaft. `t` is 0..1 of the length, so the
-   * caller can say "the tip" or "the root" without knowing the number —
+   * Slide a bone's child along the shaft. `along` is 0..1 of the length, so
+   * the caller can say "the tip" or "the root" without knowing the number —
    * which half a child rides on is otherwise a fiddly drag.
    */
-  slideAlongBone(t) {
+  slideAlongBone(along) {
     const id = this.selected;
     const part = this.assembly.get(id);
     const parent = part?.parent ? this.assembly.get(part.parent) : null;
     if (!part || parent?.kind !== 'bone') return false;
     const pos = [...part.mount.pos];
-    pos[1] = parent.length * Math.min(1, Math.max(0, t));
+    pos[1] = parent.length * Math.min(1, Math.max(0, along));
     return this.setMountSelected({ pos });
   }
 
@@ -2156,7 +2163,7 @@ export class EditorScene {
   setBoneShapeSelected(shape) {
     const ids = [...this.selection].filter((id) => this.assembly.get(id)?.kind === 'bone');
     if (!ids.length) return false;
-    this.onBeforeChange('ボーン寸法');
+    this.onBeforeChange(t('ボーン寸法'));
     for (const id of ids) this.assembly.setBoneShape(id, shape);
     this.rebuild();
     return true;
@@ -2182,12 +2189,12 @@ export class EditorScene {
     if (carved.length && !force) {
       this.onConfirm('reshape', {
         count: carved.length,
-        message: `${carved.length}個のブロックの加工が消えます。形を変えますか？`,
+        message: t('{0}個のブロックの加工が消えます。形を変えますか？', [carved.length]),
         accept: () => this.setBlockShapeSelected(shape, { force: true }),
       });
       return false;
     }
-    this.onBeforeChange('形状');
+    this.onBeforeChange(t('形状'));
     let changed = false;
     for (const id of ids) if (this.assembly.setBlockShape(id, shape)) changed = true;
     if (!changed) return false;
@@ -2200,7 +2207,7 @@ export class EditorScene {
   setEquipRingSelected(radius) {
     const id = this.selected;
     if (!id) return false;
-    this.onBeforeChange('サークル半径');
+    this.onBeforeChange(t('サークル半径'));
     if (!this.assembly.setEquipRing(id, radius)) return false;
     // Which parts ride the ring is decided when the rig is built, so the
     // scene graph has to be rebuilt for a new radius to mean anything.
@@ -2235,7 +2242,7 @@ export class EditorScene {
   setEquipRingPlaneSelected(plane) {
     const id = this.selected;
     if (!id) return false;
-    this.onBeforeChange('サークルの向き');
+    this.onBeforeChange(t('サークルの向き'));
     if (!this.assembly.setEquipRingPlane(id, plane)) return false;
     // Same reason as the radius: turning the ring re-decides who is on it.
     this.rebuild();
@@ -2317,7 +2324,7 @@ export class EditorScene {
     const ids = this._withTwins(this.selection)
       .filter((id) => this.assembly.get(id)?.kind === 'bone');
     if (!ids.length) return false;
-    this.onBeforeChange('ボーンの動き');
+    this.onBeforeChange(t('ボーンの動き'));
     for (const id of ids) this.assembly.setBoneShape(id, patch);
     this.refreshStats();
     return true;
@@ -2328,7 +2335,7 @@ export class EditorScene {
     const ids = this._withTwins(this.selection)
       .filter((id) => this.assembly.get(id)?.boneType === BONE.WEAPON);
     if (!ids.length) return false;
-    this.onBeforeChange('武器の構え');
+    this.onBeforeChange(t('武器の構え'));
     for (const id of ids) this.assembly.setWeaponMotion(id, patch);
     this.refreshStats();
     return true;
@@ -2344,16 +2351,16 @@ export class EditorScene {
   copyBoneSettingsToTwin() {
     const from = this.assembly.get(this.anchorId);
     if (from?.kind !== 'bone') {
-      this.onReject?.('もとにするボーンを最後に選んでください');
+      this.onReject?.(t('もとにするボーンを最後に選んでください'));
       return false;
     }
     const twinId = this._twinOf(from.id);
     const twin = twinId ? this.assembly.get(twinId) : null;
     if (!twin || twin.kind !== 'bone') {
-      this.onReject?.('反対側のボーンが見つかりません');
+      this.onReject?.(t('反対側のボーンが見つかりません'));
       return false;
     }
-    this.onBeforeChange('反対側へコピー');
+    this.onBeforeChange(t('反対側へコピー'));
     this.assembly.setBoneShape(twin.id, {
       limit: from.limit,
       limitBack: from.limitBack,
@@ -2392,7 +2399,7 @@ export class EditorScene {
       }
       for (const child of part.children) walk(child.id ?? child);
     };
-    this.onBeforeChange('先まとめて効き');
+    this.onBeforeChange(t('先まとめて効き'));
     for (const id of this._withTwins(roots)) walk(id);
     this.refreshStats();
     return true;
@@ -2401,7 +2408,7 @@ export class EditorScene {
   setBoneMotionSelected(motion) {
     const ids = [...this.selection].filter((id) => this.assembly.get(id)?.kind === 'bone');
     if (!ids.length) return false;
-    this.onBeforeChange('関節の効き');
+    this.onBeforeChange(t('関節の効き'));
     for (const id of ids) this.assembly.setBoneMotion(id, motion);
     this.rebuild();
     return true;
@@ -2410,7 +2417,7 @@ export class EditorScene {
   setMountSelected({ pos, rot }) {
     const id = this.selected;
     if (!id) return false;
-    this.onBeforeChange('位置変更');
+    this.onBeforeChange(t('位置変更'));
     if (!this.assembly.setMount(id, { pos, rot })) return false;
     // A typed position is a finished move, so a circle can settle who is on
     // it straight away.
@@ -2427,18 +2434,18 @@ export class EditorScene {
    * builder can see perfectly well by looking at the machine.
    */
   beginReparent() {
-    if (!this.selected) { this.onReject?.('つなぎ替えるパーツを選んでください'); return false; }
+    if (!this.selected) { this.onReject?.(t('つなぎ替えるパーツを選んでください')); return false; }
     this._awaitParent = this.selected;
     // A toast, not the placement hint: the hint is rewritten on every
     // pointer move, so a prompt left there would last a single frame.
-    this.onReject?.('新しい連結先をクリック（Escで中止）');
+    this.onReject?.(t('新しい連結先をクリック（Escで中止）'));
     return true;
   }
 
   cancelReparent() {
     if (!this._awaitParent) return false;
     this._awaitParent = null;
-    this.onReject?.('つなぎ替えを中止しました');
+    this.onReject?.(t('つなぎ替えを中止しました'));
     return true;
   }
 
@@ -2448,10 +2455,10 @@ export class EditorScene {
     this._awaitParent = null;
     const hits = _ray.intersectObjects(this.rig.pickables, false);
     const host = hits.length ? hits[0].object.userData.partId : null;
-    if (!host || host === child) { this.onReject?.('つなぎ替えを中止しました'); return false; }
+    if (!host || host === child) { this.onReject?.(t('つなぎ替えを中止しました')); return false; }
     this.select(child);
     if (!this.reparentSelected(host)) {
-      this.onReject?.('そこにはつなげられません');
+      this.onReject?.(t('そこにはつなげられません'));
       return false;
     }
     return true;
@@ -2461,7 +2468,7 @@ export class EditorScene {
     const id = this.selected;
     if (!id) return false;
     if (!this.assembly.canReparent(id, parentId)) return false;
-    this.onBeforeChange('連結先変更');
+    this.onBeforeChange(t('連結先変更'));
     this._restPose();
     if (!this._reparentKeepingWorld(id, parentId)) return false;
     this.rebuild();
@@ -2487,9 +2494,9 @@ export class EditorScene {
    */
   flipSelected(axis = 'x') {
     const ids = this._dragRoots();
-    if (!ids.length) { this.onReject?.('反転するパーツを選んでください'); return false; }
+    if (!ids.length) { this.onReject?.(t('反転するパーツを選んでください')); return false; }
     this._restPose();
-    this.onBeforeChange('その場で反転');
+    this.onBeforeChange(t('その場で反転'));
     const at = { x: 0, y: 1, z: 2 }[axis] ?? 0;
     // A half turn about the axis at right angles to the one being flipped
     // gives the same result as a reflection for anything with a plane of
@@ -2524,11 +2531,11 @@ export class EditorScene {
       if (plan) plans.push([part, plan]);
     }
     if (!plans.length) {
-      this.onReject?.('中心線の上にあるパーツは、反転しても同じ場所です');
+      this.onReject?.(t('中心線の上にあるパーツは、反転しても同じ場所です'));
       return [];
     }
 
-    this.onBeforeChange('左右反転コピー');
+    this.onBeforeChange(t('左右反転コピー'));
     const made = [];
     for (const [part, plan] of plans) {
       const twin = this._mirror(part, plan);
@@ -2562,7 +2569,7 @@ export class EditorScene {
       .map((id) => this.assembly.get(id))
       .filter((p) => p?.mount);
     if (parts.length < 2) {
-      this.onReject?.('2つ以上えらんでください');
+      this.onReject?.(t('2つ以上えらんでください'));
       return false;
     }
     // Only among parts that share a parent: a coordinate means a different
@@ -2575,7 +2582,7 @@ export class EditorScene {
     }
 
     const TITLES = {
-      align: 'で揃える', spread: 'に均等', min: 'の手前で揃える', max: 'の奥で揃える',
+      align: t('で揃える'), spread: t('に均等'), min: t('の手前で揃える'), max: t('の奥で揃える'),
     };
     this.onBeforeChange(`${axis.toUpperCase()} ${TITLES[how] ?? TITLES.align}`);
     let touched = 0;
@@ -2587,7 +2594,7 @@ export class EditorScene {
         // for tidying a row and wrong for building a flush edge — for that
         // the outermost one is the one everything else has to meet.
         const to = how === 'align'
-          ? group.reduce((t, p) => t + p.mount.pos[at], 0) / group.length
+          ? group.reduce((sum, q) => sum + q.mount.pos[at], 0) / group.length
           : how === 'min' ? group[0].mount.pos[at] : group[group.length - 1].mount.pos[at];
         for (const p of group) { p.mount.pos[at] = to; touched++; }
       } else {
@@ -2598,7 +2605,7 @@ export class EditorScene {
       }
     }
     if (!touched) {
-      this.onReject?.('同じパーツにつながっているもの同士でしか揃えられません');
+      this.onReject?.(t('同じパーツにつながっているもの同士でしか揃えられません'));
       return false;
     }
     this.rebuild();
@@ -2617,7 +2624,7 @@ export class EditorScene {
     if (!roots.length || n < 1) return [];
     const at = { x: 0, y: 1, z: 2 }[axis] ?? 0;
     this._restPose();
-    this.onBeforeChange(`${n}個ならべる`);
+    this.onBeforeChange(t('{0}個ならべる', [n]));
 
     const made = [];
     for (const id of roots) {
@@ -2666,7 +2673,7 @@ export class EditorScene {
   centreBetween() {
     const ids = this._dragRoots();
     if (ids.length < 3) {
-      this.onReject?.('端の2つと、間に置くものを選んでください');
+      this.onReject?.(t('端の2つと、間に置くものを選んでください'));
       return false;
     }
     // The first two picked are the ends; everything else goes between them.
@@ -2674,11 +2681,11 @@ export class EditorScene {
     const a = this.assembly.get(aId);
     const b = this.assembly.get(bId);
     if (!a?.mount || !b?.mount || a.parent !== b.parent) {
-      this.onReject?.('端の2つは同じパーツにつながっている必要があります');
+      this.onReject?.(t('端の2つは同じパーツにつながっている必要があります'));
       return false;
     }
     this._restPose();
-    this.onBeforeChange('あいだに置く');
+    this.onBeforeChange(t('あいだに置く'));
     let moved = 0;
     for (const id of rest) {
       const p = this.assembly.get(id);
@@ -2687,7 +2694,7 @@ export class EditorScene {
       moved++;
     }
     if (!moved) {
-      this.onReject?.('間に置くものが端と同じパーツにつながっていません');
+      this.onReject?.(t('間に置くものが端と同じパーツにつながっていません'));
       return false;
     }
     this.rebuild();
@@ -2700,7 +2707,7 @@ export class EditorScene {
     const parent = this.assembly.get(parentId);
     if (!parent) return [];
     this._restPose();
-    this.onBeforeChange('肢を作る');
+    this.onBeforeChange(t('肢を作る'));
 
     const made = [];
     const opts = { ...this.boneOpts };
@@ -2761,7 +2768,7 @@ export class EditorScene {
       if (!this._twinOf(id)) odd.push(id);
     }
     this.select(odd);
-    if (!odd.length) this.onReject?.('左右で食い違っているパーツはありません');
+    if (!odd.length) this.onReject?.(t('左右で食い違っているパーツはありません'));
     return odd;
   }
 
@@ -2778,7 +2785,7 @@ export class EditorScene {
     const at = { x: 0, y: 1, z: 2 }[axis] ?? 1;
     const spin = new THREE.Vector3(at === 0 ? 1 : 0, at === 1 ? 1 : 0, at === 2 ? 1 : 0);
     this._restPose();
-    this.onBeforeChange(`円周に${count}個`);
+    this.onBeforeChange(t('円周に{0}個', [count]));
 
     const made = [];
     for (const id of roots) {
@@ -2813,7 +2820,7 @@ export class EditorScene {
     const roots = this._dragRoots().filter((id) => id !== this.assembly.rootId);
     if (!roots.length) return [];
     this._restPose();
-    this.onBeforeChange('複製（数値）');
+    this.onBeforeChange(t('複製（数値）'));
     const made = [];
     for (const id of roots) {
       const part = this.assembly.get(id);
@@ -2844,11 +2851,11 @@ export class EditorScene {
    */
   matchRotationSelected() {
     const anchor = this.assembly.get(this.anchorId);
-    if (!anchor?.mount) { this.onReject?.('基準にするパーツを最後に選んでください'); return false; }
+    if (!anchor?.mount) { this.onReject?.(t('基準にするパーツを最後に選んでください')); return false; }
     const ids = this._dragRoots().filter((id) => id !== anchor.id);
-    if (!ids.length) { this.onReject?.('揃えるパーツを選んでください'); return false; }
+    if (!ids.length) { this.onReject?.(t('揃えるパーツを選んでください')); return false; }
     this._restPose();
-    this.onBeforeChange('傾きを揃える');
+    this.onBeforeChange(t('傾きを揃える'));
     for (const id of ids) {
       const part = this.assembly.get(id);
       if (part?.mount) part.mount.rot = [...anchor.mount.rot];
@@ -2866,12 +2873,12 @@ export class EditorScene {
    */
   matchLookSelected() {
     const anchor = this.assembly.get(this.anchorId);
-    if (anchor?.kind !== 'block') { this.onReject?.('基準にするブロックを最後に選んでください'); return false; }
+    if (anchor?.kind !== 'block') { this.onReject?.(t('基準にするブロックを最後に選んでください')); return false; }
     const ids = this._withTwins(this.selection)
       .filter((id) => this.assembly.get(id)?.kind === 'block' && id !== anchor.id);
-    if (!ids.length) { this.onReject?.('揃えるブロックを選んでください'); return false; }
+    if (!ids.length) { this.onReject?.(t('揃えるブロックを選んでください')); return false; }
     const colour = anchor.vox?.dominantColor?.();
-    this.onBeforeChange('見た目を揃える');
+    this.onBeforeChange(t('見た目を揃える'));
     for (const id of ids) {
       const part = this.assembly.get(id);
       this.assembly.setBlockShape(id, anchor.shape ?? SHAPE_DEFAULT);
@@ -2920,7 +2927,7 @@ export class EditorScene {
     const ids = this._dragRoots().filter((id) => id !== this.assembly.rootId);
     if (!ids.length) return false;
     this._restPose();
-    this.onBeforeChange('中心へ');
+    this.onBeforeChange(t('中心へ'));
     this.rig.root.updateMatrixWorld(true);
     for (const id of ids) {
       const part = this.assembly.get(id);
@@ -2960,7 +2967,7 @@ export class EditorScene {
     const ids = this._dragRoots().filter((id) => id !== this.assembly.rootId);
     if (!ids.length) return false;
     this._restPose();
-    this.onBeforeChange('傾きを戻す');
+    this.onBeforeChange(t('傾きを戻す'));
     for (const id of ids) {
       const part = this.assembly.get(id);
       const host = this.rig.nodes.get(part?.parent);
@@ -2982,7 +2989,7 @@ export class EditorScene {
    */
   repeatLast() {
     const last = this._lastAction;
-    if (!last) { this.onReject?.('繰り返せる操作がありません'); return false; }
+    if (!last) { this.onReject?.(t('繰り返せる操作がありません')); return false; }
     last();
     return true;
   }
@@ -2999,7 +3006,7 @@ export class EditorScene {
     if (!clean) return 0;
     const ids = [...this.selection].filter((id) => this.assembly.get(id));
     if (!ids.length) return 0;
-    this.onBeforeChange('名前を付ける');
+    this.onBeforeChange(t('名前を付ける'));
     ids.forEach((id, i) => {
       const part = this.assembly.get(id);
       part.label = ids.length > 1 ? `${clean} ${i + 1}` : clean;
@@ -3017,7 +3024,7 @@ export class EditorScene {
     this._remember(() => this.duplicateSelected(axis));
     const parts = this.selectedParts().filter((p) => p.id !== this.assembly.rootId);
     if (!parts.length) return false;
-    this.onBeforeChange('複製');
+    this.onBeforeChange(t('複製'));
     const made = [];
     for (const p of parts) {
       // Clear of the original along the axis asked for, by the original's
@@ -3307,7 +3314,7 @@ export class EditorScene {
         node.group.updateMatrixWorld(true);
         _v.copy(hit.point);
         node.group.worldToLocal(_v);
-        const t = this._snapValue(THREE.MathUtils.clamp(_v.y, 0, parent.length));
+        const up = this._snapValue(THREE.MathUtils.clamp(_v.y, 0, parent.length));
 
         if (forEquip) {
           // A sticker on a rod sits on the SURFACE of the rod, facing out —
@@ -3318,7 +3325,7 @@ export class EditorScene {
           _q.setFromUnitVectors(UP_VEC, _v.set(nx, 0, nz));
           return {
             parentId,
-            mount: { pos: [nx * parent.radius, t, nz * parent.radius], rot: _q.toArray() },
+            mount: { pos: [nx * parent.radius, up, nz * parent.radius], rot: _q.toArray() },
             size,
           };
         }
@@ -3326,7 +3333,7 @@ export class EditorScene {
         // thread it onto the shaft at the height that was clicked
         return {
           parentId,
-          mount: { pos: [0, t, 0], rot: forBone ? alignYToFace(2) : [0, 0, 0, 1] },
+          mount: { pos: [0, up, 0], rot: forBone ? alignYToFace(2) : [0, 0, 0, 1] },
           size,
         };
       }
@@ -3392,7 +3399,7 @@ export class EditorScene {
         const hi = _box2.max[k] - (a === 1 ? this.groundOffset : 0);
         const mid = (lo + hi) / 2;
         for (const [want, label] of [
-          [lo - half[a], '面'], [hi + half[a], '面'], [mid, '中心'],
+          [lo - half[a], t('面')], [hi + half[a], t('面')], [mid, t('中心')],
         ]) {
           const d = Math.abs(want - rest[a]);
           if (d > REACH) continue;
@@ -3403,7 +3410,7 @@ export class EditorScene {
     for (let a = 0; a < 3; a++) {
       if (!best[a]) continue;
       out[a] = best[a].want;
-      to = best[a].label;
+      to = t(best[a].label);
     }
     return { pos: out, to };
   }
@@ -3714,20 +3721,20 @@ export class EditorScene {
   /** One line describing what a click would put down, and where. */
   _planLabel(plan) {
     const d = plan.size.map((n) => n.toFixed(2)).join('x');
-    if (BONE_TOOLS.has(this.tool)) return `ボーン ${this.boneOpts.length.toFixed(2)}`;
+    if (BONE_TOOLS.has(this.tool)) return t('ボーン {0}', [this.boneOpts.length.toFixed(2)]);
     if (this.tool === TOOL.EQUIP) {
       return `${EQUIP_META[this.equipType]?.label ?? ''} ${this.newEquipSize.toFixed(2)}`;
     }
-    if (this.tool === TOOL.STAMP) return `パーツ ${d}`;
+    if (this.tool === TOOL.STAMP) return t('パーツ {0}', [d]);
     const shape = SHAPES[this.newBlockShape]?.label ?? '';
     const turn = this.placeTurn ? ` ${this.placeTurn * 90}°` : '';
-    const high = plan.floating ? ` 高さ ${this.workPlaneY.toFixed(2)}` : '';
+    const high = plan.floating ? t(' 高さ {0}', [this.workPlaneY.toFixed(2)]) : '';
     // And when the face ran out before the cursor did. Pinning the ghost
     // to the edge in silence looks like the tool stopped working.
-    const edge = plan.clamped ? ' ・端' : '';
+    const edge = plan.clamped ? t(' ・端') : '';
     // Saying so, because a ghost that quietly ignores the grid to line up
     // with a neighbour looks like the grid is broken.
-    const near = plan.alignedTo ? ` ・隣の${plan.alignedTo}に合わせた` : '';
+    const near = plan.alignedTo ? t(' ・隣の{0}に合わせた', [plan.alignedTo]) : '';
     return `${shape} ${d}${turn}${high}${edge}${near}`;
   }
 
@@ -3739,7 +3746,7 @@ export class EditorScene {
     const label = SHAPES[shape]?.label ?? 'BLOCK';
     let n = 0;
     for (const p of this.assembly.parts.values()) {
-      if (p.kind === 'block' && typeof p.label === 'string' && p.label.startsWith(label)) n++;
+      if (p.kind === 'block' && typeof t(p.label) === 'string' && t(p.label).startsWith(label)) n++;
     }
     return `${label} ${n + 1}`;
   }
@@ -3986,7 +3993,7 @@ export class EditorScene {
   _growForAdd(node, grow) {
     const part = node.part;
     if (part.size[grow.axis] >= SIZE_MAX - 1e-6) {
-      this.onReject?.(`ブロックはこれ以上大きくできません（上限 ${SIZE_MAX}）`);
+      this.onReject?.(t('ブロックはこれ以上大きくできません（上限 {0}）', [SIZE_MAX]));
       this.hoverVoxel = null;
       return false;
     }
@@ -4078,8 +4085,8 @@ export class EditorScene {
       // of things you recognise rather than ten rows saying "削る".
       const mm = (this.brushMetres() * 100).toFixed(0);
       this.onBeforeChange(this.hoverVoxel.grow && this.tool === TOOL.ADD
-        ? '盛る（ブロック拡張）'
-        : `${{ carve: '削る', add: '盛る', paint: '塗る' }[this.tool]} ${mm}cm`);
+        ? t('盛る（ブロック拡張）')
+        : t('{0} {1}cm', [{ carve: '削る', add: '盛る', paint: '塗る' }[this.tool], mm]));
     }
     this.painting = true;
     this._lastDab = null;
@@ -4196,7 +4203,7 @@ export class EditorScene {
     const { x, y, z } = this.hoverVoxel;
     const r = Math.max(1, this.brushRadiusCells(vox, node.part));
     const label = {
-      fill: '塗りつぶし', smooth: 'ならす', flatten: '平らに', drill: '穴をあける',
+      fill: t('塗りつぶし'), smooth: t('ならす'), flatten: t('平らに'), drill: t('穴をあける'),
     }[what];
     if (!label) return false;
     this.onBeforeChange(label);
@@ -4245,20 +4252,31 @@ export class EditorScene {
   resetBlock() {
     const node = this.selected ? this.rig.nodes.get(this.selected) : null;
     if (!node?.part.vox) return false;
-    this.onBeforeChange('加工を取り消す');
+    this.onBeforeChange(t('加工を取り消す'));
     resetToShape(node.part);
     this.rig.refreshBlock(node.part.id);
     this.refreshStats();
     return true;
   }
 
-  /** The colour under the cursor, so a shade can be matched without hunting. */
+  /**
+   * The colour under the cursor, so a shade can be matched without hunting.
+   *
+   * One CELL of the selected block, which is what the sculpt eyedropper
+   * means. When there is no block being sculpted the question still has an
+   * answer — the colour of whatever the cursor is over — so it falls back
+   * to the part picker rather than returning nothing, which is what it did
+   * for everyone working in assemble mode.
+   */
   pickColorUnderCursor() {
     const node = this.selected ? this.rig.nodes.get(this.selected) : null;
-    if (!node?.part.vox || !this.hoverVoxel) return -1;
-    const { x, y, z } = this.hoverVoxel;
-    const v = node.part.vox.get(x, y, z);
-    return v > 0 ? v - 1 : -1;
+    if (node?.part.vox && this.hoverVoxel) {
+      const { x, y, z } = this.hoverVoxel;
+      const v = node.part.vox.get(x, y, z);
+      if (v > 0) return v - 1;
+    }
+    const c = this.pickPartColorUnderCursor();
+    return typeof c === 'number' && c >= 0 ? c : -1;
   }
 
   /** Never let a block be carved out of existence. */
@@ -4266,7 +4284,7 @@ export class EditorScene {
     if (vox.solid > 0) return;
     const c = Math.floor(vox.n / 2);
     vox.set(c, c, c, this.colorIndex + 1);
-    this.onHint?.('ブロックが消えないよう、中心を1マス残しました');
+    this.onHint?.(t('ブロックが消えないよう、中心を1マス残しました'));
   }
 
   // ---------------------------------------------------------- click
@@ -4445,7 +4463,7 @@ export class EditorScene {
       const full = this._overBudget(want);
       if (full) {
         this.onReject?.(
-          `${BUDGET_LABEL[full]}は${BUDGET[full]}個までです。どれかを外してください`,
+          t('{0}は{1}個までです。どれかを外してください', [t(BUDGET_LABEL[full]), BUDGET[full]]),
           [],
         );
         return null;
@@ -4453,21 +4471,23 @@ export class EditorScene {
       if (this.tool === TOOL.EQUIP) {
         const blocked = this.assembly.blockedBy(this.equipType);
         if (blocked) {
-          const label = EQUIP_META[this.equipType].label;
-          const why = blocked === 'unique'
-            ? `${label}は1枚しか付けられません`
-            : blocked === 'rack'
-              ? `武器は${WEAPON_SLOTS}枚までです。どれかを外してください`
-              : blocked === 'budget'
-                ? `${BUDGET_LABEL.equip}は${BUDGET.equip}個までです`
-              : `${label}は${EQUIP_META[blocked]?.label ?? blocked}と一緒には付けられません`;
+          const label = t(EQUIP_META[this.equipType].label);
+          const why = {
+            unique: () => t('{0}は1枚しか付けられません', [label]),
+            rack: () => t('武器は{0}枚までです。どれかを外してください', [WEAPON_SLOTS]),
+            same: () => t('同じ武器は{0}枚までです', [WEAPON_SAME_MAX]),
+            budget: () => t('{0}は{1}個までです', [t(BUDGET_LABEL.equip), BUDGET.equip]),
+          }[blocked]?.() ?? t('{0}は{1}と一緒には付けられません', [
+            label, t(EQUIP_META[blocked]?.label ?? blocked),
+          ]);
           // Which plates it means, so "take one off" has somewhere to point.
           const blame = blocked === 'rack'
             ? this.assembly.equips()
               .filter((e) => EQUIP_META[e.equipType]?.category === 'weapon')
               .map((e) => e.id)
             : this.assembly.equips()
-              .filter((e) => e.equipType === (blocked === 'unique' ? this.equipType : blocked))
+              .filter((e) => e.equipType === (
+                blocked === 'unique' || blocked === 'same' ? this.equipType : blocked))
               .map((e) => e.id);
           this.onReject?.(why, blame);
           return null;
@@ -4553,15 +4573,15 @@ export class EditorScene {
   }
 
   _changeLabel() {
-    if (this.tool === TOOL.STAMP) return 'パーツ配置';
-    if (this.tool === TOOL.EQUIP) return `配置 ${EQUIP_META[this.equipType]?.label ?? ''}`;
-    if (BONE_TOOLS.has(this.tool)) return 'ボーン配置';
+    if (this.tool === TOOL.STAMP) return t('パーツ配置');
+    if (this.tool === TOOL.EQUIP) return t('配置 {0}', [EQUIP_META[this.equipType]?.label ?? '']);
+    if (BONE_TOOLS.has(this.tool)) return t('ボーン配置');
     // With where, not just what. Twenty rows reading "配置 立方体" say
     // nothing about which of the twenty a press of Ctrl+Z is about to take
     // back; the parent it went on is the part somebody remembers.
     const host = this.assembly.get(this.pendingPlacement?.parentId);
-    const where = host?.label ? ` @${host.label}` : '';
-    return `配置 ${SHAPES[this.newBlockShape]?.label ?? ''}${where}`;
+    const where = host?.label ? ` @${t(host.label)}` : '';
+    return t('配置 {0}{1}', [SHAPES[this.newBlockShape]?.label ?? '', where]);
   }
 
   /**

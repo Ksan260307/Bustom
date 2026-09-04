@@ -1,5 +1,8 @@
 import { h, resizable } from './dom.js';
-import { ACTION_GROUPS, ACTION_LABEL, keyLabel } from '../zmf/InputManager.js';
+import {
+  ACTION_GROUPS, ACTION_LABEL, TOOL_ACTIONS, keyLabel,
+} from '../zmf/InputManager.js';
+import { t } from './i18n.js';
 
 // ============================================================
 //  Key config : rebind anything, one key to one job.
@@ -32,14 +35,14 @@ export class KeyConfig {
         h('div', { class: 'keyhead' },
           h('div', { class: 'brand' }, 'KEY', h('small', {}, 'CONFIG')),
           h('div', { class: 'spacer' }),
-          h('button', { class: 'icon', title: '閉じる', onClick: () => this.close() }, '✕'),
+          h('button', { class: 'icon', title: t('閉じる'), onClick: () => this.close() }, '✕'),
         ),
         this.rowsEl,
         this.noteEl,
         h('div', { class: 'keyfoot' },
-          h('button', { onClick: () => this.reset() }, '初期設定に戻す'),
+          h('button', { onClick: () => this.reset() }, t('初期設定に戻す')),
           h('div', { class: 'spacer' }),
-          h('button', { class: 'primary', onClick: () => this.close() }, '閉じる'),
+          h('button', { class: 'primary', onClick: () => this.close() }, t('閉じる')),
         ),
     );
     // Centred on screen, so one pixel of drag only moves its edge half a
@@ -75,7 +78,7 @@ export class KeyConfig {
   /** Arm a row: the next key or button pressed lands here. */
   listen(action, index) {
     this.listening = { action, index };
-    this._note(`「${ACTION_LABEL[action]}」に割り当てるキーを押してください（Esc で中止）`);
+    this._note(t('「{0}」に割り当てるキーを押してください（Esc で中止）', [t(ACTION_LABEL[action])]));
     this.render();
   }
 
@@ -86,16 +89,37 @@ export class KeyConfig {
 
     if (code === 'Escape') {
       this.listening = null;
-      this._note('中止しました');
+      this._note(t('中止しました'));
       this.render();
       return;
     }
     if (RESERVED.has(code)) {
-      this._note(`${keyLabel(code)} は割り当てられません`);
+      this._note(t('{0} は割り当てられません', [keyLabel(code)]));
       return;
     }
 
     const { action, index } = this.listening;
+
+    /*
+     * The workbench's tools are a second, separate set of bindings.
+     *
+     * They have to be, because they answer a different question on a
+     * different screen — and because a key is allowed to mean the weapon
+     * bone on the bench and forward in a fight. So a tool row never steals
+     * from a fight row and vice versa; each set is only ever compared with
+     * itself.
+     */
+    if (TOOL_ACTIONS.includes(action)) {
+      const stolen = this.input.bindTool(action, code);
+      this.listening = null;
+      this._note(stolen
+        ? t('{0} を「{1}」から移しました', [keyLabel(code), t(ACTION_LABEL[stolen])])
+        : t('{0} を割り当てました', [keyLabel(code)]));
+      this.render();
+      this.onChange();
+      return;
+    }
+
     const codes = this.input.keysFor(action);
     const previous = this.input.actionFor(code);
 
@@ -112,10 +136,10 @@ export class KeyConfig {
       // that has quietly stopped working, so say it out loud.
       const orphan = this.input.keysFor(previous).length === 0;
       this._note(orphan
-        ? `${keyLabel(code)} を「${ACTION_LABEL[previous]}」から移しました — ${ACTION_LABEL[previous]}が未設定です`
-        : `${keyLabel(code)} を「${ACTION_LABEL[previous]}」から移しました`);
+        ? t('{0} を「{1}」から移しました — {2}が未設定です', [keyLabel(code), t(ACTION_LABEL[previous]), t(ACTION_LABEL[previous])])
+        : t('{0} を「{1}」から移しました', [keyLabel(code), t(ACTION_LABEL[previous])]));
     } else {
-      this._note(`${keyLabel(code)} を割り当てました`);
+      this._note(t('{0} を割り当てました', [keyLabel(code)]));
     }
     this.render();
     this.onChange();
@@ -123,11 +147,11 @@ export class KeyConfig {
 
   remove(action, code) {
     if (!this.input.unbind(action, code)) {
-      this._note('最後のひとつは外せません');
+      this._note(t('最後のひとつは外せません'));
       this.render();
       return;
     }
-    this._note(`${keyLabel(code)} を外しました`);
+    this._note(t('{0} を外しました', [keyLabel(code)]));
     this.render();
     this.onChange();
   }
@@ -135,7 +159,7 @@ export class KeyConfig {
   reset() {
     this.input.resetBindings();
     this.listening = null;
-    this._note('初期設定に戻しました');
+    this._note(t('初期設定に戻しました'));
     this.render();
     this.onChange();
   }
@@ -147,7 +171,7 @@ export class KeyConfig {
   render() {
     const kids = [];
     for (const group of ACTION_GROUPS) {
-      kids.push(h('h3', { class: 'inline' }, group.label));
+      kids.push(h('h3', { class: 'inline' }, t(group.label)));
       for (const action of group.actions) {
         kids.push(this._row(action));
       }
@@ -157,7 +181,12 @@ export class KeyConfig {
   }
 
   _row(action) {
-    const codes = this.input.keysFor(action);
+    // A tool row reads from the bench's table, a fight row from the
+    // fight's. Everything below is the same either way.
+    const tool = TOOL_ACTIONS.includes(action);
+    const codes = tool
+      ? [...(this.input.toolBindings[action] ?? [])]
+      : this.input.keysFor(action);
     const waiting = this.listening?.action === action;
 
     const chips = codes.map((code, i) => h('span', {
@@ -165,21 +194,30 @@ export class KeyConfig {
     },
     h('button', {
       class: 'keychiplabel',
-      title: 'クリックして割り当て直す',
+      title: t('クリックして割り当て直す'),
       onClick: () => this.listen(action, i),
     }, waiting && this.listening.index === i ? '…' : keyLabel(code)),
     codes.length > 1
-      ? h('button', { class: 'keychipx', title: '外す', onClick: () => this.remove(action, code) }, '×')
+      ? h('button', { class: 'keychipx', title: t('外す'), onClick: () => this.remove(action, code) }, '×')
       : null));
 
+    // One tool, one key: there is no case for two keys selecting the same
+    // brush, and the extra chip on eleven rows is eleven chances to make
+    // the panel longer than the screen.
+    if (tool) {
+      return h('div', { class: 'keyrow' },
+        h('span', { class: 'keyaction' }, t(ACTION_LABEL[action] ?? action)),
+        h('div', { class: 'keychips' }, ...chips));
+    }
+
     return h('div', { class: `keyrow${codes.length ? '' : ' unbound'}` },
-      h('span', { class: 'keyaction' }, ACTION_LABEL[action] ?? action),
+      h('span', { class: 'keyaction' }, t(ACTION_LABEL[action] ?? action)),
       h('div', { class: 'keychips' },
         ...chips,
-        codes.length ? null : h('span', { class: 'keyunset' }, '未設定'),
+        codes.length ? null : h('span', { class: 'keyunset' }, t('未設定')),
         h('button', {
           class: `keyadd${waiting && this.listening.index >= codes.length ? ' listening' : ''}`,
-          title: 'キーを追加',
+          title: t('キーを追加'),
           onClick: () => this.listen(action, codes.length),
         }, waiting && this.listening.index >= codes.length ? '…' : '＋'),
       ),

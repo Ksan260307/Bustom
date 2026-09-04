@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { deadzone, expoCurve, clamp } from './math.js';
+import { t } from '../ui/i18n.js';
+import { GamepadReader } from './Gamepad.js';
 
 // ============================================================
 //  ZMF §8 : Input Management
@@ -50,6 +52,41 @@ export const DEFAULT_BINDINGS = {
 };
 
 /** How the key-config screen groups and names them. */
+/**
+ * The workbench's tool keys, which were the only bindings in the game that
+ * could not be changed.
+ *
+ * They are `e.code`, so they name a PHYSICAL key position rather than a
+ * printed letter — the right default, and exactly why they needed to be
+ * rebindable: on an AZERTY keyboard the block tool sits under the key
+ * marked B, but the arm tool sits under the one marked Q, because that is
+ * where A is on a QWERTY board.
+ *
+ * Kept apart from the fight's bindings because they answer a different
+ * question — `toolFor(code)` rather than `isDown(action)` — and because a
+ * key may quite reasonably mean one thing on the bench and another in a
+ * fight.
+ */
+export const TOOL_ACTIONS = [
+  'toolSelect', 'toolBlock', 'toolEquip',
+  'toolLeg', 'toolArm', 'toolFace', 'toolCustom', 'toolWeapon',
+  'toolCarve', 'toolAdd', 'toolPaint',
+];
+
+export const DEFAULT_TOOL_BINDINGS = {
+  toolSelect: ['KeyV'],
+  toolBlock: ['KeyB'],
+  toolEquip: ['KeyG'],
+  toolLeg: ['KeyL'],
+  toolArm: ['KeyA'],
+  toolFace: ['KeyF'],
+  toolCustom: ['KeyC'],
+  toolWeapon: ['KeyW'],
+  toolCarve: ['KeyX'],
+  toolAdd: ['KeyZ'],
+  toolPaint: ['KeyP'],
+};
+
 export const ACTION_GROUPS = [
   { label: '移動', actions: ['forward', 'back', 'left', 'right', 'up', 'down', 'boost'] },
   {
@@ -59,9 +96,21 @@ export const ACTION_GROUPS = [
   },
   { label: 'カメラ', actions: ['camera'] },
   { label: 'システム', actions: ['layerA', 'layerB', 'layerC', 'reset'] },
+  { label: '編集画面のツール', actions: TOOL_ACTIONS },
 ];
 
 export const ACTION_LABEL = {
+  toolSelect: '選択ツール',
+  toolBlock: 'ブロック',
+  toolEquip: '装備プレート',
+  toolLeg: 'レッグボーン',
+  toolArm: 'アームボーン',
+  toolFace: 'フェイスボーン',
+  toolCustom: 'カスタムボーン',
+  toolWeapon: 'ウェポンボーン',
+  toolCarve: '削る',
+  toolAdd: '盛る',
+  toolPaint: '塗る',
   forward: '前進',
   back: '後退',
   left: '左移動',
@@ -104,12 +153,12 @@ export function keyLabel(code) {
   if (!code) return '—';
   if (code.startsWith('Mouse')) {
     const n = Number(code.slice(5));
-    return MOUSE_NAMES[n] ?? `マウス${n + 1}`;
+    return MOUSE_NAMES[n] ?? t('マウス{0}', [n + 1]);
   }
   if (KEY_NAMES[code]) return KEY_NAMES[code];
   if (code.startsWith('Key')) return code.slice(3);
   if (code.startsWith('Digit')) return code.slice(5);
-  if (code.startsWith('Numpad')) return `テンキー${code.slice(6)}`;
+  if (code.startsWith('Numpad')) return t('テンキー{0}', [code.slice(6)]);
   return code;
 }
 
@@ -165,6 +214,25 @@ export class InputManager {
     this.intensity = 0;                   // |move|, used for soft-override
     this._lastTap = new Map();
     this.dash = null;                     // { dir: Vector3, t } on double-tap
+
+    /**
+     * The controller, read once a frame and merged with the keyboard.
+     *
+     * Not an alternative to the keyboard — an addition. Both are live at
+     * once, which is what somebody who builds with a mouse and fights with
+     * a pad actually needs, and it means there is no mode to be in.
+     */
+    /**
+     * The workbench's tool keys. Copied, not shared: rebinding one must not
+     * edit the table every future InputManager starts from.
+     */
+    this.toolBindings = Object.fromEntries(
+      Object.entries(DEFAULT_TOOL_BINDINGS).map(([k, v]) => [k, [...v]]),
+    );
+
+    this.pad = new GamepadReader();
+    /** True while a pad is the thing being used, for the on-screen prompts. */
+    this.usingPad = false;
 
     this._bind();
   }
@@ -230,6 +298,56 @@ export class InputManager {
     window.removeEventListener('contextmenu', this._onContextMenu);
     window.removeEventListener('blur', this._onBlur);
     document.removeEventListener('pointerlockchange', this._onLockChange);
+  }
+
+  /**
+   * Apply what the player chose in the options.
+   *
+   * `invertY` and `invertStrafe` have been read on every mouse move since
+   * the beginning and could not be set from anywhere; `invertStrafe` was
+   * additionally TRUE by default, so the game shipped with strafing
+   * reversed and no way to change it.
+   *
+   * @param {{sensitivity?: number, invertY?: boolean, invertStrafe?: boolean}} opts
+   */
+  /**
+   * Which workbench tool a key means, or null.
+   *
+   * Separate from `actionFor` because these are a different question asked
+   * on a different screen, and because a key is allowed to mean one thing
+   * on the bench and another in a fight — W is the weapon bone here and
+   * forward there, and neither is wrong.
+   */
+  toolFor(code) {
+    for (const [action, codes] of Object.entries(this.toolBindings)) {
+      if (codes.includes(code)) return action;
+    }
+    return null;
+  }
+
+  /** Rebind one workbench tool, taking the key off whatever had it. */
+  bindTool(action, code) {
+    if (!TOOL_ACTIONS.includes(action)) return null;
+    let stolenFrom = null;
+    for (const [other, codes] of Object.entries(this.toolBindings)) {
+      const at = codes.indexOf(code);
+      if (at >= 0 && other !== action) {
+        codes.splice(at, 1);
+        stolenFrom = other;
+      }
+    }
+    const list = this.toolBindings[action] ?? (this.toolBindings[action] = []);
+    if (!list.includes(code)) list.push(code);
+    return stolenFrom;
+  }
+
+  setProfile({ sensitivity, invertY, invertStrafe } = {}) {
+    if (Number.isFinite(sensitivity)) {
+      this.profile.lookSensitivity = Math.min(3, Math.max(0.2, sensitivity));
+    }
+    if (invertY !== undefined) this.profile.invertY = !!invertY;
+    if (invertStrafe !== undefined) this.profile.invertStrafe = !!invertStrafe;
+    return this;
   }
 
   setEnabled(on) {
@@ -308,8 +426,15 @@ export class InputManager {
 
   // ---------------------------------------------------------- per-frame
 
-  isDown(action) { return (this.bindings[action] ?? []).some((c) => this.keys.has(c)); }
-  wasPressed(action) { return (this.bindings[action] ?? []).some((c) => this.pressed.has(c)); }
+  isDown(action) {
+    if (this.pad.isDown(action)) return true;
+    return (this.bindings[action] ?? []).some((c) => this.keys.has(c));
+  }
+
+  wasPressed(action) {
+    if (this.pad.wasPressed(action)) return true;
+    return (this.bindings[action] ?? []).some((c) => this.pressed.has(c));
+  }
 
   // ---------------------------------------------------------- key config
 
@@ -322,7 +447,7 @@ export class InputManager {
   /** How an action reads in full: "W / ↑". */
   describe(action) {
     const codes = this.bindings[action];
-    return codes?.length ? codes.map(keyLabel).join(' / ') : '未設定';
+    return codes?.length ? codes.map(keyLabel).join(' / ') : t('未設定');
   }
 
   /** Which action, if any, currently owns a key code. */
@@ -376,6 +501,9 @@ export class InputManager {
 
   resetBindings() {
     this.bindings = sanitiseBindings(null);
+    this.toolBindings = Object.fromEntries(
+      Object.entries(DEFAULT_TOOL_BINDINGS).map(([k, v]) => [k, [...v]]),
+    );
     this.onBindingsChanged(this.bindings);
     return this;
   }
@@ -388,11 +516,29 @@ export class InputManager {
       const base = DEFAULT_BINDINGS[action];
       if (codes.length !== base.length || codes.some((c, i) => c !== base[i])) out[action] = codes;
     }
+    // The bench's tools travel under their own key, so a saved file from
+    // before they were rebindable still loads and simply has none.
+    const tools = {};
+    for (const action of TOOL_ACTIONS) {
+      const codes = this.toolBindings[action] ?? [];
+      const base = DEFAULT_TOOL_BINDINGS[action] ?? [];
+      if (codes.length !== base.length || codes.some((c, i) => c !== base[i])) {
+        tools[action] = codes;
+      }
+    }
+    if (Object.keys(tools).length) out.__tools = tools;
     return out;
   }
 
   loadBindings(raw) {
-    this.bindings = sanitiseBindings({ ...DEFAULT_BINDINGS, ...(raw ?? {}) });
+    const { __tools: tools, ...fight } = raw ?? {};
+    this.bindings = sanitiseBindings({ ...DEFAULT_BINDINGS, ...fight });
+    this.toolBindings = Object.fromEntries(
+      Object.entries(DEFAULT_TOOL_BINDINGS).map(([k, v]) => [
+        k,
+        Array.isArray(tools?.[k]) ? tools[k].filter((c) => typeof c === 'string') : [...v],
+      ]),
+    );
     this.onBindingsChanged(this.bindings);
     return this;
   }
@@ -401,10 +547,25 @@ export class InputManager {
   update(dt) {
     this.time += dt;
 
+    // The controller first, so everything below can add it in. A pad that
+    // is not there costs one call that returns false.
+    const hasPad = this.enabled && this.pad.poll(this.profile);
+    if (hasPad && this.pad.active) this.usingPad = true;
+
     const strafeSign = this.profile.invertStrafe ? -1 : 1;
-    const ax = ((this.isDown('right') ? 1 : 0) - (this.isDown('left') ? 1 : 0)) * strafeSign;
-    const ay = (this.isDown('up') ? 1 : 0) - (this.isDown('down') ? 1 : 0);
-    const az = (this.isDown('forward') ? 1 : 0) - (this.isDown('back') ? 1 : 0);
+    let ax = ((this.isDown('right') ? 1 : 0) - (this.isDown('left') ? 1 : 0)) * strafeSign;
+    let ay = (this.isDown('up') ? 1 : 0) - (this.isDown('down') ? 1 : 0);
+    let az = (this.isDown('forward') ? 1 : 0) - (this.isDown('back') ? 1 : 0);
+
+    if (hasPad) {
+      // Whichever is pushed further wins per axis, rather than adding: a
+      // hand resting on the stick must not cancel a key, and a key must not
+      // pin an axis to 1 while the stick is being feathered.
+      const pick = (a, b) => (Math.abs(b) > Math.abs(a) ? b : a);
+      ax = pick(ax, this.pad.move.x);
+      ay = pick(ay, this.pad.move.y);
+      az = pick(az, this.pad.move.z);
+    }
 
     this.moveRaw.set(ax, ay, az);
     // Normalise the horizontal plane only — vertical thrust is its own channel.
@@ -439,10 +600,17 @@ export class InputManager {
     } else {
       this.cameraLook.yaw = 0;
       this.cameraLook.pitch = 0;
-      this.look.yaw = yawRate;
-      this.look.pitch = pitchRate;
+      // A stick is already a RATE — it reports where it is being held, not
+      // how far it has moved — so it is added to the mouse's rate rather
+      // than being divided by the frame time the way a mouse delta is.
+      // Getting this backwards is why stick aiming speeds up when the frame
+      // rate drops in so many games.
+      this.look.yaw = yawRate + (hasPad ? this.pad.look.yaw : 0);
+      this.look.pitch = pitchRate + (hasPad ? this.pad.look.pitch : 0);
       /** 0..1 normalised aim deflection — this is what soft-override reads. */
-      this.lookMagnitude = Math.min(1, Math.hypot(nx, ny));
+      this.lookMagnitude = Math.min(1, Math.max(
+        Math.hypot(nx, ny), hasPad ? this.pad.lookMagnitude : 0,
+      ));
     }
 
     this.zoomDelta = this.mouse.wheel;

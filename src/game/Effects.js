@@ -105,6 +105,11 @@ export class Effects {
     for (let i = 0; i < puffs; i++) this.puffs.push(this._makePuff());
     this.rings = [];
     for (let i = 0; i < rings; i++) this.rings.push(this._makeRing());
+    /** Blade arcs, and the smoke off a machine that is losing. */
+    this.slashes = [];
+    for (let i = 0; i < 6; i++) this.slashes.push(this._makeSlash());
+    this.plumes = [];
+    for (let i = 0; i < Math.max(8, puffs >> 1); i++) this.plumes.push(this._makePlume());
 
     /** Contact shadows, handed out to machines and taken back. See `track`. */
     this.shadowPool = [];
@@ -112,7 +117,9 @@ export class Effects {
     /** @type {Map<object, THREE.Mesh>} machine -> its blot */
     this.shadows = new Map();
 
-    this._cursor = { impact: 0, muzzle: 0, puff: 0, ring: 0 };
+    this._cursor = {
+      impact: 0, muzzle: 0, puff: 0, ring: 0, slash: 0, plume: 0,
+    };
   }
 
   /** A number from the PRESENTATION stream, or an ordinary one. */
@@ -220,6 +227,12 @@ export class Effects {
     const smoke = fxSprite('smoke');
     const blot = fxSprite('blob');
     if (smoke) for (const p of this.puffs) { p.mat.map = smoke; p.mat.needsUpdate = true; }
+    // Pooled sprites, not cards riding a hidden group: they are handed
+    // their map the way the puffs are, and stay switched off until fired.
+    const arc = fxSprite('slash');
+    if (arc) for (const e of this.slashes) { e.mat.map = arc; e.mat.needsUpdate = true; }
+    const trail = fxSprite('plume');
+    if (trail) for (const p of this.plumes) { p.mat.map = trail; p.mat.needsUpdate = true; }
     if (blot) {
       for (const mesh of this.shadowPool) {
         mesh.material.map = blot;
@@ -234,6 +247,34 @@ export class Effects {
     const mat = this._own(new THREE.MeshBasicMaterial({
       color: DUST_COLOR, map: this.blob, transparent: true, opacity: 0,
       depthWrite: false,
+    }));
+    const mesh = new THREE.Mesh(this.quadGeo, mat);
+    mesh.visible = false;
+    mesh.frustumCulled = false;
+    this.group.add(mesh);
+    return {
+      mesh, mat, life: 0, maxLife: 1, spin: 0, roll: 0,
+      vel: new THREE.Vector3(), from: 1, to: 2,
+    };
+  }
+
+  /** One blade arc: a card, turned across the swing. */
+  _makeSlash() {
+    const mat = this._own(new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    }));
+    const mesh = new THREE.Mesh(this.quadGeo, mat);
+    mesh.visible = false;
+    mesh.frustumCulled = false;
+    this.group.add(mesh);
+    return { mesh, mat, life: 0, maxLife: 1, scale: 1, roll: 0 };
+  }
+
+  /** One puff of the smoke a damaged machine trails. */
+  _makePlume() {
+    const mat = this._own(new THREE.MeshBasicMaterial({
+      color: 0x2b3038, transparent: true, opacity: 0, depthWrite: false,
     }));
     const mesh = new THREE.Mesh(this.quadGeo, mat);
     mesh.visible = false;
@@ -313,6 +354,55 @@ export class Effects {
       s.mesh.position.set(0, 0, 0);
       s.mesh.quaternion.setFromUnitVectors(FORWARD, s.dir);
     }
+    return e;
+  }
+
+  /**
+   * A blade went through here.
+   *
+   * The blade had no visual of its own: swinging it drew the same spray a
+   * bullet landing draws, so the one weapon you have to be in reach to use
+   * looked exactly like the ones you do not. This is an arc, turned to lie
+   * across the swing, and it is the only sprite in the pack that is more
+   * than twice as long as it is wide.
+   */
+  slash(at, dir = null, { scale = 1, color = 0xffffff, life = 0.16 } = {}) {
+    const e = this._next('slash', this.slashes);
+    e.life = life;
+    e.maxLife = life;
+    e.scale = scale;
+    e.mat.color.setHex(color);
+    e.mesh.position.copy(at);
+    // Which way the blade went, as a roll on a card that faces the camera.
+    // Turning the card to face along the cut would hide it edge-on from
+    // exactly the angle the player usually has.
+    _v.copy(dir ?? UP);
+    e.roll = _v.lengthSq() > 1e-8
+      ? Math.atan2(_v.y, Math.hypot(_v.x, _v.z)) + this._rand(-0.3, 0.3)
+      : this._rand(0, Math.PI * 2);
+    e.mesh.visible = true;
+    return e;
+  }
+
+  /**
+   * A machine that is losing, saying so.
+   *
+   * Damage was legible from the bar and from nothing else: two machines at
+   * a hundred and at fifteen per cent looked identical from across an
+   * arena, so there was no reading the fight without reading the interface.
+   */
+  plume(at, drift = null, { scale = 1, life = 1.1 } = {}) {
+    const e = this._next('plume', this.plumes);
+    e.life = life * this._rand(0.8, 1.2);
+    e.maxLife = e.life;
+    e.from = scale * this._rand(0.4, 0.7);
+    e.to = e.from * this._rand(2.6, 4.0);
+    e.spin = this._rand(-1.2, 1.2);
+    e.roll = this._rand(0, Math.PI * 2);
+    e.mesh.position.copy(at);
+    e.vel.set(this._rand(-0.4, 0.4), this._rand(1.1, 2.2), this._rand(-0.4, 0.4));
+    if (drift) e.vel.addScaledVector(drift, 0.25);
+    e.mesh.visible = true;
     return e;
   }
 
@@ -469,6 +559,31 @@ export class Effects {
       e.card.position.set(0, 0, k * 0.2);
     }
 
+    for (const e of this.slashes) {
+      if (e.life <= 0) continue;
+      e.life -= dt;
+      if (e.life <= 0) { e.mesh.visible = false; e.mat.opacity = 0; continue; }
+      const t = 1 - clamp01(e.life / e.maxLife);
+      // Opens along the cut as it goes, which is the shape of a swing
+      // rather than of a stamp.
+      e.mesh.scale.set(e.scale * (0.7 + t * 1.5), e.scale * (1.1 - t * 0.5), 1);
+      e.mat.opacity = clamp01(t / 0.12) * (1 - t) ** 1.4;
+    }
+
+    for (const p of this.plumes) {
+      if (p.life <= 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.mesh.visible = false; p.mat.opacity = 0; continue; }
+      const t = 1 - clamp01(p.life / p.maxLife);
+      // Smoke rises: no gravity on it, and it slows as it spreads.
+      p.vel.multiplyScalar(1 - 1.1 * dt);
+      p.mesh.position.addScaledVector(p.vel, dt);
+      p.roll += p.spin * dt;
+      const k = p.from + (p.to - p.from) * t;
+      p.mesh.scale.set(k, k, 1);
+      p.mat.opacity = clamp01(t / 0.2) * (1 - t) ** 1.5 * 0.55;
+    }
+
     for (const p of this.puffs) {
       if (p.life <= 0) continue;
       p.life -= dt;
@@ -507,6 +622,19 @@ export class Effects {
       if (p.life <= 0) continue;
       p.mesh.quaternion.copy(_q);
       p.mesh.rotateZ(p.roll);
+    }
+    // Smoke, the same. An arc too: a flat card turned across a swing is a
+    // line the moment you are standing in the wrong place, and the roll is
+    // what carries which way the blade went.
+    for (const p of this.plumes) {
+      if (p.life <= 0) continue;
+      p.mesh.quaternion.copy(_q);
+      p.mesh.rotateZ(p.roll);
+    }
+    for (const e of this.slashes) {
+      if (e.life <= 0) continue;
+      e.mesh.quaternion.copy(_q);
+      e.mesh.rotateZ(e.roll);
     }
     // Impact cards too. A hit is a thing that happened at a point and has
     // no direction of its own, so it should read the same wherever you are

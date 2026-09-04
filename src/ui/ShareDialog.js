@@ -2,6 +2,7 @@ import qrcode from 'qrcode-generator';
 import jsQR from 'jsqr';
 import { h, resizable } from './dom.js';
 import { measureShare, decodeShare, isShareCode, QR_BYTE_LIMIT } from '../core/Share.js';
+import { t } from './i18n.js';
 
 // ============================================================
 //  Share : a build as a QR code, a text code, or a PNG.
@@ -29,7 +30,7 @@ export function drawQR(canvas, text, { module = MODULE, ecc = 'M' } = {}) {
       qr = null;
     }
   }
-  if (!qr) throw new Error(`データが大きすぎて QR にできません（${text.length} / ${QR_BYTE_LIMIT} バイト）`);
+  if (!qr) throw new Error(t('データが大きすぎて QR にできません（{0} / {1} バイト）', [text.length, QR_BYTE_LIMIT]));
 
   const n = qr.getModuleCount();
   const size = (n + QUIET * 2) * module;
@@ -76,7 +77,7 @@ export class ShareDialog {
 
     this.canvas = h('canvas', {
       class: 'qrcanvas',
-      title: 'クリックで拡大（スマホで読むときはこちら）',
+      title: t('クリックで拡大（スマホで読むときはこちら）'),
       onClick: () => this._toggleZoom(),
     });
     this.titleEl = h('div', { class: 'sharetitle' }, '—');
@@ -85,7 +86,7 @@ export class ShareDialog {
     this.noteEl = h('div', { class: 'keynote' }, '');
 
     this.importEl = h('textarea', {
-      class: 'sharecode', rows: 3, placeholder: 'BRO1: で始まる共有コードを貼り付け',
+      class: 'sharecode', rows: 3, placeholder: t('BRO1: で始まる共有コードを貼り付け'),
     });
 
     this.fileInput = h('input', {
@@ -97,7 +98,7 @@ export class ShareDialog {
         h('div', { class: 'keyhead' },
           h('div', { class: 'brand' }, 'SHARE', h('small', {}, 'QR CODE')),
           h('div', { class: 'spacer' }),
-          h('button', { class: 'icon', title: '閉じる', onClick: () => this.close() }, '✕'),
+          h('button', { class: 'icon', title: t('閉じる'), onClick: () => this.close() }, '✕'),
         ),
 
         h('div', { class: 'sharebody' },
@@ -106,21 +107,21 @@ export class ShareDialog {
             this.canvas,
             this.sizeEl,
             h('div', { class: 'row tight' },
-              h('button', { onClick: () => this._toggleZoom() }, '拡大'),
-              h('button', { onClick: () => this._copy() }, 'コードをコピー'),
-              h('button', { onClick: () => this._savePng() }, 'PNG保存'),
+              h('button', { onClick: () => this._toggleZoom() }, t('拡大')),
+              h('button', { onClick: () => this._copy() }, t('コードをコピー')),
+              h('button', { onClick: () => this._savePng() }, t('PNG保存')),
             ),
             h('div', { class: 'note' },
-              'この密度の QR は小さく写すと読めません。スマホで読むなら［拡大］、',
-              h('br'), 'ファイルで渡すなら［PNG保存］（縮小せずにそのまま送ってください）。'),
+              t('この密度の QR は小さく写すと読めません。スマホで読むなら［拡大］、'),
+              h('br'), t('ファイルで渡すなら［PNG保存］（縮小せずにそのまま送ってください）。')),
             this.codeEl,
           ),
 
           h('div', { class: 'sharecol' },
-            h('h3', { class: 'inline' }, '読み込む'),
+            h('h3', { class: 'inline' }, t('読み込む')),
             h('div', { class: 'note' },
-              'QR画像をここにドロップするか、コードを貼り付けてください。',
-              h('br'), '機体は編集画面に、パーツはパーツ庫に入ります。'),
+              t('QR画像をここにドロップするか、コードを貼り付けてください。'),
+              h('br'), t('機体は編集画面に、パーツはパーツ庫に入ります。')),
             h('div', {
               class: 'dropzone',
               onClick: () => this.fileInput.click(),
@@ -131,9 +132,9 @@ export class ShareDialog {
                 e.currentTarget.classList.remove('over');
                 this._readFile(e.dataTransfer?.files?.[0]);
               },
-            }, 'QR画像をドロップ / クリックして選択'),
+            }, t('QR画像をドロップ / クリックして選択')),
             this.importEl,
-            h('button', { class: 'primary wide', onClick: () => this._importText() }, '読み込む'),
+            h('button', { class: 'primary wide', onClick: () => this._importText() }, t('読み込む')),
           ),
         ),
 
@@ -170,7 +171,7 @@ export class ShareDialog {
     if (this.canvas.classList.contains('hidden')) return this;
     this.el.classList.toggle('zoom');
     this._note(this.el.classList.contains('zoom')
-      ? 'スマホのカメラで読み取ってください。もう一度クリックで戻ります'
+      ? t('スマホのカメラで読み取ってください。もう一度クリックで戻ります')
       : '');
     return this;
   }
@@ -180,16 +181,16 @@ export class ShareDialog {
     const assembly = this.app.assembly;
     const info = await measureShare(assembly);
     this.code = info.code;
-    this.titleEl.textContent = `${info.isPart ? 'パーツ' : '機体'}: ${info.name}`;
+    this.titleEl.textContent = t('{0}: {1}', [info.isPart ? 'パーツ' : '機体', info.name]);
     this.codeEl.value = info.code;
 
     try {
       const { modules } = drawQR(this.canvas, info.code);
-      this.sizeEl.textContent = `${info.bytes} バイト / QR ${modules}×${modules}`;
+      this.sizeEl.textContent = t('{0} バイト / QR {1}×{2}', [info.bytes, modules, modules]);
       this.canvas.classList.remove('hidden');
     } catch (e) {
       this.canvas.classList.add('hidden');
-      this.sizeEl.textContent = `${info.bytes} バイト — ${e.message}。テキストコードは使えます。`;
+      this.sizeEl.textContent = t('{0} バイト — {1}。テキストコードは使えます。', [info.bytes, e.message]);
     }
     return this;
   }
@@ -199,16 +200,16 @@ export class ShareDialog {
   async _copy() {
     try {
       await navigator.clipboard.writeText(this.code);
-      this._note('共有コードをコピーしました');
+      this._note(t('共有コードをコピーしました'));
     } catch {
       this.codeEl.select();
-      this._note('コピーできませんでした。選択されているので Ctrl+C を押してください');
+      this._note(t('コピーできませんでした。選択されているので Ctrl+C を押してください'));
     }
   }
 
   _savePng() {
     if (this.canvas.classList.contains('hidden')) {
-      this._note('QR にできないサイズです。テキストコードを使ってください');
+      this._note(t('QR にできないサイズです。テキストコードを使ってください'));
       return;
     }
     // Redraw larger so the saved file is worth scanning from a screen.
@@ -218,34 +219,34 @@ export class ShareDialog {
     a.href = big.toDataURL('image/png');
     a.download = `${(this.app.assembly.name || 'blostom').replace(/\s+/g, '_')}.qr.png`;
     a.click();
-    this._note('PNG を保存しました');
+    this._note(t('PNG を保存しました'));
   }
 
   // ---------------------------------------------------------- import
 
   async _readFile(file) {
     if (!file) return;
-    this._note('画像を読み取っています…');
+    this._note(t('画像を読み取っています…'));
     try {
       const text = await readQRFromImage(file);
-      if (!text) { this._note('画像から QR を読み取れませんでした'); return; }
+      if (!text) { this._note(t('画像から QR を読み取れませんでした')); return; }
       this.importEl.value = text;
       await this._import(text);
     } catch (e) {
-      this._note(`画像を読めませんでした: ${e.message}`);
+      this._note(t('画像を読めませんでした: {0}', [e.message]));
     }
   }
 
   _importText() { return this._import(this.importEl.value); }
 
   async _import(text) {
-    const t = String(text ?? '').trim();
-    if (!t) { this._note('コードが空です'); return; }
-    if (!isShareCode(t)) { this._note('BLOSTOM の共有コードではありません'); return; }
+    const code = String(text ?? '').trim();
+    if (!t) { this._note(t('コードが空です')); return; }
+    if (!isShareCode(t)) { this._note(t('BLOSTOM の共有コードではありません')); return; }
     try {
-      const assembly = await decodeShare(t);
+      const assembly = await decodeShare(code);
       const where = this.app.adoptShared(assembly);
-      this._note(`「${assembly.name}」を${where}に読み込みました`);
+      this._note(t('「{0}」を{1}に読み込みました', [assembly.name, where]));
       await this.refresh();
     } catch (e) {
       this._note(e.message);

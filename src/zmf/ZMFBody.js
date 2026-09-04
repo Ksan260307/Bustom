@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { clamp, clamp01, damp, smoothstep } from './math.js';
+import { clamp01, damp, smoothstep } from './math.js';
 import { InertiaCore } from './InertiaCore.js';
 import { VelocityLayerSystem } from './VelocityLayer.js';
 import { AngularDynamics } from './AngularDynamics.js';
@@ -97,6 +97,13 @@ export class ZMFBody {
      */
     this.landing = 0;
     this.landed = 0;
+    /**
+     * 0..1 — how hard the machine is holding its heading.
+     *
+     * Set from outside, by whatever knows a beam is lit. The body does not
+     * look at the weapons itself: it is the layer underneath them.
+     */
+    this.bracing = 0;
 
     this.setStats(stats, opts.rideHeight ?? 1.0);
   }
@@ -735,6 +742,16 @@ export class ZMFBody {
       accel: this.inertia.accel,
       layerTurn: this.layers.turn,
       grounded,
+      /*
+       * Holding a beam on something.
+       *
+       * Every other weapon is aimed at the instant it goes off, so whatever
+       * the machine does next cannot make that shot miss. A beam is aimed
+       * for as long as it is held — so the nose settling onto the travel
+       * direction, which is the right thing for a machine that is running,
+       * drags the beam off the target the whole time it is lit.
+       */
+      bracing: this.bracing ?? 0,
     }, dt);
   }
 

@@ -5,7 +5,8 @@ import {
   BONE_LENGTH_MIN, BONE_LENGTH_MAX, BONE_RADIUS_MIN, BONE_RADIUS_MAX,
   EQUIP, EQUIP_META, EQUIP_SIZE_DEFAULT, snapEquipSize,
   CIRCLE_RADIUS_DEFAULT, snapCircleRadius,
-  SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, SIZE_STEP, SIZE_MAX, WEAPON_SLOTS,
+  SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, SIZE_STEP, WEAPON_SLOTS,
+  WEAPON_SAME_MAX,
   BUDGET,
   BONE_GAIN_MAX, BONE_LAG_MAX, BONE_MOTION_DEFAULT,
   WEAPON_BONE_DEFAULT, BONE_FOLLOW_DEFAULT, CHAIN_FALLOFF_DEFAULT,
@@ -468,7 +469,11 @@ export class Assembly {
     const meta = EQUIP_META[type];
     if (!meta) return 'unknown';
     if (meta.unique && this.countEquip(type) >= 1) return 'unique';
-    if (meta.category === 'weapon' && this.weaponCount() >= WEAPON_SLOTS) return 'rack';
+    if (meta.category === 'weapon') {
+      if (this.weaponCount() >= WEAPON_SLOTS) return 'rack';
+      // And no more than three of one kind: see WEAPON_SAME_MAX.
+      if (this.countEquip(type) >= WEAPON_SAME_MAX) return 'same';
+    }
     if (!this.hasRoomFor('equip')) return 'budget';
     for (const other of meta.conflicts ?? []) {
       if (this.countEquip(other) > 0) return other;
@@ -1386,22 +1391,6 @@ const clamp01 = (v) => Math.min(1, Math.max(0, v));
 // ============================================================
 //  Presets — the editor ships with something already walking.
 // ============================================================
-
-/**
- * A bend applied where a bone chains off the tip of another one.
- *
- * `addBoneOnTip` continues straight along the parent, which is right for a
- * strut and wrong for a limb: a knee or an elbow that starts perfectly
- * straight has to be bent by the animator every frame just to stop the
- * machine looking like it is standing to attention. Building the bend into
- * the mount gives the limb a resting shape of its own.
- *
- * Positive `deg` folds the tip FORWARD (+Z) for a bone hanging downward.
- */
-function bentTip(bone, deg) {
-  const q = new THREE.Quaternion().setFromAxisAngle(_v.set(1, 0, 0), (deg * Math.PI) / 180);
-  return { pos: boneAnchor(bone.length), rot: q.toArray() };
-}
 
 /**
  * The machines that come with the game.

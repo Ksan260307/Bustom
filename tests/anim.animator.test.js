@@ -1186,7 +1186,9 @@ describe('the gait asks the machine how long its legs are', () => {
     // away came out 35% short, which is a third of every step dragged.
     const a = PRESETS.biped.build();
     const rig = new Rig(a);
-    const animator = new Animator(rig, computeStats(a, rig));
+    // Built for its side effect and not for the object: the constructor is
+    // what runs the calibration sweep that sets `limb.lever`.
+    void new Animator(rig, computeStats(a, rig));
     const limb = rig.limbs[0];
     expect(limb.lever, 'the measured lever is shorter than the bare geometry')
       .toBeLessThan(limb.reach);
@@ -1210,7 +1212,7 @@ describe('the gait asks the machine how long its legs are', () => {
     const a = PRESETS.biped.build();
     const rig = new Rig(a);
     const before = rig.joints.map((n) => n.joint.quaternion.clone());
-    // eslint-disable-next-line no-new
+     
     new Animator(rig, computeStats(a, rig));
     rig.joints.forEach((n, i) => {
       expect(n.joint.quaternion.angleTo(before[i]), n.part.id).toBeLessThan(1e-6);
@@ -1311,5 +1313,161 @@ describe('a step to the side is not a stride turned sideways', () => {
     const fast = sideStep('biped', 16).animator;
     expect(fast.slide, 'past its own side-step, it is being carried')
       .toBeGreaterThan(0.5);
+  });
+});
+
+// ============================================================
+//  A shoulder and a hip are ball joints, not hinges.
+// ============================================================
+
+/** How far a joint turns about each of its OWN three axes, over a cycle. */
+function axisSpans(preset, extra = {}) {
+  const a = PRESETS[preset].build();
+  const rig = new Rig(a);
+  const animator = new Animator(rig, computeStats(a, rig));
+  const s = {
+    dt: 1 / 60, speed: 8, planarSpeed: 8, grounded: 1, airborne: 0,
+    velocity: new THREE.Vector3(0, 0, 8), bodyQ: new THREE.Quaternion(),
+    aimDir: null, locked: 0, thrust: 0.2, jerk: 0, dashSpeed: 30, walkCap: 17,
+    ...extra,
+  };
+  const nodes = [
+    ['hip', rig.limbs[0]?.chain[0]],
+    ['knee', rig.limbs[0]?.chain[1]],
+    ['shoulder', rig.armBones.find((n) => (n.chainDepth ?? 0) === 0)],
+  ].filter(([, n]) => n);
+  const out = new Map(nodes.map(([tag]) => [tag, { stride: 0, splay: 0, twist: 0 }]));
+  const seen = new Map(nodes.map(([tag]) => [tag, {}]));
+  for (let i = 0; i < 600; i++) {
+    animator.update(s);
+    if (i <= 300) continue;
+    for (const [tag, node] of nodes) {
+      const q = node.joint.quaternion;
+      for (const [k, ax] of [['stride', node.axisStride], ['splay', node.axisSplay],
+        ['twist', node.axisTwist]]) {
+        if (!ax) continue;
+        const v = 2 * Math.atan2(q.x * ax.x + q.y * ax.y + q.z * ax.z, q.w) * (180 / Math.PI);
+        const r = seen.get(tag);
+        r[k] = r[k] ?? [v, v];
+        r[k][0] = Math.min(r[k][0], v);
+        r[k][1] = Math.max(r[k][1], v);
+        out.get(tag)[k] = r[k][1] - r[k][0];
+      }
+    }
+  }
+  return { spans: out, animator, rig };
+}
+
+describe('the joints that were being worked as hinges', () => {
+  it('turns a hip about all three of its axes, not one', () => {
+    // Measured before this existed: 88 degrees fore and aft, and exactly
+    // ZERO about the other two. A ball joint driven on one axis swings in a
+    // flat plane like a pendulum on a pin, which is what "stiff" is — the
+    // problem was never the size of the swing.
+    const { spans } = axisSpans('biped');
+    const hip = spans.get('hip');
+    expect(hip.stride, 'the swing it always had').toBeGreaterThan(40);
+    expect(hip.splay, `splay ${hip.splay.toFixed(1)}°`).toBeGreaterThan(4);
+    expect(hip.twist, `twist ${hip.twist.toFixed(1)}°`).toBeGreaterThan(4);
+  });
+
+  it('and the shoulder too', () => {
+    const { spans } = axisSpans('biped');
+    const sh = spans.get('shoulder');
+    expect(sh.splay).toBeGreaterThan(1);
+    expect(sh.twist).toBeGreaterThan(1);
+  });
+
+  it('but keeps the extra axes small — the phase does the work', () => {
+    // Two sines a quarter of a cycle apart trace an ellipse, and a limb
+    // whose tip goes round a closed curve reads as a joint. Making the
+    // second axis BIG instead would just be a wider hinge.
+    const { spans } = axisSpans('biped');
+    const hip = spans.get('hip');
+    expect(hip.splay).toBeLessThan(hip.stride * 0.4);
+    expect(hip.twist).toBeLessThan(hip.stride * 0.4);
+  });
+
+  it('and stops moving them when the machine is not walking', () => {
+    // The ellipse belongs to the gait. A machine standing still with a hip
+    // quietly rolling is a machine with a twitch.
+    const { spans } = axisSpans('biped', {
+      speed: 0, planarSpeed: 0, velocity: new THREE.Vector3(),
+    });
+    expect(spans.get('hip').splay).toBeLessThan(2);
+    expect(spans.get('hip').twist).toBeLessThan(2);
+  });
+
+  it('turns the chest against the hips', () => {
+    // Without it, everything above the waist is one rigid piece that never
+    // answers what the legs are doing.
+    const a = PRESETS.biped.build();
+    const rig = new Rig(a);
+    const animator = new Animator(rig, computeStats(a, rig));
+    const s = {
+      dt: 1 / 60, speed: 8, planarSpeed: 8, grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(0, 0, 8), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 0, thrust: 0.2, jerk: 0, dashSpeed: 30, walkCap: 17,
+    };
+    const body = new THREE.Object3D();
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = 0; i < 400; i++) {
+      animator.update(s);
+      if (i <= 200) continue;
+      body.quaternion.identity();
+      body.position.set(0, 0, 0);
+      animator.applyBodyCarriage(body);
+      const e = new THREE.Euler().setFromQuaternion(body.quaternion, 'XZY');
+      lo = Math.min(lo, e.y);
+      hi = Math.max(hi, e.y);
+    }
+    expect((hi - lo) * (180 / Math.PI), 'the waist turns').toBeGreaterThan(4);
+  });
+});
+
+describe('the arc belongs to the leg that is in the air', () => {
+  it('leaves a planted foot where the floor put it', () => {
+    // Swinging a planted foot out from the hip puts it through the floor,
+    // and the foot-planting correction then spends every frame hauling the
+    // machine back out of its own animation. Measured, before this: the
+    // sole wandered 24.6 metres instead of 15 centimetres.
+    //
+    // The gate is not a workaround. A planted foot does not swing from the
+    // hip — the floor is holding it, and the machine turns about IT.
+    const a = PRESETS.biped.build();
+    const rig = new Rig(a);
+    const animator = new Animator(rig, computeStats(a, rig));
+    const s = {
+      dt: 1 / 60, speed: 8, planarSpeed: 8, grounded: 1, airborne: 0,
+      velocity: new THREE.Vector3(0, 0, 8), bodyQ: new THREE.Quaternion(),
+      aimDir: null, locked: 0, thrust: 0.2, jerk: 0, dashSpeed: 30, walkCap: 17,
+    };
+    const limb = rig.limbs[0];
+    const node = limb.chain[0];
+    // Averages, not peaks. The pose is filtered on its way to the joint, so
+    // the arc decays across the boundary instead of switching off — which
+    // is a leg, not a fault, and makes a peak taken either side of that
+    // moment measure the filter rather than the gait.
+    let planted = 0;
+    let plantedN = 0;
+    let swung = 0;
+    let swungN = 0;
+    for (let i = 0; i < 900; i++) {
+      animator.update(s);
+      if (i <= 300) continue;
+      const p = ((animator.gaitPhase + (limb.phaseOffset ?? 0)) % 1 + 1) % 1;
+      const q = node.joint.quaternion;
+      const ax = node.axisSplay;
+      const deg = Math.abs(2 * Math.atan2(q.x * ax.x + q.y * ax.y + q.z * ax.z, q.w))
+        * (180 / Math.PI);
+      // Lift is max(0, sin), so the swing half is where the sine is up.
+      if (Math.sin(p * Math.PI * 2) > 0) { swung += deg; swungN++; } else { planted += deg; plantedN++; }
+    }
+    const swungMean = swung / Math.max(1, swungN);
+    const plantedMean = planted / Math.max(1, plantedN);
+    expect(swungMean, 'the leg in the air arcs').toBeGreaterThan(1.5);
+    expect(plantedMean, `swing ${swungMean.toFixed(2)}° against stance ${plantedMean.toFixed(2)}°`)
+      .toBeLessThan(swungMean * 0.75);
   });
 });

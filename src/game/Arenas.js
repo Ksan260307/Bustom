@@ -167,17 +167,6 @@ function line(x, z, dx, dz, count, r, h, step = 2) {
   return out;
 }
 
-/** A rectangular bank: `cols` by `rows`, on the lattice. */
-function bank(x, z, cols, rows, r, h, step = 2) {
-  const out = [];
-  for (let c = 0; c < cols; c++) {
-    for (let d = 0; d < rows; d++) {
-      out.push([x + c * step * CELL, z + d * step * CELL, r, h]);
-    }
-  }
-  return out;
-}
-
 /** One piece, where it was put. */
 const one = (x, z, r, h) => [[at(x), at(z), r, h]];
 

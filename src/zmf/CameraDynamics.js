@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { clamp, clamp01, damp, smoothstep, lerp } from './math.js';
+import { clamp, clamp01, damp, smoothstep } from './math.js';
 
 // ============================================================
 //  ZMF §7 : Camera Dynamics
@@ -41,6 +41,14 @@ export class CameraDynamics {
     this.roll = 0;
     this.shake = new THREE.Vector3();
     this.shakeAmount = 0;
+    /**
+     * How much of the movement to keep, 0..1.
+     *
+     * The game is sold on how it moves, which is exactly why there has to
+     * be a way down. Set from the options screen, or from the operating
+     * system's own reduced-motion setting when the player has not chosen.
+     */
+    this.motionScale = 1;
 
     /**
      * Player-driven boom offset, in radians around the machine. Held while
@@ -357,12 +365,18 @@ export class CameraDynamics {
 
     // ---------------------------------------------------- FOV pumping
     const pump = clamp01(p.jerk / 260);
-    const fovTarget = (this.baseFov + speedN * 9 + p.thrust * 4.5 + pump * 5.5) * this.scope;
+    const fovTarget = (this.baseFov
+      + (speedN * 9 + p.thrust * 4.5 + pump * 5.5) * this.motionScale) * this.scope;
     this.fov = damp(this.fov, fovTarget, 0.14, dt);
 
     // ---------------------------------------------------- shake
+    //
+    // `motionScale` is 1 normally and 0 when the player has asked for less
+    // movement. It multiplies the shake, the FOV pump and the speed lines
+    // rather than switching them off in three places, so "reduced" can
+    // later mean "a quarter" without touching any of this.
     this.shakeAmount = damp(this.shakeAmount, clamp01(p.jerk / 320) * 0.55 + (p.impact ?? 0), 0.09, dt);
-    const a = this.shakeAmount * 0.34;
+    const a = this.shakeAmount * 0.34 * this.motionScale;
     if (a > 0.0005) {
       const t = performance.now() * 0.001;
       this.shake.set(
@@ -371,9 +385,11 @@ export class CameraDynamics {
     } else this.shake.set(0, 0, 0);
 
     // ---------------------------------------------------- exported VFX
-    this.vfx.chroma = damp(this.vfx.chroma, clamp01(p.thrust * 0.7 + speedN * 0.5) ** 2, 0.12, dt);
-    this.vfx.speedLines = damp(this.vfx.speedLines, clamp01(pump * 1.3 + smoothstep(0.55, 1, speedN) * 0.7), 0.10, dt);
-    this.vfx.fovPump = pump;
+    this.vfx.chroma = damp(this.vfx.chroma,
+      clamp01(p.thrust * 0.7 + speedN * 0.5) ** 2 * this.motionScale, 0.12, dt);
+    this.vfx.speedLines = damp(this.vfx.speedLines,
+      clamp01(pump * 1.3 + smoothstep(0.55, 1, speedN) * 0.7) * this.motionScale, 0.10, dt);
+    this.vfx.fovPump = pump * this.motionScale;
 
     // ---------------------------------------------------- commit
     const cam = this.camera;

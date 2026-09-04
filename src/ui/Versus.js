@@ -1,9 +1,27 @@
 import { h } from './dom.js';
 import { DesktopTransport, SteamTransport } from '../net/Transport.js';
 import { RtcTransport, rtcAvailable } from '../net/Rtc.js';
-import { Matchmaker } from '../net/Matchmaker.js';
+import { Matchmaker, DEFAULT_MATCHMAKER } from '../net/Matchmaker.js';
+
+/**
+ * The address to start with.
+ *
+ * Whatever was used last, else whatever this build ships pointing at. The
+ * box used to open empty with "enter the matchmaking server address", which
+ * is a question most players cannot answer — so internet play was, in
+ * practice, off.
+ */
+function savedMatchmaker() {
+  try {
+    return localStorage.getItem('blostom.matchmaker') || DEFAULT_MATCHMAKER;
+  } catch {
+    return DEFAULT_MATCHMAKER;
+  }
+}
+import { packDoc } from '../core/Codec.js';
 import { Session, PHASE, MAX_PLAYERS } from '../net/Session.js';
 import { DEFAULT_RULES, RULE_LIMITS } from '../game/Match.js';
+import { t } from './i18n.js';
 
 /**
  * Getting into a fight with somebody who is not in the room.
@@ -35,11 +53,11 @@ export class VersusScreen {
     });
     this.serverInput = h('input', {
       type: 'text', class: 'vs-addr', placeholder: 'example.com:45080', maxlength: '128',
-      value: localStorage.getItem('blostom.matchmaker') ?? '',
+      value: savedMatchmaker(),
     });
     this.myCodeEl = h('textarea', { class: 'vs-code', readonly: 'readonly', rows: '3' });
     this.theirCodeEl = h('textarea', {
-      class: 'vs-code', rows: '3', placeholder: '相手のコードを貼り付け',
+      class: 'vs-code', rows: '3', placeholder: t('相手のコードを貼り付け'),
     });
 
     this.rosterEl = h('div', { class: 'vs-roster' });
@@ -47,61 +65,61 @@ export class VersusScreen {
     this.hostInfoEl = h('div', { class: 'vs-host hidden' });
     this.rulesEl = h('div', { class: 'vs-rules' });
 
-    this.readyBtn = h('button', { class: 'primary', onClick: () => this._toggleReady() }, '準備完了');
+    this.readyBtn = h('button', { class: 'primary', onClick: () => this._toggleReady() }, t('準備完了'));
     this.lobbyEl = h('div', { class: 'vs-lobby hidden' },
       this.hostInfoEl,
       this.rosterEl,
       h('div', { class: 'row vs-actions' }, this.readyBtn,
-        h('button', { onClick: () => this.leave() }, '抜ける')),
+        h('button', { onClick: () => this.leave() }, t('抜ける'))),
     );
 
     this.codeEl = h('div', { class: 'vs-pane hidden' },
       h('div', { class: 'vs-paneline' },
-        h('span', { class: 'k' }, '自分のコード（相手に送る）'),
-        h('button', { class: 'tiny', onClick: () => this._copy() }, 'コピー')),
+        h('span', { class: 'k' }, t('自分のコード（相手に送る）')),
+        h('button', { class: 'tiny', onClick: () => this._copy() }, t('コピー'))),
       this.myCodeEl,
-      h('div', { class: 'vs-paneline' }, h('span', { class: 'k' }, '相手のコード')),
+      h('div', { class: 'vs-paneline' }, h('span', { class: 'k' }, t('相手のコード'))),
       this.theirCodeEl,
       h('div', { class: 'row vs-actions' },
-        h('button', { class: 'primary', onClick: () => this._codeOffer() }, '部屋を作る'),
-        h('button', { onClick: () => this._codeAnswer() }, 'コードで入る'),
-        h('button', { onClick: () => this._codeAccept() }, '返答を取り込む'),
+        h('button', { class: 'primary', onClick: () => this._codeOffer() }, t('部屋を作る')),
+        h('button', { onClick: () => this._codeAnswer() }, t('コードで入る')),
+        h('button', { onClick: () => this._codeAccept() }, t('返答を取り込む')),
       ),
     );
 
     this.queueEl = h('div', { class: 'vs-pane hidden' },
-      h('div', { class: 'vs-paneline' }, h('span', { class: 'k' }, 'マッチングサーバー')),
+      h('div', { class: 'vs-paneline' }, h('span', { class: 'k' }, t('マッチングサーバー'))),
       this.serverInput,
       h('div', { class: 'row vs-actions' },
-        h('button', { class: 'primary', onClick: () => this._queue() }, '対戦相手を探す'),
+        h('button', { class: 'primary', onClick: () => this._queue() }, t('対戦相手を探す')),
         // The one thing worth doing while a queue is not moving.
-        h('button', { onClick: () => this._waitInField() }, '待つ間フィールドで遊ぶ'),
-        h('button', { onClick: () => this._cancelQueue() }, 'やめる'),
+        h('button', { onClick: () => this._waitInField() }, t('待つ間フィールドで遊ぶ')),
+        h('button', { onClick: () => this._cancelQueue() }, t('やめる')),
       ),
     );
 
     this.lobbyListEl = h('div', { class: 'vs-roster' });
     this.steamEl = h('div', { class: 'vs-pane hidden' },
       h('div', { class: 'row vs-actions' },
-        h('button', { class: 'primary', onClick: () => this._steamHost() }, '部屋を作る'),
-        h('button', { onClick: () => this._steamList() }, '部屋をさがす'),
+        h('button', { class: 'primary', onClick: () => this._steamHost() }, t('部屋を作る')),
+        h('button', { onClick: () => this._steamList() }, t('部屋をさがす')),
       ),
       this.lobbyListEl,
     );
 
     this.lanEl = h('div', { class: 'vs-pane hidden' },
       h('div', { class: 'row vs-actions' },
-        h('button', { class: 'primary', onClick: () => this.host() }, '部屋を作る'),
+        h('button', { class: 'primary', onClick: () => this.host() }, t('部屋を作る')),
         this.addressInput,
-        h('button', { onClick: () => this.join() }, '接続'),
+        h('button', { onClick: () => this.join() }, t('接続')),
       ),
     );
 
     this.tabsEl = h('div', { class: 'vs-tabs' },
       ...[
         ['steam', 'Steam'],
-        ['queue', 'マッチング'],
-        ['code', 'コード交換'],
+        ['queue', t('マッチング')],
+        ['code', t('コード交換')],
         ['lan', 'LAN'],
       ].map(([id, label]) => h('button', {
         class: 'vs-tab', 'data-tab': id, onClick: () => this._tab(id),
@@ -112,7 +130,7 @@ export class VersusScreen {
       h('div', { class: 'vs-box' },
         h('div', { class: 'vs-head' },
           h('span', { class: 'vs-title' }, 'VERSUS'),
-          h('span', { class: 'vs-sub' }, `最大 ${MAX_PLAYERS} 人`)),
+          h('span', { class: 'vs-sub' }, t('最大 {0} 人', [MAX_PLAYERS]))),
         this.rulesEl,
         this.tabsEl,
         this.steamEl,
@@ -121,7 +139,7 @@ export class VersusScreen {
         this.lanEl,
         this.lobbyEl,
         this.noteEl,
-        h('div', { class: 'row vs-foot' }, h('button', { onClick: () => this.hide() }, '戻る')),
+        h('div', { class: 'row vs-foot' }, h('button', { onClick: () => this.hide() }, t('戻る'))),
       ),
     );
     // Steam first when it is there: no address to type, no code to paste,
@@ -155,15 +173,15 @@ export class VersusScreen {
     };
 
     this.rulesEl.replaceChildren(
-      row('1本の時間', `${Math.round(this.rules.roundSeconds / 60)}分`,
+      row(t('1本の時間'), t('{0}分', [Math.round(this.rules.roundSeconds / 60)]),
         () => bump('roundSeconds', -60), () => bump('roundSeconds', 60)),
-      row('先取', `${this.rules.wins}本`,
+      row(t('先取'), t('{0}本', [this.rules.wins]),
         () => bump('wins', -1), () => bump('wins', 1)),
-      row('人数', `${this.wantPlayers}人`, () => {
+      row(t('人数'), t('{0}人', [this.wantPlayers]), () => {
         this.wantPlayers = Math.max(2, this.wantPlayers - 1); this._renderRules();
       }, () => {
         this.wantPlayers = Math.min(MAX_PLAYERS, this.wantPlayers + 1); this._renderRules();
-      }, this.wantPlayers > 2 ? '負けても観戦できます' : ''),
+      }, this.wantPlayers > 2 ? t('負けても観戦できます') : ''),
     );
     // Once a match is settled the rules are the host's and are not ours to
     // move; showing them as still adjustable would be a lie.
@@ -189,8 +207,8 @@ export class VersusScreen {
   show() {
     this.open = true;
     this.el.classList.remove('hidden');
-    if (!DesktopTransport.available) this._note('この環境では対戦できません');
-    else if (!rtcAvailable()) this._note('インターネット対戦はこの環境では使えません（LANは使えます）');
+    if (!DesktopTransport.available) this._note(t('この環境では対戦できません'));
+    else if (!rtcAvailable()) this._note(t('インターネット対戦はこの環境では使えません（LANは使えます）'));
     this.render();
     return this;
   }
@@ -212,15 +230,15 @@ export class VersusScreen {
     const support = await SteamTransport.support();
     if (!support.ok) { this._note(support.reason); return; }
     try {
-      const t = await SteamTransport.host({
+      const transport = await SteamTransport.host({
         players: this.wantPlayers,
         name: (this.app.assembly?.name ?? 'PLAYER').slice(0, 16),
         rules: this.rules,
       });
-      this._joinWith(t, true, null);
-      this._note('Steamに部屋を作りました。相手を待っています');
+      await this._joinWith(transport, true, null);
+      this._note(t('Steamに部屋を作りました。相手を待っています'));
     } catch (e) {
-      this._note(`部屋を作れませんでした（${e?.message ?? 'エラー'}）`);
+      this._note(t('部屋を作れませんでした（{0}）', [e?.message ?? 'エラー']));
     }
   }
 
@@ -231,7 +249,7 @@ export class VersusScreen {
       const rooms = await SteamTransport.list();
       if (!rooms.length) {
         this.lobbyListEl.replaceChildren(
-          h('div', { class: 'vs-slot empty' }, h('span', { class: 'vs-name' }, '空いている部屋がありません')),
+          h('div', { class: 'vs-slot empty' }, h('span', { class: 'vs-name' }, t('空いている部屋がありません'))),
         );
         return;
       }
@@ -241,35 +259,46 @@ export class VersusScreen {
         h('span', { class: 'vs-name' }, r.name || r.id.slice(-6)),
         h('span', { class: 'vs-state' },
           `${r.players}/${r.limit}`
-          + (r.rules ? ` ・ ${Math.round((r.rules.roundSeconds ?? 300) / 60)}分 ${r.rules.wins ?? 3}本` : '')),
-        h('button', { class: 'tiny', onClick: () => this._steamJoin(r.id) }, '入る'))));
+          + (r.rules ? t(' ・ {0}分 {1}本', [Math.round((r.rules.roundSeconds ?? 300) / 60), r.rules.wins ?? 3]) : '')),
+        h('button', { class: 'tiny', onClick: () => this._steamJoin(r.id) }, t('入る')))));
     } catch (e) {
-      this._note(`さがせませんでした（${e?.message ?? 'エラー'}）`);
+      this._note(t('さがせませんでした（{0}）', [e?.message ?? 'エラー']));
     }
   }
 
   async _steamJoin(id) {
     try {
-      this._joinWith(await SteamTransport.join(id), false, null);
-      this._note('部屋に入りました');
+      await this._joinWith(await SteamTransport.join(id), false, null);
+      this._note(t('部屋に入りました'));
     } catch (e) {
-      this._note(`入れませんでした（${e?.message ?? 'エラー'}）`);
+      this._note(t('入れませんでした（{0}）', [e?.message ?? 'エラー']));
     }
   }
 
   /** A queue on a matchmaker. */
   async _queue() {
     const addr = this.serverInput.value.trim();
-    if (!addr) { this._note('マッチングサーバーのアドレスを入れてください'); return; }
-    localStorage.setItem('blostom.matchmaker', addr);
+    if (!addr) {
+      // Not a scolding: this build may simply not point at one, and the two
+      // ways to play that need no server are both on this screen.
+      this._note(DEFAULT_MATCHMAKER
+        ? t('マッチングサーバーのアドレスを入れてください')
+        : t('このビルドには公開サーバーがありません。コード交換かLANで対戦できます'));
+      return;
+    }
+    try {
+      localStorage.setItem('blostom.matchmaker', addr);
+    } catch {
+      // Private mode. The queue still runs; it just is not remembered.
+    }
     this.maker = new Matchmaker({
       name: (this.app.assembly?.name ?? 'PLAYER').slice(0, 16),
-      onNotice: (t) => this._note(t),
-      onState: (state, m) => {
+      onNotice: (msg) => this._note(msg),
+      onState: async (state, m) => {
         if (state === 'queued') {
-          this._note(`対戦相手を探しています（${m.waiting}/${m.players}人）`);
+          this._note(t('対戦相手を探しています（{0}/{1}人）', [m.waiting, m.players]));
         }
-        if (state === 'ready') this._joinWith(m.transport, m.seat === 0, m.rules, true);
+        if (state === 'ready') await this._joinWith(m.transport, m.seat === 0, m.rules, true);
       },
     });
     await this.maker.queue(addr, { players: this.wantPlayers, rules: this.rules });
@@ -290,55 +319,55 @@ export class VersusScreen {
    */
   _waitInField() {
     if (!this.maker || this.maker.state !== 'queued') {
-      this._note('先に対戦相手を探してください');
+      this._note(t('先に対戦相手を探してください'));
       return;
     }
-    this._note('マッチングは続いています。相手が見つかったら戻ります');
+    this._note(t('マッチングは続いています。相手が見つかったら戻ります'));
     this.el.classList.add('hidden');
     this.app.setMode('field');
   }
 
   /** Swap codes by hand: no server anywhere. */
   async _codeOffer() {
-    if (!rtcAvailable()) { this._note('この環境では使えません'); return; }
-    this._note('コードを作っています…');
+    if (!rtcAvailable()) { this._note(t('この環境では使えません')); return; }
+    this._note(t('コードを作っています…'));
     const { transport, code, accept } = await RtcTransport.offer('h');
     this._rtc = { transport, accept };
     this.myCodeEl.value = code;
-    this._note('このコードを相手に送り、返ってきたコードを貼って「返答を取り込む」');
+    this._note(t('このコードを相手に送り、返ってきたコードを貼って「返答を取り込む」'));
   }
 
   async _codeAnswer() {
     const theirs = this.theirCodeEl.value.trim();
-    if (!theirs) { this._note('相手のコードを貼ってください'); return; }
+    if (!theirs) { this._note(t('相手のコードを貼ってください')); return; }
     try {
       const { transport, code } = await RtcTransport.answer(theirs, 'g');
       this.myCodeEl.value = code;
-      this._note('このコードを相手に返してください');
+      this._note(t('このコードを相手に返してください'));
       await transport.ready();
-      this._joinWith(transport, false, null);
+      await this._joinWith(transport, false, null);
     } catch (e) {
-      this._note(`つながりませんでした（${e?.message ?? 'エラー'}）`);
+      this._note(t('つながりませんでした（{0}）', [e?.message ?? 'エラー']));
     }
   }
 
   async _codeAccept() {
     const theirs = this.theirCodeEl.value.trim();
-    if (!this._rtc || !theirs) { this._note('先に部屋を作り、相手の返答を貼ってください'); return; }
+    if (!this._rtc || !theirs) { this._note(t('先に部屋を作り、相手の返答を貼ってください')); return; }
     try {
       await this._rtc.accept(theirs);
       await this._rtc.transport.ready();
-      this._joinWith(this._rtc.transport, true, null);
+      await this._joinWith(this._rtc.transport, true, null);
     } catch (e) {
-      this._note(`つながりませんでした（${e?.message ?? 'エラー'}）`);
+      this._note(t('つながりませんでした（{0}）', [e?.message ?? 'エラー']));
     }
   }
 
   _copy() {
     this.myCodeEl.select?.();
     navigator.clipboard?.writeText(this.myCodeEl.value).then(
-      () => this._note('コピーしました'),
-      () => this._note('選択してコピーしてください'),
+      () => this._note(t('コピーしました')),
+      () => this._note(t('選択してコピーしてください')),
     );
   }
 
@@ -346,41 +375,41 @@ export class VersusScreen {
   async host() {
     try {
       const transport = await DesktopTransport.host();
-      this._joinWith(transport, true, null);
+      await this._joinWith(transport, true, null);
       const at = transport.address?.addresses ?? [];
       this.hostInfoEl.classList.remove('hidden');
       this.hostInfoEl.replaceChildren(
-        h('span', { class: 'k' }, 'このアドレスを相手に伝えてください'),
+        h('span', { class: 'k' }, t('このアドレスを相手に伝えてください')),
         ...(at.length ? at.map((a) => h('span', { class: 'vs-ip' }, a))
-          : [h('span', { class: 'vs-ip warn' }, 'ネットワークが見つかりません')]),
+          : [h('span', { class: 'vs-ip warn' }, t('ネットワークが見つかりません'))]),
       );
-      this._note('相手の接続を待っています');
+      this._note(t('相手の接続を待っています'));
     } catch (e) {
-      this._note(`部屋を作れませんでした（${e?.code ?? e?.message ?? 'エラー'}）`);
+      this._note(t('部屋を作れませんでした（{0}）', [e?.code ?? e?.message ?? 'エラー']));
     }
   }
 
   async join() {
     const addr = this.addressInput.value.trim();
-    if (!addr) { this._note('アドレスを入力してください'); return; }
+    if (!addr) { this._note(t('アドレスを入力してください')); return; }
     try {
       const [host, port] = addr.split(':');
-      this._joinWith(await DesktopTransport.join(host, Number(port) || undefined), false, null);
-      this._note('接続しました');
+      await this._joinWith(await DesktopTransport.join(host, Number(port) || undefined), false, null);
+      this._note(t('接続しました'));
     } catch (e) {
-      this._note(`つながりませんでした（${e?.code ?? e?.message ?? 'エラー'}）`);
+      this._note(t('つながりませんでした（{0}）', [e?.code ?? e?.message ?? 'エラー']));
     }
   }
 
   // ---------------------------------------------------------------- lobby
 
-  _joinWith(transport, isHost, rules, matched = false) {
+  async _joinWith(transport, isHost, rules, matched = false) {
     if (this.session) return this;
     this.session = new Session({
       transport,
       isHost,
       name: (this.app.assembly?.name ?? 'PLAYER').slice(0, 16),
-      machine: this.app.assembly?.toJSON?.() ?? null,
+      machine: await packDoc(this.app.assembly.toJSON()),
       rules: rules ?? this.rules,
       // Four steps of input delay. Enough for a house network and about
       // where a person starts to feel it — it is the whole trade, so it is
@@ -388,10 +417,16 @@ export class VersusScreen {
       delay: 4,
     });
     this.session.onRoster = () => this.render();
-    this.session.onNotice = (t) => this._note(t);
+    this.session.onNotice = (msg) => this._note(msg);
     this.session.onPhase = (p) => {
       this.render();
-      if (p === PHASE.FIGHT) this.app.beginVersus?.(this.session);
+      // beginVersus is asynchronous now — the machines arrive packed and
+      // have to be inflated. Nothing here waits on the result; the phase
+      // change has already happened and the field opens when it opens.
+      if (p === PHASE.FIGHT) {
+        Promise.resolve(this.app.beginVersus?.(this.session))
+          .catch((e) => this._note(String(e?.message ?? e)));
+      }
     };
     this._tab(this.tab);
     this.lobbyEl.classList.remove('hidden');
@@ -442,10 +477,10 @@ export class VersusScreen {
       h('span', { class: 'vs-state' }, p.here ? (p.ready ? 'READY' : 'WAITING') : 'LEFT'),
     ));
     for (let i = this.session.roster.length; i < this.wantPlayers; i++) {
-      rows.push(h('div', { class: 'vs-slot empty' }, h('span', { class: 'vs-name' }, '空き')));
+      rows.push(h('div', { class: 'vs-slot empty' }, h('span', { class: 'vs-name' }, t('空き'))));
     }
     this.rosterEl.replaceChildren(...rows);
-    this.readyBtn.textContent = this.session.me?.ready ? '準備を取り消す' : '準備完了';
+    this.readyBtn.textContent = this.session.me?.ready ? t('準備を取り消す') : t('準備完了');
     this.readyBtn.classList.toggle('primary', !this.session.me?.ready);
     return this;
   }

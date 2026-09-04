@@ -1,3 +1,4 @@
+import { t } from './i18n.js';
 // ============================================================
 //  The two DOM helpers the whole UI is built out of. They live apart from
 //  EditorUI so panels can share them without importing the editor.
@@ -59,7 +60,7 @@ export function readNumber(text, fallback = 0) {
   if (Number.isFinite(plain)) return plain;
   if (!/^[-+*/().\d\s]+$/.test(raw)) return fallback;
   try {
-    // eslint-disable-next-line no-new-func
+     
     const v = Function(`"use strict";return (${raw});`)();
     return Number.isFinite(v) ? v : fallback;
   } catch {
@@ -120,7 +121,7 @@ export function vectorField(label, value, step, onChange) {
     type: 'text', inputmode: 'decimal', step,
     value: Number(value[['X', 'Y', 'Z'].indexOf(axis)]).toFixed(2),
     'aria-label': `${label} ${axis}`,
-    title: `${label} ${axis} — Altを押しながら左右にドラッグ、「0.5*3」のような式も打てます`,
+    title: t('{0} {1} — Altを押しながら左右にドラッグ、「0.5*3」のような式も打てます', [label, axis]),
     onChange: fire,
   }), step, fire));
   const wrap = h('div', { class: 'vecbox' },
@@ -243,7 +244,7 @@ export function resizable(el, {
   };
 
   const grip = (cls, axes) => {
-    const g = h('div', { class: `grip ${cls}`, title: 'ドラッグでサイズ変更 / ダブルクリックで戻す' });
+    const g = h('div', { class: `grip ${cls}`, title: t('ドラッグでサイズ変更 / ダブルクリックで戻す') });
     g.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();

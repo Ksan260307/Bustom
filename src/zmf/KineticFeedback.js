@@ -9,6 +9,15 @@ import { sfxBytes } from '../game/Kit.js';
 //  actual thrust output, and jerk. Nothing here is triggered by an event.
 // ============================================================
 
+/**
+ * What "full volume" means for everything this makes.
+ *
+ * This number was written into four places as a bare 0.22 and could not be
+ * reached from anywhere. It is now the ceiling that the options slider
+ * scales, so 100% sounds exactly as the game always did.
+ */
+const FULL_GAIN = 0.22;
+
 export class KineticFeedback {
   constructor() {
     this.ctx = null;
@@ -16,6 +25,8 @@ export class KineticFeedback {
     this.master = null;
     this.nodes = null;
     this.muted = false;
+    /** 0..1, from the options screen. Multiplies FULL_GAIN. */
+    this.gain = 1;
 
     /** Visual channel, read by the renderer / HUD each frame. */
     this.visual = { chroma: 0, noise: 0, flash: 0 };
@@ -135,6 +146,10 @@ export class KineticFeedback {
     this.master = master;
     this.nodes = { oscA, oscB, filter, thrustGain, noiseFilter, noiseGain };
     this.enabled = true;
+    // The graph is built the first time a gesture lets it be, which is long
+    // after the options were read — so it opens at whatever volume the
+    // player already chose rather than at the hard-coded one.
+    if (!this.muted) master.gain.value = this.gain * FULL_GAIN;
     return true;
   }
 
@@ -219,7 +234,23 @@ export class KineticFeedback {
    * @param {number} weight 0..1 — a pellet or a cannon
    * @param {boolean} mine  ours is brighter and louder; theirs sits behind it
    */
-  fire(weight = 0.5, mine = true) {
+  /**
+   * A gun going off.
+   *
+   * Three layers, which is what a gun in a game is made of and what a
+   * single sample never sounds like:
+   *
+   *   - the RECORDING, which carries the crack and the room it was fired
+   *     in. This is the part that was synthesised before, and the part
+   *     that made every shot sound like a beep;
+   *   - a filtered noise BURST on top of the transient, which puts the
+   *     shot in this room rather than the one it was recorded in;
+   *   - a low THUMP under the heavy ones, which is the part you feel.
+   *
+   * @param voice which firearm — see WEAPON_VOICE. Falls back to the light
+   *   one, so a new weapon is never silent.
+   */
+  fire(weight = 0.5, mine = true, voice = 'fire-light') {
     if (!this.audible) return;
     const w = clamp01(weight);
     this._burst({
@@ -230,13 +261,12 @@ export class KineticFeedback {
       q: 0.7,
     });
     if (w > 0.5) this._thump({ gain: 0.14 * w, from: 160, to: 55, life: 0.10 + w * 0.1 });
-    // A cannon gets the bang; a gatling gets the crack, pitched up so a
-    // stream of them does not turn into a drum roll.
-    this._sample(
-      w > 0.5 ? 'fire-heavy' : 'fire-light',
-      (mine ? 0.5 : 0.26) * (0.5 + w * 0.6),
-      w > 0.5 ? 0.9 + w * 0.2 : 1.25 - w * 0.3,
-    );
+    // Barely pitched at all now. The pitch shifting was standing in for
+    // having only two recordings, and a rifle played fast is a rifle played
+    // fast — it does not become a different gun.
+    if (!this._sample(voice, (mine ? 0.62 : 0.3) * (0.55 + w * 0.55), 0.98)) {
+      this._sample('fire-light', (mine ? 0.5 : 0.26) * (0.5 + w * 0.6), 1.1 - w * 0.2);
+    }
   }
 
   /** Something arrived. `mine` is a hit WE landed — the one worth hearing. */
@@ -340,14 +370,28 @@ export class KineticFeedback {
     }
   }
 
+  /**
+   * How loud everything this makes is, 0..1.
+   *
+   * The master gain was 0.22, written here, with no way to reach it — so
+   * `setMuted` was the only volume control and nothing called that either.
+   * 0.22 is now what 1.0 means, so the game at full sounds exactly as it
+   * always did and the slider only goes down from there.
+   */
+  setGain(g) {
+    this.gain = Math.max(0, Math.min(1, Number.isFinite(g) ? g : 1));
+    if (this.master && !this.muted) this.master.gain.value = this.gain * FULL_GAIN;
+    return this;
+  }
+
   setMuted(m) {
     this.muted = m;
-    if (this.master) this.master.gain.value = m ? 0 : 0.22;
+    if (this.master) this.master.gain.value = m ? 0 : this.gain * FULL_GAIN;
   }
 
   resume() {
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
-    if (this.master && !this.muted) this.master.gain.value = 0.22;
+    if (this.master && !this.muted) this.master.gain.value = this.gain * FULL_GAIN;
   }
 
   suspend() {
@@ -376,7 +420,7 @@ export class KineticFeedback {
   _hold(name, gain, pitch = 1) {
     if (!this.audible || !this.loopGain) return false;
     const ctx = this.ctx;
-    let entry = this.loops.get(name);
+    const entry = this.loops.get(name);
 
     if (entry === undefined) {
       const bytes = sfxBytes(name);
@@ -488,6 +532,17 @@ export class KineticFeedback {
      * one note however hard it is working is a machine with a tape recorder
      * in it.
      */
+    /*
+     * The place itself, underneath everything.
+     *
+     * Held the same way the servos are, and quiet: this is the floor of the
+     * mix, not a thing anybody should be able to point at. Handed in by
+     * whoever knows which arena is loaded — the feedback layer has never
+     * heard of an arena and should not start now.
+     */
+    this._hold('air', clamp01(s.air ?? 0) * 0.22, 1);
+    this._hold('deep', clamp01(s.deep ?? 0) * 0.3, 1);
+
     const gait = clamp01(s.gait ?? 0);
     this._hold('servo', gait * 0.16 * (s.grounded ?? 1), 0.85 + gait * 0.5);
     this._hold('thrust', clamp01(s.thrust) * 0.3, 0.9 + clamp01(s.thrust) * 0.4);

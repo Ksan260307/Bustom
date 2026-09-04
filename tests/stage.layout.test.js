@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ARENAS, ARENA_ORDER, CELL, GAUGE } from '../src/game/Arenas.js';
 import {
-  readArena, mirrorsOf, spawnPoints, spawnClear, faults, toSource, snap,
+  readArena, mirrorsOf, spawnPoints, faults, toSource, snap,
 } from '../src/stage/Layout.js';
 
 // ============================================================

@@ -6,12 +6,12 @@ import {
   EQUIP_META, WEAPON_TYPES, SYSTEM_TYPES,
   EQUIP_SIZE_MIN, EQUIP_SIZE_MAX, EQUIP_SIZE_STEP,
   SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_WAVES, CUSTOM_SOURCES,
-  CIRCLE_RADIUS_MIN, CIRCLE_RADIUS_MAX, CIRCLE_RADIUS_STEP, EQUIP,
+  CIRCLE_RADIUS_MIN, CIRCLE_RADIUS_MAX, CIRCLE_RADIUS_STEP,
   RING_PLANES, RING_PLANE_DEFAULT,
   BONE_GAIN_MAX, BONE_LAG_MAX, LIMIT_MODES, CHAIN_FALLOFF_DEFAULT,
   BUDGET, BUDGET_LABEL,
 } from '../core/constants.js';
-import { PRESETS, PRESET_LIST, SIZE_CLASSES } from '../core/Assembly.js';
+import { PRESET_LIST, SIZE_CLASSES } from '../core/Assembly.js';
 
 /** What each size class is called where a player will read it. */
 const SIZE_LABEL = {
@@ -30,6 +30,8 @@ import { partSketch } from './PartSketch.js';
 import { TitleScreen, ResultScreen } from './Title.js';
 import { SortieScreen } from './Sortie.js';
 import { VersusScreen } from './Versus.js';
+import { Replays } from './Replays.js';
+import { t } from './i18n.js';
 
 export { h, slider, vectorField };
 
@@ -50,11 +52,11 @@ export const ASSEMBLE_TOOLS = [
   { tool: TOOL.BLOCK, label: 'ブロック', key: 'B', color: '#c9d2dc' },
   { tool: TOOL.EQUIP, label: '装備プレート', key: 'G', color: '#8fd9ff' },
   { group: 'ボーン' },
-  { tool: TOOL.BONE_FACE, label: BONE_META.face.label, key: 'F', color: '#ff7ba6' },
-  { tool: TOOL.BONE_ARM, label: BONE_META.arm.label, key: 'A', color: '#ffc861' },
-  { tool: TOOL.BONE_LEG, label: BONE_META.leg.label, key: 'L', color: '#6fe3ff' },
-  { tool: TOOL.BONE_WEAPON, label: BONE_META.weapon.label, key: 'W', color: '#8effc9' },
-  { tool: TOOL.BONE_CUSTOM, label: BONE_META.custom.label, key: 'C', color: '#b98cff' },
+  { tool: TOOL.BONE_FACE, label: t(BONE_META.face.label), key: 'F', color: '#ff7ba6' },
+  { tool: TOOL.BONE_ARM, label: t(BONE_META.arm.label), key: 'A', color: '#ffc861' },
+  { tool: TOOL.BONE_LEG, label: t(BONE_META.leg.label), key: 'L', color: '#6fe3ff' },
+  { tool: TOOL.BONE_WEAPON, label: t(BONE_META.weapon.label), key: 'W', color: '#8effc9' },
+  { tool: TOOL.BONE_CUSTOM, label: t(BONE_META.custom.label), key: 'C', color: '#b98cff' },
   { group: '呼び出す' },
   { tool: TOOL.STAMP, label: 'パーツ配置', key: '—', color: '#8effc9' },
 ];
@@ -73,9 +75,9 @@ const BULLET_COLORS = [
 
 /** How a part reads in a list: its attribute if it has one, else its label. */
 function partName(p) {
-  if (p.kind === 'bone') return BONE_META[p.boneType].label;
-  if (p.kind === 'equip') return EQUIP_META[p.equipType]?.label ?? p.label;
-  return p.label;
+  if (p.kind === 'bone') return t(BONE_META[p.boneType].label);
+  if (p.kind === 'equip') return EQUIP_META[p.equipType]?.label ?? t(p.label);
+  return t(p.label);
 }
 
 /**
@@ -86,6 +88,9 @@ function partName(p) {
  */
 const PANEL_FOLD_BELOW = 1024;
 
+/** Shown once, ever: see offerFirstRun. */
+const FIRST_RUN_KEY = 'blostom.seen.v1';
+
 export class EditorUI {
   /** @param {HTMLElement} root  @param {object} app */
   constructor(root, app) {
@@ -94,7 +99,11 @@ export class EditorUI {
     this._wasNarrow = null;
     this._build();
     this.syncPanelWidth();
-    window.addEventListener('resize', () => this.syncPanelWidth());
+    // Named, so `dispose` can actually take it off again: an anonymous
+    // handler here survives every rebuild of the interface and goes on
+    // calling a panel that is no longer on screen.
+    this._onWinResize = () => this.syncPanelWidth();
+    window.addEventListener('resize', this._onWinResize);
   }
 
   /** Keep the free-placement height read-out in step with the scene. */
@@ -126,10 +135,10 @@ export class EditorUI {
     const b = s?.balance;
     const el = this.balanceNote;
     if (!el) return this;
-    if (!b) { el.textContent = '重心を出せません'; el.classList.remove('hidden'); return this; }
-    const side = Math.abs(b[0]) < 0.05 ? '中央' : (b[0] > 0 ? `右に ${b[0].toFixed(2)}m` : `左に ${(-b[0]).toFixed(2)}m`);
-    const fore = Math.abs(b[2]) < 0.05 ? '' : (b[2] > 0 ? ` / 前に ${b[2].toFixed(2)}m` : ` / 後ろに ${(-b[2]).toFixed(2)}m`);
-    el.textContent = `重心: 高さ ${b[1].toFixed(2)}m ・ ${side}${fore}`;
+    if (!b) { el.textContent = t('重心を出せません'); el.classList.remove('hidden'); return this; }
+    const side = Math.abs(b[0]) < 0.05 ? t('中央') : (b[0] > 0 ? t('右に {0}m', [b[0].toFixed(2)]) : t('左に {0}m', [(-b[0]).toFixed(2)]));
+    const fore = Math.abs(b[2]) < 0.05 ? '' : (b[2] > 0 ? t(' / 前に {0}m', [b[2].toFixed(2)]) : t(' / 後ろに {0}m', [(-b[2]).toFixed(2)]));
+    el.textContent = t('重心: 高さ {0}m ・ {1}{2}', [b[1].toFixed(2), side, fore]);
     el.classList.remove('hidden');
     return this;
   }
@@ -140,7 +149,7 @@ export class EditorUI {
     if (!box) return this;
     const app = this.app;
     box.replaceChildren(
-      h('button', { title: 'いまの形・寸法・色を覚えます', onClick: () => app.editor.keepRecipe() }, '＋'),
+      h('button', { title: t('いまの形・寸法・色を覚えます'), onClick: () => app.editor.keepRecipe() }, '＋'),
       ...(list ?? []).map((r, i) => h('button', {
         class: 'recipe',
         title: `${SHAPES[r.shape]?.label ?? ''} ${r.size.map((n) => n.toFixed(2)).join('x')}`,
@@ -183,14 +192,46 @@ export class EditorUI {
     const el = this.hiddenNote;
     if (!el) return this;
     const bits = [];
-    if (hidden) bits.push(`${hidden}個を隠しています`);
-    if (locked) bits.push(`${locked}個を固定しています`);
+    if (hidden) bits.push(t('{0}個を隠しています', [hidden]));
+    if (locked) bits.push(t('{0}個を固定しています', [locked]));
     el.textContent = bits.join(' / ');
     el.classList.toggle('hidden', !bits.length);
     return this;
   }
 
   /** Say whether there is anything unsaved, next to the machine's name. */
+  /**
+   * Take the interface down.
+   *
+   * Only needed because the language can change, and the language cannot be
+   * changed by re-rendering: half of what is on screen — the tool buttons,
+   * the title's menu rows — is built in a constructor. So the whole thing
+   * is made again, and this is the half of that which the DOM cannot do by
+   * itself: the listeners that live on `window` and `document`.
+   */
+  dispose() {
+    window.removeEventListener('resize', this._onWinResize);
+    document.removeEventListener('pointerdown', this._onDocDown);
+    this.keyConfig?.dispose?.();
+    this.title?.dispose?.();
+    this.sortie?.dispose?.();
+    this.help?.dispose?.();
+    this.share?.dispose?.();
+    this.versus?.dispose?.();
+    this.replays?.dispose?.();
+    return this;
+  }
+
+  /** Repaint everything that is generated from a table. */
+  syncAll() {
+    this.renderPalette?.();
+    this.renderLibrary?.();
+    this.syncHistory?.();
+    this.renderInspector?.(this.app?.editor?.selectedParts?.() ?? null);
+    this.renderStats?.(this.app?.editor?.stats);
+    return this;
+  }
+
   syncDirty(dirty) {
     this.dirtyDot?.classList.toggle('hidden', !dirty);
     return this;
@@ -206,13 +247,13 @@ export class EditorUI {
     if (!box) return this;
     const past = this.app.history.past;
     if (!past.length) {
-      box.replaceChildren(h('div', { class: 'inspector-empty' }, 'まだ何もしていません。'));
+      box.replaceChildren(h('div', { class: 'inspector-empty' }, t('まだ何もしていません。')));
       return this;
     }
     box.replaceChildren(...past.slice(-24).reverse().map((entry, i) => h('button', {
       class: 'historyrow',
       onClick: () => { for (let k = 0; k <= i; k++) this.app.undo(); this.renderHistory(); },
-    }, h('span', { class: 'k' }, i === 0 ? '直前' : `${i + 1}手前`), entry.label)));
+    }, h('span', { class: 'k' }, i === 0 ? t('直前') : t('{0}手前', [i + 1])), t(entry.label))));
     return this;
   }
 
@@ -223,7 +264,7 @@ export class EditorUI {
     const list = this.app.slots();
     if (!list.length) {
       box.replaceChildren(h('div', { class: 'inspector-empty' },
-        'まだありません。「名前を付けて保存」で残せます。'));
+        t('まだありません。「名前を付けて保存」で残せます。')));
       return this;
     }
     box.replaceChildren(...list.map((entry) => h('div', { class: 'slotrow' },
@@ -232,7 +273,7 @@ export class EditorUI {
         onClick: () => { this.app.openSlot(entry.id); this._closeMenus(); },
       }, entry.name || 'NO NAME'),
       h('button', {
-        class: 'danger', title: 'この保存を削除',
+        class: 'danger', title: t('この保存を削除'),
         onClick: (e) => { e.stopPropagation(); this.app.deleteSlot(entry.id); },
       }, '×'),
     )));
@@ -280,6 +321,31 @@ export class EditorUI {
    * Not the same as declining: the draft stays on disk, and the file menu
    * still has "前回の作業を復元" in it. Only the window goes.
    */
+  /**
+   * Show the welcome, once ever.
+   *
+   * Not shown at all when there is a draft to restore: two dialogs at once
+   * on the first screen is worse than either, and somebody with a draft has
+   * been here before by definition.
+   */
+  offerFirstRun() {
+    if (!this.firstRun) return this;
+    try {
+      if (localStorage.getItem(FIRST_RUN_KEY)) return this;
+    } catch {
+      return this;               // no store, no way to stop showing it again
+    }
+    if (this.draftOpen) return this;
+    this.firstRun.classList.remove('hidden');
+    return this;
+  }
+
+  foldFirstRun() {
+    this.firstRun?.classList.add('hidden');
+    try { localStorage.setItem(FIRST_RUN_KEY, '1'); } catch { /* private mode */ }
+    return this;
+  }
+
   foldDraft() {
     if (!this.draftOpen) return this;
     this.draftBar.classList.add('hidden');
@@ -335,7 +401,7 @@ export class EditorUI {
     // A dot beside the name, lit while there is unsaved work. There was no
     // sign at all: the only way to know whether the last hour was safe was
     // to remember whether you had pressed the button.
-    this.dirtyDot = h('span', { class: 'dirtydot hidden', title: '保存していない変更があります' });
+    this.dirtyDot = h('span', { class: 'dirtydot hidden', title: t('保存していない変更があります') });
 
     this.slotList = h('div', { class: 'slotlist' });
 
@@ -348,12 +414,12 @@ export class EditorUI {
     this.treeFilter = h('select', {
       onChange: (e) => { this.treeKind = e.target.value; this.renderTree(); },
     },
-      h('option', { value: '' }, 'すべて'),
-      h('option', { value: 'block' }, 'ブロックだけ'),
-      h('option', { value: 'bone' }, 'ボーンだけ'),
-      h('option', { value: 'equip' }, '装備プレートだけ'),
-      h('option', { value: 'color' }, '選択中と同じ色だけ'),
-      h('option', { value: 'picked' }, '選択中のものだけ'),
+      h('option', { value: '' }, t('すべて')),
+      h('option', { value: 'block' }, t('ブロックだけ')),
+      h('option', { value: 'bone' }, t('ボーンだけ')),
+      h('option', { value: 'equip' }, t('装備プレートだけ')),
+      h('option', { value: 'color' }, t('選択中と同じ色だけ')),
+      h('option', { value: 'picked' }, t('選択中のものだけ')),
     );
     this.treeKind = '';
 
@@ -365,7 +431,7 @@ export class EditorUI {
      * there was no way to ask for it back.
      */
     this.treeSearch = h('input', {
-      type: 'search', placeholder: '名前・形で探す', 'aria-label': 'パーツを探す',
+      type: 'search', placeholder: t('名前・形で探す'), 'aria-label': t('パーツを探す'),
       onInput: (e) => { this.treeQuery = e.target.value.trim().toLowerCase(); this.renderTree(); },
     });
     this.treeQuery = '';
@@ -393,6 +459,43 @@ export class EditorUI {
     this.marquee = h('div', { class: 'marquee hidden' });
 
     this.draftWhen = h('span', { class: 'k' }, '');
+    /*
+     * The first time anybody opens the workbench.
+     *
+     * The help screen is good and generated from the real tables — and it
+     * is behind F1, which somebody who has never played has no reason to
+     * press. So the hardest question in this game (「何を作ればいいのか」,
+     * not 「どのボタンか」) was answered nowhere anyone would look.
+     *
+     * Four lines, once, dismissed for ever. Not a tutorial: a tutorial that
+     * takes the mouse away from somebody who wants to build a robot is
+     * worse than nothing.
+     */
+    this.firstRun = h('div', {
+      id: 'firstrun',
+      class: 'hidden',
+      onClick: (e) => { if (e.target === this.firstRun) this.foldFirstRun(); },
+    },
+      h('div', { class: 'draftbox' },
+        h('div', { class: 'drafthead' }, t('ようこそ')),
+        h('div', { class: 'firstlist' },
+          h('p', {}, t('① 上の「プリセット」から機体を選ぶ。まずはそれで十分です')),
+          h('p', {}, t('② 左のツールでブロックを足し、ボーンで関節を作る')),
+          h('p', {}, t('③ 「装備プレート」で武器とブーストを貼る')),
+          h('p', {}, t('④ 右上の「テスト」で動かしてみる')),
+        ),
+        h('div', { class: 'row draftrow' },
+          h('button', {
+            class: 'primary',
+            onClick: () => this.foldFirstRun(),
+          }, t('はじめる')),
+          h('button', {
+            onClick: () => { this.foldFirstRun(); this.help.show('start'); },
+          }, t('もっと詳しく')),
+        ),
+      ),
+    );
+
     this.draftBar = h('div', {
       id: 'draftbar',
       class: 'hidden',
@@ -402,18 +505,18 @@ export class EditorUI {
       onClick: (e) => { if (e.target === this.draftBar) this.foldDraft(); },
     },
       h('div', { class: 'draftbox' },
-        h('div', { class: 'drafthead' }, '前回の作業が残っています'),
+        h('div', { class: 'drafthead' }, t('前回の作業が残っています')),
         this.draftWhen,
         h('div', { class: 'row draftrow' },
           h('button', {
             class: 'primary',
             onClick: () => { this.app.restoreDraft(); this.foldDraft(); },
-          }, '復元する'),
-          h('button', { onClick: () => this.foldDraft() }, 'あとで'),
+          }, t('復元する')),
+          h('button', { onClick: () => this.foldDraft() }, t('あとで')),
           h('button', {
             class: 'danger',
             onClick: () => { this.app.forgetDraft(); this.foldDraft(); },
-          }, '破棄'),
+          }, t('破棄')),
         ),
       ),
     );
@@ -428,21 +531,21 @@ export class EditorUI {
     this.historyList = h('div', { class: 'historylist' });
     this.historyMenu = h('div', { class: 'menupop hidden' }, this.historyList);
     this.historyBtn = h('button', {
-      class: 'icon', title: '編集の履歴',
+      class: 'icon', title: t('編集の履歴'),
       onClick: (e) => { e.stopPropagation(); this._toggleMenu(this.historyMenu); this.renderHistory(); },
     }, '⋮');
 
     this.presetSelect = h('select', {
       onChange: (e) => { if (e.target.value) { app.loadPreset(e.target.value); e.target.value = ''; } },
     },
-      h('option', { value: '' }, 'プリセット…'),
+      h('option', { value: '' }, t('プリセット…')),
       // Grouped by size, because twenty names in a flat list is a list you
       // scroll rather than read — and size is the first thing anybody wants
       // to choose by.
       ...SIZE_CLASSES.map((size) => h('optgroup', { label: SIZE_LABEL[size] },
         ...PRESET_LIST.filter((p) => p.size === size)
-          .map((p) => h('option', { value: p.id }, p.label)))),
-      h('optgroup', { label: 'まっさら' }, h('option', { value: 'core' }, 'コアのみ')),
+          .map((p) => h('option', { value: p.id }, t(p.label))))),
+      h('optgroup', { label: t('まっさら') }, h('option', { value: 'core' }, t('コアのみ'))),
     );
 
     /*
@@ -453,37 +556,37 @@ export class EditorUI {
      * this is one too — a picture among words reads as decoration.
      */
     this.titleBtn = h('button', {
-      class: 'ghost', title: 'タイトル画面に戻ります', onClick: () => app.goTitle(),
-    }, '⌂ タイトル');
+      class: 'ghost', title: t('タイトル画面に戻ります'), onClick: () => app.goTitle(),
+    }, t('⌂ タイトル'));
     this.editBtn = h('button', { class: 'active', onClick: () => app.setMode('edit') }, 'EDIT');
-    this.partBtn = h('button', { onClick: () => app.openPartEditor() }, 'パーツ編集');
+    this.partBtn = h('button', { onClick: () => app.openPartEditor() }, t('パーツ編集'));
     this.testBtn = h('button', { class: 'primary', onClick: () => app.setMode('field') }, '▶ TEST FIELD');
 
-    this.undoBtn = h('button', { class: 'icon', title: '元に戻す (Ctrl+Z)', onClick: () => app.undo() }, '↶');
-    this.redoBtn = h('button', { class: 'icon', title: 'やり直し (Ctrl+Y)', onClick: () => app.redo() }, '↷');
+    this.undoBtn = h('button', { class: 'icon', title: t('元に戻す (Ctrl+Z)'), onClick: () => app.undo() }, '↶');
+    this.redoBtn = h('button', { class: 'icon', title: t('やり直し (Ctrl+Y)'), onClick: () => app.redo() }, '↷');
 
     this.fileMenu = h('div', { class: 'menupop hidden' },
-      h('button', { onClick: () => { app.save(); this._closeMenus(); } }, '保存（上書き）'),
+      h('button', { onClick: () => { app.save(); this._closeMenus(); } }, t('保存（上書き）')),
       h('button', {
         onClick: () => {
-          const name = window.prompt('名前を付けて保存', app.assembly.name);
+          const name = window.prompt(t('名前を付けて保存'), app.assembly.name);
           if (name !== null) app.saveAs(name);
           this._closeMenus();
         },
-      }, '名前を付けて保存…'),
-      h('button', { onClick: () => { app.load(); this._closeMenus(); } }, '上書き保存から読込'),
+      }, t('名前を付けて保存…')),
+      h('button', { onClick: () => { app.load(); this._closeMenus(); } }, t('上書き保存から読込')),
       h('button', {
         onClick: () => { app.restoreDraft(); this.foldDraft(); this._closeMenus(); },
-      }, '前回の作業を復元'),
-      h('div', { class: 'k', style: 'padding:6px 8px 2px' }, '保存したもの'),
+      }, t('前回の作業を復元')),
+      h('div', { class: 'k', style: 'padding:6px 8px 2px' }, t('保存したもの')),
       this.slotList,
-      h('button', { onClick: () => { app.exportJson(); this._closeMenus(); } }, 'ファイルに書き出す'),
-      h('button', { onClick: () => { app.importJson(); this._closeMenus(); } }, 'ファイルから読み込む'),
-      h('button', { onClick: () => { this.share.show(); this._closeMenus(); } }, 'QRで共有 / 読み込み'),
+      h('button', { onClick: () => { app.exportJson(); this._closeMenus(); } }, t('ファイルに書き出す')),
+      h('button', { onClick: () => { app.importJson(); this._closeMenus(); } }, t('ファイルから読み込む')),
+      h('button', { onClick: () => { this.share.show(); this._closeMenus(); } }, t('QRで共有 / 読み込み')),
     );
     this.fileBtn = h('button', {
       onClick: (e) => { e.stopPropagation(); this._toggleMenu(this.fileMenu); this.renderSlots(); },
-    }, 'ファイル ▾');
+    }, t('ファイル ▾'));
 
     this.topbar = h('div', { id: 'topbar' },
       h('div', { class: 'brand' }, 'BLOSTOM', h('small', {}, 'BLOCK ROBO ARENA')),
@@ -501,9 +604,10 @@ export class EditorUI {
       // the machine now lives behind one word.
       h('div', { class: 'menuwrap' }, this.fileBtn, this.fileMenu),
       h('button', {
-        class: 'icon', title: '使い方 (F1)', onClick: () => this.help.toggle(),
+        class: 'icon', title: t('使い方 (F1)'), onClick: () => this.help.toggle(),
       }, '？'),
-      h('button', { class: 'icon', title: 'キー設定', onClick: () => this.keyConfig.show() }, '⌨'),
+      h('button', { class: 'icon', title: t('設定'), onClick: () => app.openOptions() }, '⚙'),
+      h('button', { class: 'icon', title: t('キー設定'), onClick: () => this.keyConfig.show() }, '⌨'),
       h('div', { class: 'spacer' }),
       this.titleBtn,
       this.editBtn,
@@ -517,8 +621,8 @@ export class EditorUI {
       onInput: (e) => { app.partAssembly.name = e.target.value.toUpperCase(); },
     });
 
-    this.partUndoBtn = h('button', { class: 'icon', title: '元に戻す (Ctrl+Z)', onClick: () => app.undo() }, '↶');
-    this.partRedoBtn = h('button', { class: 'icon', title: 'やり直し (Ctrl+Y)', onClick: () => app.redo() }, '↷');
+    this.partUndoBtn = h('button', { class: 'icon', title: t('元に戻す (Ctrl+Z)'), onClick: () => app.undo() }, '↶');
+    this.partRedoBtn = h('button', { class: 'icon', title: t('やり直し (Ctrl+Y)'), onClick: () => app.redo() }, '↷');
 
     this.partBar = h('div', { id: 'partbar', class: 'hidden' },
       h('div', { class: 'brand' }, 'PART', h('small', {}, 'WORKBENCH')),
@@ -528,32 +632,32 @@ export class EditorUI {
       this.partUndoBtn,
       this.partRedoBtn,
       h('div', { class: 'sep' }),
-      h('button', { class: 'primary', onClick: () => app.savePart(this.partNameInput.value) }, 'パーツ庫に保存'),
-      h('button', { title: 'QRで共有 / 読み込み', onClick: () => this.share.show() }, '⧉ 共有'),
-      h('button', { onClick: () => app.newPart() }, '新規'),
+      h('button', { class: 'primary', onClick: () => app.savePart(this.partNameInput.value) }, t('パーツ庫に保存')),
+      h('button', { title: t('QRで共有 / 読み込み'), onClick: () => this.share.show() }, t('⧉ 共有')),
+      h('button', { onClick: () => app.newPart() }, t('新規')),
       h('div', { class: 'spacer' }),
-      h('span', { class: 'note', style: 'margin:0' }, '「パーツ庫」から呼び出せます'),
-      h('button', { onClick: () => app.setMode('edit') }, '← メイン編集'),
+      h('span', { class: 'note', style: 'margin:0' }, t('「パーツ庫」から呼び出せます')),
+      h('button', { onClick: () => app.setMode('edit') }, t('← メイン編集')),
     );
 
     // ---------------------------------------------------- left panel
     this.toolButtons = new Map();
 
-    const mkTool = (t) => {
-      if (t.group) return h('div', { class: 'toolgroup' }, t.group);
-      const btn = h('button', { class: 'toolbtn', onClick: () => app.setTool(t.tool) },
-        h('span', { class: 'dot', style: `background:${t.color};color:${t.color}` }),
-        h('span', {}, t.label),
-        h('span', { class: 'key' }, t.key),
+    const mkTool = (spec) => {
+      if (t(spec.group)) return h('div', { class: 'toolgroup' }, t(spec.group));
+      const btn = h('button', { class: 'toolbtn', onClick: () => app.setTool(spec.tool) },
+        h('span', { class: 'dot', style: `background:${spec.color};color:${spec.color}` }),
+        h('span', {}, t(spec.label)),
+        h('span', { class: 'key' }, spec.key),
       );
-      this.toolButtons.set(t.tool, btn);
+      this.toolButtons.set(spec.tool, btn);
       return btn;
     };
 
     // --- gizmo
     this.gizmoButtons = [
-      h('button', { class: 'active', onClick: () => app.setGizmoMode('translate') }, '移動 (T)'),
-      h('button', { onClick: () => app.setGizmoMode('rotate') }, '回転 (R)'),
+      h('button', { class: 'active', onClick: () => app.setGizmoMode('translate') }, t('移動 (T)')),
+      h('button', { onClick: () => app.setGizmoMode('rotate') }, t('回転 (R)')),
     ];
     this.snapToggle = h('input', {
       type: 'checkbox', checked: 'checked',
@@ -593,10 +697,10 @@ export class EditorUI {
     this.sectionAxis = h('select', {
       onChange: () => this._applySection(),
     },
-      h('option', { value: '' }, '切らない'),
-      h('option', { value: 'x' }, '左右で切る'),
-      h('option', { value: 'y' }, '上下で切る'),
-      h('option', { value: 'z' }, '前後で切る'),
+      h('option', { value: '' }, t('切らない')),
+      h('option', { value: 'x' }, t('左右で切る')),
+      h('option', { value: 'y' }, t('上下で切る')),
+      h('option', { value: 'z' }, t('前後で切る')),
     );
     this.sectionAt = h('input', {
       type: 'range', min: -3, max: 3, step: 0.05, value: 0,
@@ -610,13 +714,13 @@ export class EditorUI {
     /** World axes or the part's own. */
     this.spaceButtons = [
       h('button', {
-        class: 'active', title: '上下・前後・左右のまま動かします',
+        class: 'active', title: t('上下・前後・左右のまま動かします'),
         onClick: () => this.setGizmoSpace('world'),
-      }, '地面の向き'),
+      }, t('地面の向き')),
       h('button', {
-        title: 'そのパーツが向いている方向に沿って動かします',
+        title: t('そのパーツが向いている方向に沿って動かします'),
         onClick: () => this.setGizmoSpace('local'),
-      }, 'パーツの向き'),
+      }, t('パーツの向き')),
     ];
 
     // ============================================================
@@ -637,139 +741,139 @@ export class EditorUI {
     const btn = (label, title, onClick) => h('button', { title, onClick }, label);
 
     // ---- 動かす : the gizmo, and the rules it snaps to
-    this.moveGroup = collapsible('動かす', h('div', { class: 'body' },
+    this.moveGroup = collapsible(t('動かす'), h('div', { class: 'body' },
       row(...this.gizmoButtons),
       row(...this.spaceButtons),
-      h('label', { class: 'checkline' }, this.snapToggle, 'グリッドと角度にスナップ'),
-      h('label', { class: 'field' }, h('span', {}, 'グリッド'), this.snapStep),
-      h('label', { class: 'field' }, h('span', {}, '角度'), this.turnStep),
-      slider('面からの隙間', {
+      h('label', { class: 'checkline' }, this.snapToggle, t('グリッドと角度にスナップ')),
+      h('label', { class: 'field' }, h('span', {}, t('グリッド')), this.snapStep),
+      h('label', { class: 'field' }, h('span', {}, t('角度')), this.turnStep),
+      slider(t('面からの隙間'), {
         min: 0, max: 0.3, step: 0.01, value: 0, unit: ' m', fixed: 2,
       }, (v) => { app.editor.placeGap = v; }),
       row(
-        btn('中心へ', 'えらんだパーツを機体の中心線に戻します',
+        btn(t('中心へ'), t('えらんだパーツを機体の中心線に戻します'),
           () => app.editor.centreSelected()),
-        btn('傾きを戻す', '親から受け継いだ傾きを打ち消して、まっすぐにします',
+        btn(t('傾きを戻す'), t('親から受け継いだ傾きを打ち消して、まっすぐにします'),
           () => app.editor.straightenSelected()),
-        btn('その場で反転', 'コピーせず、その場で向きを反転します（⇧F）',
+        btn(t('その場で反転'), t('コピーせず、その場で向きを反転します（⇧F）'),
           () => app.editor.flipSelected('x')),
       ),
       row(
-        btn('あいだに置く', '最初に選んだ2つの中間に、残りを置きます',
+        btn(t('あいだに置く'), t('最初に選んだ2つの中間に、残りを置きます'),
           () => app.editor.centreBetween()),
-        btn('面いっぱい', 'ついている面いっぱいの大きさにします',
+        btn(t('面いっぱい'), t('ついている面いっぱいの大きさにします'),
           () => app.editor.fitToHost()),
       ),
     ));
 
     // ---- 選ぶ : getting hold of the right parts in the first place
-    this.pickGroup = collapsible('選ぶ', h('div', { class: 'body' },
+    this.pickGroup = collapsible(t('選ぶ'), h('div', { class: 'body' },
       row(
-        btn('全選択', null, () => app.editor.selectAll()),
-        btn('配下ごと', '選んだパーツの下にあるもの全部を足します（削除で消えるのと同じ範囲）',
+        btn(t('全選択'), null, () => app.editor.selectAll()),
+        btn(t('配下ごと'), t('選んだパーツの下にあるもの全部を足します（削除で消えるのと同じ範囲）'),
           () => app.editor.selectSubtree()),
-        btn('同じ種類', '同じ形のブロック・同じ種類のプレートを全部足します',
+        btn(t('同じ種類'), t('同じ形のブロック・同じ種類のプレートを全部足します'),
           () => app.editor.selectSimilar()),
       ),
       row(
-        btn('同じ色', '同じ色のブロックを全部選びます', () => app.editor.selectByColor()),
-        btn('反対側', '反対側の相棒に飛びます', () => app.editor.selectTwin()),
-        btn('選択を戻す', 'ひとつ前の選択に戻ります', () => app.editor.selectBack()),
+        btn(t('同じ色'), t('同じ色のブロックを全部選びます'), () => app.editor.selectByColor()),
+        btn(t('反対側'), t('反対側の相棒に飛びます'), () => app.editor.selectTwin()),
+        btn(t('選択を戻す'), t('ひとつ前の選択に戻ります'), () => app.editor.selectBack()),
       ),
       row(
-        btn('最後に置いたもの', '最後に置いたパーツに戻ります',
+        btn(t('最後に置いたもの'), t('最後に置いたパーツに戻ります'),
           () => app.editor.selectLastPlaced()),
-        btn('名前を付ける', 'えらんだパーツに名前を付けます', () => this.askName()),
+        btn(t('名前を付ける'), t('えらんだパーツに名前を付けます'), () => this.askName()),
       ),
-      h('h3', { class: 'inline' }, 'まとまりとして残す'),
+      h('h3', { class: 'inline' }, t('まとまりとして残す')),
       this.setRow,
-      row(btn('今の選択を残す', '選び出すのに手間のかかる組を、名前を付けて残します',
+      row(btn(t('今の選択を残す'), t('選び出すのに手間のかかる組を、名前を付けて残します'),
         () => this.keepSelectionSet())),
     ));
 
     // ---- ふやす : anything that ends with more parts than it started with
-    this.growGroup = collapsible('ふやす', h('div', { class: 'body' },
+    this.growGroup = collapsible(t('ふやす'), h('div', { class: 'body' },
       row(
-        btn('コピー', null, () => app.copySelected()),
-        btn('切取', null, () => app.copySelected({ cut: true })),
-        btn('貼付', 'Shift+V でカーソルの面に貼れます', () => app.pasteClipboard()),
-        btn('複製', null, () => app.editor.duplicateSelected()),
+        btn(t('コピー'), null, () => app.copySelected()),
+        btn(t('切取'), null, () => app.copySelected({ cut: true })),
+        btn(t('貼付'), t('Shift+V でカーソルの面に貼れます'), () => app.pasteClipboard()),
+        btn(t('複製'), null, () => app.editor.duplicateSelected()),
       ),
       row(
-        btn('左右反転コピー', '選択したパーツを、機体の中心線の反対側にコピーします',
+        btn(t('左右反転コピー'), t('選択したパーツを、機体の中心線の反対側にコピーします'),
           () => app.editor.mirrorSelected()),
-        btn('もう一度', '直前の操作をもう一度（Ctrl+R）', () => app.editor.repeatLast()),
+        btn(t('もう一度'), t('直前の操作をもう一度（Ctrl+R）'), () => app.editor.repeatLast()),
       ),
-      h('h3', { class: 'inline' }, '肢をつくる'),
+      h('h3', { class: 'inline' }, t('肢をつくる')),
       row(
-        btn('脚', null, () => app.editor.addLimb('leg', { segments: 2 })),
-        btn('腕', null, () => app.editor.addLimb('arm', { segments: 2, foot: false })),
-        btn('脚（3節）', null, () => app.editor.addLimb('leg', { segments: 3 })),
+        btn(t('脚'), null, () => app.editor.addLimb('leg', { segments: 2 })),
+        btn(t('腕'), null, () => app.editor.addLimb('arm', { segments: 2, foot: false })),
+        btn(t('脚（3節）'), null, () => app.editor.addLimb('leg', { segments: 3 })),
       ),
-      h('h3', { class: 'inline' }, '円周にならべる'),
-      row(...[4, 6, 8].map((n) => btn(n + '個', null, () => app.editor.repeatAround(n, 'y')))),
-      h('h3', { class: 'inline' }, 'つなぐ'),
+      h('h3', { class: 'inline' }, t('円周にならべる')),
+      row(...[4, 6, 8].map((n) => btn(n + t('個'), null, () => app.editor.repeatAround(n, 'y')))),
+      h('h3', { class: 'inline' }, t('つなぐ')),
       row(
-        btn('連結 (J)', null, () => app.connectSelected()),
-        btn('解除 (⇧J)', null, () => app.disconnectSelected()),
-        btn('つなぎ替え', 'クリックしたパーツを新しい連結先にします',
+        btn(t('連結 (J)'), null, () => app.connectSelected()),
+        btn(t('解除 (⇧J)'), null, () => app.disconnectSelected()),
+        btn(t('つなぎ替え'), t('クリックしたパーツを新しい連結先にします'),
           () => app.editor.beginReparent()),
       ),
     ), { open: false });
 
     // ---- そろえる : two or more parts, made to agree with each other
-    this.alignGroup = collapsible('そろえる', h('div', { class: 'body' },
+    this.alignGroup = collapsible(t('そろえる'), h('div', { class: 'body' },
       ...['x', 'y', 'z'].map((axis) => row(
         h('span', { class: 'k', style: 'width:14px' }, axis.toUpperCase()),
-        btn('揃える', '平均の位置へ。いちばん動かす距離が短くなります',
+        btn(t('揃える'), t('平均の位置へ。いちばん動かす距離が短くなります'),
           () => app.editor.arrangeSelected(axis, 'align')),
-        btn('手前で', 'いちばん手前のものに合わせます',
+        btn(t('手前で'), t('いちばん手前のものに合わせます'),
           () => app.editor.arrangeSelected(axis, 'min')),
-        btn('奥で', 'いちばん奥のものに合わせます',
+        btn(t('奥で'), t('いちばん奥のものに合わせます'),
           () => app.editor.arrangeSelected(axis, 'max')),
-        btn('均等', null, () => app.editor.arrangeSelected(axis, 'spread')),
-        btn('×4', 'この向きに、自分の幅ぶんずつ繰り返します',
+        btn(t('均等'), null, () => app.editor.arrangeSelected(axis, 'spread')),
+        btn('×4', t('この向きに、自分の幅ぶんずつ繰り返します'),
           () => app.editor.repeatSelected(axis, 3)),
       )),
-      h('h3', { class: 'inline' }, '基準に合わせる'),
-      h('div', { class: 'note' }, '基準は最後に選んだパーツ（水色の枠）。'),
+      h('h3', { class: 'inline' }, t('基準に合わせる')),
+      h('div', { class: 'note' }, t('基準は最後に選んだパーツ（水色の枠）。')),
       row(
-        btn('傾き', '最後に選んだパーツの傾きを、他の全部に写します',
+        btn(t('傾き'), t('最後に選んだパーツの傾きを、他の全部に写します'),
           () => app.editor.matchRotationSelected()),
-        btn('見た目', '最後に選んだブロックの形と色を、他の全部に写します',
+        btn(t('見た目'), t('最後に選んだブロックの形と色を、他の全部に写します'),
           () => app.editor.matchLookSelected()),
-        btn('骨の太さ', 'ボーンの長さと太さを、最後に選んだものに揃えます',
+        btn(t('骨の太さ'), t('ボーンの長さと太さを、最後に選んだものに揃えます'),
           () => app.editor.matchBoneSelected()),
       ),
     ), { open: false });
 
     // ---- 見る・確かめる : nothing in here changes the machine
-    this.viewGroup = collapsible('見る・確かめる', h('div', { class: 'body' },
-      row(...[['front', '正面'], ['left', '側面'], ['top', '上'], ['iso', '斜め']]
+    this.viewGroup = collapsible(t('見る・確かめる'), h('div', { class: 'body' },
+      row(...[['front', t('正面')], ['left', t('側面')], ['top', t('上')], ['iso', t('斜め')]]
         .map(([id, label]) => btn(label, null, () => app.editor.setView(id)))),
-      h('h3', { class: 'inline' }, '中を見る'),
-      h('label', { class: 'field' }, h('span', {}, '断面'), this.sectionAxis),
+      h('h3', { class: 'inline' }, t('中を見る')),
+      h('label', { class: 'field' }, h('span', {}, t('断面')), this.sectionAxis),
       this.sectionAt,
-      h('label', { class: 'checkline' }, this.seeThrough, '機体を透かす'),
-      h('h3', { class: 'inline' }, '隠す・固定'),
+      h('label', { class: 'checkline' }, this.seeThrough, t('機体を透かす')),
+      h('h3', { class: 'inline' }, t('隠す・固定')),
       row(
-        btn('隠す', null, () => app.editor.hideSelected()),
-        btn('選択だけ', null, () => app.editor.isolateSelected()),
-        btn('全部出す', null, () => app.editor.showAll()),
+        btn(t('隠す'), null, () => app.editor.hideSelected()),
+        btn(t('選択だけ'), null, () => app.editor.isolateSelected()),
+        btn(t('全部出す'), null, () => app.editor.showAll()),
       ),
       row(
-        btn('固定する', '選んだパーツを、クリックでもギズモでも掴めなくします',
+        btn(t('固定する'), t('選んだパーツを、クリックでもギズモでも掴めなくします'),
           () => app.editor.lockSelected(true)),
-        btn('固定を解除', null, () => app.editor.unlockAll()),
+        btn(t('固定を解除'), null, () => app.editor.unlockAll()),
       ),
       this.hiddenNote,
-      h('h3', { class: 'inline' }, '調べる'),
+      h('h3', { class: 'inline' }, t('調べる')),
       row(
-        btn('左右の食い違い', '左右で相方のいないパーツをえらびます',
+        btn(t('左右の食い違い'), t('左右で相方のいないパーツをえらびます'),
           () => app.editor.findAsymmetry()),
-        btn('埋まったブロック', '他のブロックの中に完全に埋まっているものを探します',
+        btn(t('埋まったブロック'), t('他のブロックの中に完全に埋まっているものを探します'),
           () => app.editor.findBuried()),
-        btn('重心', '重心の位置を出します', () => this.showBalance()),
+        btn(t('重心'), t('重心の位置を出します'), () => this.showBalance()),
       ),
       this.balanceNote,
     ), { open: false });
@@ -782,7 +886,7 @@ export class EditorUI {
     // --- new block size
     /** Linked by default: most blocks anyone places are cubes. */
     this.sizeLinked = h('input', { type: 'checkbox', checked: 'checked' });
-    this.newSizeSliders = ['X', 'Y', 'Z'].map((axis, i) => slider(`幅 ${axis}`, {
+    this.newSizeSliders = ['X', 'Y', 'Z'].map((axis, i) => slider(t('幅 {0}', [axis]), {
       min: SIZE_MIN, max: SIZE_MAX, step: SIZE_STEP, value: 1, fixed: 2,
     }, (v) => {
       app.editor.newBlockSize[i] = v;
@@ -795,17 +899,17 @@ export class EditorUI {
 
     this.newShapeButtons = new Map();
     this.blockBox = h('div', {},
-      h('h3', { class: 'inline' }, '形'),
+      h('h3', { class: 'inline' }, t('形')),
       ...this._shapeGrid(
         () => app.editor.newBlockShape,
         (id) => app.setNewBlockShape(id),
         this.newShapeButtons,
       ),
       h('div', { class: 'note' },
-        h('b', {}, 'R'), ' 向き　', h('b', {}, 'Shift+ホイール'), ' 高さ　',
-        h('b', {}, 'ドラッグ'), ' 連続配置',
-        h('br'), h('b', {}, 'Alt+クリック'), ' 写す　', h('b', {}, '右クリック'), ' 削除'),
-      h('h3', { class: 'inline' }, '空中の高さ'),
+        h('b', {}, 'R'), t(' 向き　'), h('b', {}, t('Shift+ホイール')), t(' 高さ　'),
+        h('b', {}, t('ドラッグ')), t(' 連続配置'),
+        h('br'), h('b', {}, t('Alt+クリック')), t(' 写す　'), h('b', {}, t('右クリック')), t(' 削除')),
+      h('h3', { class: 'inline' }, t('空中の高さ')),
       // Reachable by tapping.
       //
       // The height of the free-placement plane was on Shift+wheel, the
@@ -817,10 +921,10 @@ export class EditorUI {
         this.planeReadout,
         h('button', { onClick: () => app.editor.liftWorkPlane(1) }, '＋'),
       ),
-      h('h3', { class: 'inline' }, 'よく使う組み合わせ'),
+      h('h3', { class: 'inline' }, t('よく使う組み合わせ')),
       this.recipeRow,
-      h('h3', { class: 'inline' }, '寸法'),
-      h('label', { class: 'checkline' }, this.sizeLinked, '縦横高さを揃える'),
+      h('h3', { class: 'inline' }, t('寸法')),
+      h('label', { class: 'checkline' }, this.sizeLinked, t('縦横高さを揃える')),
       h('div', { class: 'row tight' },
         ...[0.25, 0.5, 1, 2].map((n) => h('button', {
           onClick: () => this._setNewSize([n, n, n]),
@@ -833,24 +937,24 @@ export class EditorUI {
     this.equipButtons = new Map();
     const mkEquip = (type) => {
       const meta = EQUIP_META[type];
-      const btn = h('button', {
+      const plate = h('button', {
         class: 'equipbtn',
-        title: meta.blurb,
+        title: t(meta.blurb),
         onClick: () => app.setEquipType(type),
       },
       h('span', { class: `equipicon ${meta.category === 'weapon' ? 'round' : 'square'}`,
         style: `background:${hexToCss(meta.accent)}` }),
-      h('span', {}, meta.label));
-      this.equipButtons.set(type, btn);
-      return btn;
+      h('span', {}, t(meta.label)));
+      this.equipButtons.set(type, plate);
+      return plate;
     };
 
-    this.equipSize = slider('プレート径', {
+    this.equipSize = slider(t('プレート径'), {
       min: EQUIP_SIZE_MIN, max: EQUIP_SIZE_MAX, step: EQUIP_SIZE_STEP,
       value: app.editor.newEquipSize, fixed: 2,
     }, (v) => app.setNewEquipSize(v));
 
-    this.equipHint = h('div', { class: 'note' }, EQUIP_META[app.editor.equipType].blurb);
+    this.equipHint = h('div', { class: 'note' }, t(EQUIP_META[app.editor.equipType].blurb));
 
     this.equipBox = h('div', {},
       h('div', { class: 'equipgrid' }, ...WEAPON_TYPES.map(mkEquip)),
@@ -860,11 +964,11 @@ export class EditorUI {
     );
 
     // --- new bone shape
-    this.boneLen = slider('長さ', {
+    this.boneLen = slider(t('長さ'), {
       min: BONE_LENGTH_MIN, max: BONE_LENGTH_MAX, step: 0.25, value: app.editor.boneOpts.length, fixed: 2,
     }, (v) => { app.editor.boneOpts.length = v; app.applyBoneOptionToSelection('length', v); });
 
-    this.boneRadius = slider('太さ', {
+    this.boneRadius = slider(t('太さ'), {
       min: BONE_RADIUS_MIN, max: BONE_RADIUS_MAX, step: 0.01, value: app.editor.boneOpts.radius, fixed: 2,
     }, (v) => { app.editor.boneOpts.radius = v; app.applyBoneOptionToSelection('radius', v); });
 
@@ -875,17 +979,17 @@ export class EditorUI {
           this.boneRadius.set(g.radius);
           app.applyBoneOptionToSelection('radius', g.radius);
         },
-      }, g.label)),
+      }, t(g.label))),
     );
 
-    this.boneLimit = slider('可動域', {
+    this.boneLimit = slider(t('可動域'), {
       min: 10, max: 170, step: 5, value: app.editor.boneOpts.limit, unit: '°',
     }, (v) => { app.editor.boneOpts.limit = v; app.applyBoneOptionToSelection('limit', v); });
 
     this.boneBox = h('div', {}, this.boneLen, this.gaugeRow, this.boneRadius, this.boneLimit);
 
     // --- sculpt
-    this.brushSlider = slider('ブラシ', {
+    this.brushSlider = slider(t('ブラシ'), {
       min: 1, max: 25, step: 1, value: app.editor.brushPercent, unit: '%',
     }, (v) => { app.editor.setBrush(v); });
 
@@ -923,9 +1027,9 @@ export class EditorUI {
     this.sculptAxis = h('select', {
       onChange: (e) => { app.editor.sculptAxis = Number(e.target.value); },
     },
-    h('option', { value: '0' }, '左右'),
-    h('option', { value: '1' }, '上下'),
-    h('option', { value: '2' }, '前後'));
+    h('option', { value: '0' }, t('左右')),
+    h('option', { value: '1' }, t('上下')),
+    h('option', { value: '2' }, t('前後')));
 
     /** The cuts a brush cannot make, each one press and one undo step. */
     const once = (label, what, title) => h('button', {
@@ -935,34 +1039,34 @@ export class EditorUI {
     this.sculptBox = h('div', {},
       this.brushSlider,
       h('div', { class: 'row tight' }, this.brushSize, this.blockLeft),
-      h('label', { class: 'checkline' }, this.brushShape, '丸いブラシ'),
-      h('label', { class: 'checkline' }, this.sculptMirror, '対称に加工する'),
-      h('label', { class: 'field' }, h('span', {}, '対称の向き'), this.sculptAxis),
+      h('label', { class: 'checkline' }, this.brushShape, t('丸いブラシ')),
+      h('label', { class: 'checkline' }, this.sculptMirror, t('対称に加工する')),
+      h('label', { class: 'field' }, h('span', {}, t('対称の向き')), this.sculptAxis),
       h('div', { class: 'row tight' },
-        once('ならす', 'smooth', 'カーソルの周りの段差をなだらかにします（K）'),
-        once('平らに', 'flatten', '見ている面から手前を平らに削ります（⇧J）'),
+        once(t('ならす'), 'smooth', t('カーソルの周りの段差をなだらかにします（K）')),
+        once(t('平らに'), 'flatten', t('見ている面から手前を平らに削ります（⇧J）')),
       ),
       h('div', { class: 'row tight' },
-        once('穴をあける', 'drill', 'ブロックを貫通する穴をあけます（O）'),
-        once('塗りつぶし', 'fill', 'つながっている同じ色をまとめて塗ります'),
+        once(t('穴をあける'), 'drill', t('ブロックを貫通する穴をあけます（O）')),
+        once(t('塗りつぶし'), 'fill', t('つながっている同じ色をまとめて塗ります')),
       ),
       h('div', { class: 'row tight' },
         h('button', {
-          title: 'カーソルの下の色を取ります（I）',
+          title: t('カーソルの下の色を取ります（I）'),
           onClick: () => {
             const i = app.editor.pickColorUnderCursor();
             if (i >= 0) app.setColor(i);
           },
-        }, 'スポイト'),
+        }, t('スポイト')),
         h('button', {
           class: 'danger',
-          title: 'このブロックの加工をすべて取り消し、元の形に戻します',
+          title: t('このブロックの加工をすべて取り消し、元の形に戻します'),
           onClick: () => app.editor.resetBlock(),
-        }, '形に戻す'),
+        }, t('形に戻す')),
       ),
-      h('label', { class: 'field' }, h('span', {}, '加工の細かさ')),
+      h('label', { class: 'field' }, h('span', {}, t('加工の細かさ'))),
       this.resSelect,
-      h('div', { class: 'note' }, '細かいほど重くなります。'),
+      h('div', { class: 'note' }, t('細かいほど重くなります。')),
     );
 
     this.symmetryToggle = h('input', {
@@ -980,12 +1084,12 @@ export class EditorUI {
     // Each tool brings its own settings and takes them away again: with a
     // dozen sliders stacked up, the panel is longer than the screen and the
     // three that matter right now are lost in it.
-    this.blockSection = toolSection('新規ブロック寸法', this.blockBox);
-    this.equipSection = toolSection('装備プレート', this.equipBox);
-    this.boneSection = toolSection('新規ボーン寸法', this.boneBox);
-    this.sculptSection = toolSection('加工設定', this.sculptBox);
-    this.stampSection = toolSection('パーツ配置',
-      h('div', { class: 'note' }, '「パーツ庫」の ＜配置＞ で選びます。'));
+    this.blockSection = toolSection(t('新規ブロック寸法'), this.blockBox);
+    this.equipSection = toolSection(t('装備プレート'), this.equipBox);
+    this.boneSection = toolSection(t('新規ボーン寸法'), this.boneBox);
+    this.sculptSection = toolSection(t('加工設定'), this.sculptBox);
+    this.stampSection = toolSection(t('パーツ配置'),
+      h('div', { class: 'note' }, t('「パーツ庫」の ＜配置＞ で選びます。')));
 
     this.toolSections = [
       this.blockSection, this.equipSection,
@@ -999,13 +1103,13 @@ export class EditorUI {
      * and hiding them behind one tool was most of why they were hard to
      * find. This says so, rather than leaving an empty gap.
      */
-    this.selectSection = toolSection('選択ツール',
-      h('div', { class: 'note' }, 'クリックで選択、ドラッグで移動。'));
+    this.selectSection = toolSection(t('選択ツール'),
+      h('div', { class: 'note' }, t('クリックで選択、ドラッグで移動。')));
     this.toolSections.unshift(this.selectSection);
 
     // The sculpting tools start folded: they are the advanced half, and
     // three more buttons is three more rows between you and everything else.
-    this.sculptTools = collapsible('加工 (上級)',
+    this.sculptTools = collapsible(t('加工 (上級)'),
       h('div', { class: 'body' }, ...SCULPT_LIST.map(mkTool)), { open: false });
 
     // Rides over the viewport, next to the cursor, out of the way of the
@@ -1015,26 +1119,27 @@ export class EditorUI {
     this.root.append(this.draftBar);
     this.root.append(this.marquee);
     // A click anywhere else puts the menus away.
-    document.addEventListener('pointerdown', () => this._closeMenus());
+    this._onDocDown = () => this._closeMenus();
+    document.addEventListener('pointerdown', this._onDocDown);
 
     this.leftScroll = h('div', { class: 'panelscroll' });
     this.leftPanel = resizable(
       h('div', { class: 'panel', id: 'leftpanel' },
         append(this.leftScroll,
-          h('h3', {}, '組み立て'),
+          h('h3', {}, t('組み立て')),
           h('div', { class: 'body' }, ...ASSEMBLE_TOOLS.map(mkTool)),
           this.sculptTools,
-          h('h3', {}, 'ツール設定'),
+          h('h3', {}, t('ツール設定')),
           h('div', { class: 'body' },
             ...this.toolSections,
-            h('label', { class: 'checkline' }, this.symmetryToggle, '左右対称でつける'),
-            h('label', { class: 'checkline' }, this.previewToggle, '歩行プレビュー'),
-            h('label', { class: 'checkline' }, this.ringGuideToggle, 'サークルの円線を表示'),
+            h('label', { class: 'checkline' }, this.symmetryToggle, t('左右対称でつける')),
+            h('label', { class: 'checkline' }, this.previewToggle, t('歩行プレビュー')),
+            h('label', { class: 'checkline' }, this.ringGuideToggle, t('サークルの円線を表示')),
           ),
           // Everything you can do to what is already there, in five groups
           // named after what you are trying to do. Always available: none of
           // it depends on which tool is in hand.
-          h('h3', {}, '編集'),
+          h('h3', {}, t('編集')),
           ...this.editGroups,
         ),
       ),
@@ -1051,10 +1156,10 @@ export class EditorUI {
       class: 'ghost wide',
       onClick: () => {
         const open = this.wheelWrap.classList.toggle('collapsed');
-        this.wheelToggle.textContent = open ? 'カラーサークル ▾' : 'カラーサークル ▴';
+        this.wheelToggle.textContent = open ? t('カラーサークル ▾') : t('カラーサークル ▴');
         if (!open) this.wheel.redraw();
       },
-    }, 'カラーサークル ▾');
+    }, t('カラーサークル ▾'));
 
     this.inspectorEl = h('div', { class: 'body' });
     this.statsEl = h('div', { class: 'body' });
@@ -1069,17 +1174,17 @@ export class EditorUI {
      */
     this.specStrip = h('div', { class: 'specstrip' });
     this.libraryEl = h('div', { class: 'body' });
-    this.librarySection = collapsible('パーツ庫', this.libraryEl, { open: false });
+    this.librarySection = collapsible(t('パーツ庫'), this.libraryEl, { open: false });
 
     // Anchored to the right, so its width grip is on the LEFT edge: that is
     // the side that actually moves when the panel gets wider.
     this.treeEl = h('div', { class: 'tree' });
     this.treeCount = h('span', { class: 'note', style: 'margin:0' }, '0');
     this.treeSection = collapsible(
-      'パーツ一覧',
+      t('パーツ一覧'),
       h('div', { class: 'body' },
         h('div', { class: 'row tight' },
-          h('span', { class: 'note', style: 'margin:0' }, '見えない所のパーツもここから'),
+          h('span', { class: 'note', style: 'margin:0' }, t('見えない所のパーツもここから')),
           this.treeFilter,
           h('div', { class: 'spacer' }),
           this.treeCount,
@@ -1101,17 +1206,17 @@ export class EditorUI {
           this.librarySection,
           // Open. Colour is picked as often as anything on this panel, and
           // folded away it is four actions from "I want that one red".
-          collapsible('色', h('div', { class: 'body' },
+          collapsible(t('色'), h('div', { class: 'body' },
             this.paletteEl,
-            h('h3', { class: 'inline' }, '最近使った色'),
+            h('h3', { class: 'inline' }, t('最近使った色')),
             this.recentEl,
-            h('h3', { class: 'inline' }, 'カスタム色'),
+            h('h3', { class: 'inline' }, t('カスタム色')),
             this.customEl,
             this.wheelToggle,
             this.wheelWrap,
           )),
-          collapsible('インスペクタ', this.inspectorEl),
-          collapsible('スペック', this.statsEl, { open: false }),
+          collapsible(t('インスペクタ'), this.inspectorEl),
+          collapsible(t('スペック'), this.statsEl, { open: false }),
         ),
       ),
       { key: 'rightpanel', edges: 'ws', minW: 186 },
@@ -1119,17 +1224,17 @@ export class EditorUI {
 
     // ---------------------------------------------------- hints
     this.hint = h('div', { id: 'hint' },
-      h('span', {}, h('b', {}, '左ドラッグ'), '回転'),
-      h('span', {}, h('b', {}, '右ドラッグ'), '平行移動'),
-      h('span', {}, h('b', {}, 'クリック'), '設置 / 選択'),
-      h('span', {}, h('b', {}, 'Ctrl+click'), '複数選択'),
-      h('span', {}, h('b', {}, '同じ所を再クリック'), '奥のパーツ'),
-      h('span', {}, h('b', {}, '. / Home'), '選択に寄る / 全体'),
-      h('span', {}, h('b', {}, 'T / R'), 'ギズモ'),
-      h('span', {}, h('b', {}, 'J'), '連結'),
-      h('span', {}, h('b', {}, 'Ctrl+Z'), '元に戻す'),
-      h('span', {}, h('b', {}, 'Ctrl+C/V'), 'コピー'),
-      h('span', {}, h('b', {}, 'Del'), '削除'),
+      h('span', {}, h('b', {}, t('左ドラッグ')), t('回転')),
+      h('span', {}, h('b', {}, t('右ドラッグ')), t('平行移動')),
+      h('span', {}, h('b', {}, t('クリック')), t('設置 / 選択')),
+      h('span', {}, h('b', {}, 'Ctrl+click'), t('複数選択')),
+      h('span', {}, h('b', {}, t('同じ所を再クリック')), t('奥のパーツ')),
+      h('span', {}, h('b', {}, '. / Home'), t('選択に寄る / 全体')),
+      h('span', {}, h('b', {}, 'T / R'), t('ギズモ')),
+      h('span', {}, h('b', {}, 'J'), t('連結')),
+      h('span', {}, h('b', {}, 'Ctrl+Z'), t('元に戻す')),
+      h('span', {}, h('b', {}, 'Ctrl+C/V'), t('コピー')),
+      h('span', {}, h('b', {}, 'Del'), t('削除')),
     );
 
     // ---------------------------------------------------- field mode
@@ -1145,11 +1250,11 @@ export class EditorUI {
 
     // The tab that brings a folded panel back.
     this.leftTab = h('button', {
-      class: 'panelfold', title: 'パネルを開く / たたむ',
+      class: 'panelfold', title: t('パネルを開く / たたむ'),
       onClick: () => this.leftPanel.classList.toggle('folded'),
     }, '▸');
     this.rightTab = h('button', {
-      class: 'panelfold right', title: 'パネルを開く / たたむ',
+      class: 'panelfold right', title: t('パネルを開く / たたむ'),
       onClick: () => this.rightPanel.classList.toggle('folded'),
     }, '◂');
 
@@ -1164,8 +1269,9 @@ export class EditorUI {
       h('div', { class: 'sep' }),
       this.fieldMoveHint,
       h('div', { class: 'spacer' }),
-      h('button', { onClick: () => this.keyConfig.show() }, 'キー設定'),
-      h('button', { onClick: () => this.help.show('field') }, '使い方'),
+      h('button', { onClick: () => this.app.openOptions() }, t('設定')),
+      h('button', { onClick: () => this.keyConfig.show() }, t('キー設定')),
+      h('button', { onClick: () => this.help.show('field') }, t('使い方')),
     );
     // The legend does not count down any more: it stays up. Anything that
     // needs OPERATING — the arena, the ceasefire — is on the pause menu,
@@ -1173,24 +1279,24 @@ export class EditorUI {
 
     this.pauseRestartBtn = h('button', {
       class: 'wide', onClick: () => app.restartField(),
-    }, '⟲ リスポーン');
+    }, t('⟲ リスポーン'));
 
     // The same two settings again, where somebody who is losing will look
     // for them. A field switch mid-fight is a legitimate thing to want.
     this.pauseArena = h('select', {
       onChange: (e) => app.setArena(e.target.value),
-    }, ...ARENA_ORDER.map((id) => h('option', { value: id }, ARENAS[id].label)));
+    }, ...ARENA_ORDER.map((id) => h('option', { value: id }, t(ARENAS[id].label))));
     this.pauseCeasefire = h('label', { class: 'checkline' },
       h('input', {
         type: 'checkbox',
         onChange: (e) => app.setEnemyFire(!e.target.checked),
-      }), '敵に撃たせない');
+      }), t('敵に撃たせない'));
 
     this.pauseMenu = h('div', { id: 'pause', class: 'hidden' },
       h('div', { class: 'pausebox' },
         h('div', { class: 'pausetitle' }, 'PAUSED'),
-        h('div', { class: 'pausesub' }, 'ESC で再開'),
-        h('button', { class: 'primary wide', onClick: () => app.resumeField() }, '▶ 再開する'),
+        h('div', { class: 'pausesub' }, t('ESC で再開')),
+        h('button', { class: 'primary wide', onClick: () => app.resumeField() }, t('▶ 再開する')),
         this.pauseRestartBtn,
         // Only where they mean something.
         //
@@ -1199,18 +1305,19 @@ export class EditorUI {
         // go away rather than sitting there refusing — a control that
         // cannot be moved is still a question the player has to answer.
         this.pauseSettings = h('div', { class: 'pausefield' },
-          h('label', { class: 'field' }, h('span', {}, '場所'), this.pauseArena),
+          h('label', { class: 'field' }, h('span', {}, t('場所')), this.pauseArena),
           this.pauseCeasefire,
         ),
-        h('button', { class: 'wide', onClick: () => this.keyConfig.show() }, '⌨ キー設定'),
-        h('button', { class: 'wide', onClick: () => this.help.show('field') }, '？ 使い方'),
+        h('button', { class: 'wide', onClick: () => app.openOptions() }, t('⚙ 設定')),
+        h('button', { class: 'wide', onClick: () => this.keyConfig.show() }, t('⌨ キー設定')),
+        h('button', { class: 'wide', onClick: () => this.help.show('field') }, t('？ 使い方')),
         // Nor this, mid-run: the editor rebuilds the machine the run is
         // being fought with, and there is no coming back to the wave you
         // left. Leaving is what タイトルへ is for.
         this.pauseEditBtn = h('button', {
           class: 'wide', onClick: () => app.setMode('edit'),
-        }, '← 編集画面に戻る'),
-        h('button', { class: 'wide', onClick: () => app.goTitle() }, '⌂ タイトルへ'),
+        }, t('← 編集画面に戻る')),
+        h('button', { class: 'wide', onClick: () => app.goTitle() }, t('⌂ タイトルへ')),
       ),
     );
 
@@ -1224,13 +1331,16 @@ export class EditorUI {
     this.title = new TitleScreen(app);
     this.sortie = new SortieScreen(app);
     this.versus = new VersusScreen(app);
+    this.replays = new Replays(app);
     this.result = new ResultScreen(app);
 
     this.root.append(
       this.topbar, this.partBar, this.leftPanel, this.rightPanel, this.hint,
       this.leftTab, this.rightTab,
       this.fieldBar, this.pauseMenu, this.keyConfig.el, this.share.el,
-      this.help.el, this.title.el, this.sortie.el, this.versus.el, this.result.el, this.toast,
+      this.firstRun,
+      this.help.el, this.title.el, this.sortie.el, this.versus.el, this.replays.el,
+      this.result.el, this.toast,
     );
 
     this._bindGestures();
@@ -1274,20 +1384,20 @@ export class EditorUI {
     const k = (a) => this.app.input.primary(a);
     const pair = (keys, what) => h('span', { class: 'keypair' }, h('b', {}, keys), what);
     this.fieldWeaponHint.replaceChildren(
-      pair(k('fire'), '武器を撃つ'),
-      pair(`${k('weaponNext')} / ${k('weaponPrev')}`, '武器切替'),
-      pair(k('lock'), 'ロックオン'),
-      pair(k('cycleTarget'), 'ターゲット切替'),
+      pair(k('fire'), t('武器を撃つ')),
+      pair(`${k('weaponNext')} / ${k('weaponPrev')}`, t('武器切替')),
+      pair(k('lock'), t('ロックオン')),
+      pair(k('cycleTarget'), t('ターゲット切替')),
     );
     this.fieldMoveHint.replaceChildren(
-      pair(`${k('forward')}${k('left')}${k('back')}${k('right')}`, '移動（2回押しでダッシュ）'),
-      pair(k('up'), '上昇・跳躍'),
-      pair(k('down'), '下降'),
-      pair(k('boost'), 'ブースト'),
+      pair(`${k('forward')}${k('left')}${k('back')}${k('right')}`, t('移動（2回押しでダッシュ）')),
+      pair(k('up'), t('上昇・跳躍')),
+      pair(k('down'), t('下降')),
+      pair(k('boost'), t('ブースト')),
       pair(`${k('layerA')}·${k('layerB')}·${k('layerC')}`, 'ABC'),
-      pair(k('reset'), 'リスポーン'),
-      pair(k('camera'), 'カメラ回転（ホイールでズーム）'),
-      pair('Esc', 'ポーズ'),
+      pair(k('reset'), t('リスポーン')),
+      pair(k('camera'), t('カメラ回転（ホイールでズーム）')),
+      pair('Esc', t('ポーズ')),
     );
   }
 
@@ -1298,7 +1408,7 @@ export class EditorUI {
    * Dimming them was not enough: they still took up the panel.
    */
   syncTool(tool) {
-    for (const [t, btn] of this.toolButtons) btn.classList.toggle('active', t === tool);
+    for (const [id, b] of this.toolButtons) b.classList.toggle('active', id === tool);
     const isBone = [
       TOOL.BONE_LEG, TOOL.BONE_ARM, TOOL.BONE_FACE, TOOL.BONE_CUSTOM, TOOL.BONE_WEAPON,
     ].includes(tool);
@@ -1442,11 +1552,11 @@ export class EditorUI {
     const hist = this.app.history;
     for (const btn of [this.undoBtn, this.partUndoBtn]) {
       btn.disabled = !hist.canUndo;
-      btn.title = hist.canUndo ? `元に戻す: ${hist.undoLabel} (Ctrl+Z)` : '元に戻す (Ctrl+Z)';
+      btn.title = hist.canUndo ? t('元に戻す: {0} (Ctrl+Z)', [hist.undoLabel]) : t('元に戻す (Ctrl+Z)');
     }
     for (const btn of [this.redoBtn, this.partRedoBtn]) {
       btn.disabled = !hist.canRedo;
-      btn.title = hist.canRedo ? `やり直し: ${hist.redoLabel} (Ctrl+Y)` : 'やり直し (Ctrl+Y)';
+      btn.title = hist.canRedo ? t('やり直し: {0} (Ctrl+Y)', [hist.redoLabel]) : t('やり直し (Ctrl+Y)');
     }
   }
 
@@ -1458,11 +1568,11 @@ export class EditorUI {
     if (!items.length) {
       this.libraryEl.replaceChildren(
         h('div', { class: 'inspector-empty' },
-          'まだパーツがありません。',
-          h('br'), '「パーツ編集」で作るか、選択中のパーツを下のボタンで登録できます。'),
+          t('まだパーツがありません。'),
+          h('br'), t('「パーツ編集」で作るか、選択中のパーツを下のボタンで登録できます。')),
         h('button', {
           class: 'ghost wide', onClick: () => app.saveSelectionAsPart(),
-        }, '選択パーツを登録'),
+        }, t('選択パーツを登録')),
       );
       return;
     }
@@ -1475,24 +1585,24 @@ export class EditorUI {
           // Which of these you made and which came with the game. Deleting
           // your own work and deleting a starter part are not the same act,
           // and the row said nothing either way.
-          item.builtin ? h('div', { class: 'libtag' }, '最初から入っているパーツ') : null),
+          item.builtin ? h('div', { class: 'libtag' }, t('最初から入っているパーツ')) : null),
         h('div', { class: 'row tight' },
-          h('button', { title: 'メイン編集に置く', onClick: () => app.placePart(item.id) }, '配置'),
-          h('button', { title: 'パーツ編集で開く', onClick: () => app.openPartEditor(item.id) }, '編集'),
+          h('button', { title: t('メイン編集に置く'), onClick: () => app.placePart(item.id) }, t('配置')),
+          h('button', { title: t('パーツ編集で開く'), onClick: () => app.openPartEditor(item.id) }, t('編集')),
           h('button', {
-            class: 'danger', title: 'パーツ庫から削除', onClick: () => app.deletePart(item.id),
+            class: 'danger', title: t('パーツ庫から削除'), onClick: () => app.deletePart(item.id),
           }, '×'),
         ),
       )),
       h('button', {
         class: 'ghost wide', onClick: () => app.saveSelectionAsPart(),
-      }, '選択パーツを登録'),
+      }, t('選択パーツを登録')),
     );
   }
 
   /** Highlight the armed plate, and say what it does. */
   syncEquipType(type) {
-    for (const [t, btn] of this.equipButtons) btn.classList.toggle('active', t === type);
+    for (const [id, b] of this.equipButtons) b.classList.toggle('active', id === type);
     this.equipHint.textContent = EQUIP_META[type]?.blurb ?? '';
   }
 
@@ -1503,10 +1613,10 @@ export class EditorUI {
    * clicking that the next click throws away.
    */
   keepSelectionSet() {
-    if (!this.app.editor.selection.size) { this.toastMsg('残す選択がありません'); return; }
-    const name = window.prompt('このまとまりの名前', '');
+    if (!this.app.editor.selection.size) { this.toastMsg(t('残す選択がありません')); return; }
+    const name = window.prompt(t('このまとまりの名前'), '');
     if (name === null) return;
-    if (this.app.editor.keepSelection(name)) this.toastMsg(`「${name}」として残しました`);
+    if (this.app.editor.keepSelection(name)) this.toastMsg(t('「{0}」として残しました', [name]));
   }
 
   /** Draw one button per saved selection, plus a way to forget one. */
@@ -1514,11 +1624,11 @@ export class EditorUI {
     const app = this.app;
     this.setRow.replaceChildren(
       ...(names ?? []).map((name) => h('button', {
-        title: `${name} を選び直す（右クリックで削除）`,
+        title: t('{0} を選び直す（右クリックで削除）', [name]),
         onClick: () => app.editor.useSelection(name),
         onContextmenu: (e) => { e.preventDefault(); app.editor.dropSelection(name); },
       }, name)),
-      ...(names?.length ? [] : [h('span', { class: 'note', style: 'margin:0' }, 'まだありません')]),
+      ...(names?.length ? [] : [h('span', { class: 'note', style: 'margin:0' }, t('まだありません'))]),
     );
     return this;
   }
@@ -1563,12 +1673,12 @@ export class EditorUI {
    */
   askName() {
     const parts = this.app.editor.selectedParts();
-    if (!parts.length) { this.toastMsg('名前を付けるパーツを選んでください'); return; }
-    const now = parts.length === 1 ? (parts[0].label ?? '') : '';
-    const next = window.prompt('パーツの名前', now);
+    if (!parts.length) { this.toastMsg(t('名前を付けるパーツを選んでください')); return; }
+    const now = parts.length === 1 ? (t(parts[0].label) ?? '') : '';
+    const next = window.prompt(t('パーツの名前'), now);
     if (next === null) return;
     const n = this.app.editor.renameSelected(next);
-    if (n) { this.renderTree(); this.toastMsg(`${n} 個に名前を付けました`); }
+    if (n) { this.renderTree(); this.toastMsg(t('{0} 個に名前を付けました', [n])); }
   }
 
   /**
@@ -1591,7 +1701,7 @@ export class EditorUI {
     this.pauseSettings.classList.toggle('hidden', !canCeasefire);
     this.pauseEditBtn.classList.toggle('hidden', !canCeasefire);
     // The legend says where you are, since it is no longer where you change it.
-    this.fieldPlace.textContent = arena.label;
+    this.fieldPlace.textContent = t(arena.label);
     return this;
   }
 
@@ -1619,13 +1729,13 @@ export class EditorUI {
     });
 
     this.paletteEl.replaceChildren(
-      ...STANDARD_COLORS.map((c, i) => mk(pal.get(i), i, i === 0 ? 'コアシルバー' : `標準色 ${i}`)),
+      ...STANDARD_COLORS.map((c, i) => mk(pal.get(i), i, i === 0 ? t('コアシルバー') : t('標準色 {0}', [i]))),
     );
 
     const custom = pal.customEntries();
     this.customEl.replaceChildren(
       ...custom.map((e) => mk(e.hex, e.index, hexToCss(e.hex))),
-      ...(custom.length ? [] : [h('div', { class: 'note', style: 'grid-column:1/-1' }, 'まだありません')]),
+      ...(custom.length ? [] : [h('div', { class: 'note', style: 'grid-column:1/-1' }, t('まだありません'))]),
     );
 
     // The last few colours actually used, in the order they were used.
@@ -1636,7 +1746,7 @@ export class EditorUI {
     this.recentEl.replaceChildren(
       ...this.recentColors
         .filter((i) => pal.get(i) !== undefined)
-        .map((i) => mk(pal.get(i), i, `最近使った色 ${hexToCss(pal.get(i))}`)),
+        .map((i) => mk(pal.get(i), i, t('最近使った色 {0}', [hexToCss(pal.get(i))]))),
     );
     this.recentEl.classList.toggle('hidden', !this.recentColors.length);
   }
@@ -1693,7 +1803,7 @@ export class EditorUI {
     this.fieldLabel.textContent = isSolo ? 'SOLO PLAY' : 'TEST FIELD';
     // In a run, restarting means starting the run over, not just standing
     // back up — those are different enough to be worth different words.
-    this.pauseRestartBtn.textContent = isSolo ? '⟲ 最初からやり直す' : '⟲ リスポーン';
+    this.pauseRestartBtn.textContent = isSolo ? t('⟲ 最初からやり直す') : t('⟲ リスポーン');
     // The read-out owns the top of the screen in a run, so nothing else may
     // reserve space up there.
     if (isSolo) this._fieldHintH = 0;
@@ -1735,10 +1845,10 @@ export class EditorUI {
     const rows = [];
 
     const KIND = {
-      core: { icon: '◈', label: 'コア' },
-      block: { icon: '▪', label: 'ブロック' },
-      bone: { icon: '⌇', label: 'ボーン' },
-      equip: { icon: '⬢', label: 'プレート' },
+      core: { icon: '◈', label: t('コア') },
+      block: { icon: '▪', label: t('ブロック') },
+      bone: { icon: '⌇', label: t('ボーン') },
+      equip: { icon: '⬢', label: t('プレート') },
     };
 
     const walk = (id, depth) => {
@@ -1754,7 +1864,7 @@ export class EditorUI {
       const hex = part.vox?.dominantColor?.() >= 0
         ? hexToCss(asm.palette.get(part.vox.dominantColor()) ?? 0)
         : '';
-      const hay = `${part.label ?? ''} ${shapeName} ${part.kind} ${hex}`.toLowerCase();
+      const hay = `${t(part.label) ?? ''} ${shapeName} ${part.kind} ${hex}`.toLowerCase();
       const kindOk = !this.treeKind
         || (this.treeKind === 'picked' ? selected.has(id)
           : this.treeKind === 'color' ? (wantColor !== null
@@ -1764,20 +1874,20 @@ export class EditorUI {
       const kind = KIND[part.kind] ?? KIND.block;
       // A name the builder gave it beats the shape it happens to be cut
       // from: "PELVIS" says more about a row than "面取り" ever will.
-      const named = part.label && part.label !== 'BLOCK' ? part.label : null;
+      const named = t(part.label) && t(part.label) !== 'BLOCK' ? t(part.label) : null;
       const name = part.kind === 'bone'
-        ? (BONE_META[part.boneType]?.label ?? 'ボーン')
+        ? (BONE_META[part.boneType]?.label ?? t('ボーン'))
         : part.kind === 'equip'
-          ? (EQUIP_META[part.equipType]?.label ?? 'プレート')
-          : part.kind === 'core' ? 'コア'
-            : named ?? (SHAPES[part.shape ?? SHAPE_DEFAULT]?.label ?? 'ブロック');
+          ? (EQUIP_META[part.equipType]?.label ?? t('プレート'))
+          : part.kind === 'core' ? t('コア')
+            : named ?? (SHAPES[part.shape ?? SHAPE_DEFAULT]?.label ?? t('ブロック'));
 
       const row = h('button', {
         class: `treerow${selected.has(id) ? ' active' : ''}`,
         style: `padding-left:${6 + depth * 11}px`,
         // How deep it is, because a part seven levels down takes everything
         // below it when it goes and nothing on screen said so.
-        title: `${kind.label} / 第${depth + 1}階層 / ${id}`,
+        title: t('{0} / 第{1}階層 / {2}', [t(kind.label), depth + 1, id]),
         onClick: (e) => {
           app.editor.select(id, e.ctrlKey || e.metaKey);
           // Selecting something you cannot see is only useful if the view
@@ -1806,9 +1916,9 @@ export class EditorUI {
 
     if (!list.length) {
       this.inspectorEl.append(h('div', { class: 'inspector-empty' },
-        'パーツをクリックで選択、Ctrl+クリックで複数選択。',
-        h('br'), 'ギズモを掴めば任意の位置に動かせます（空中に浮かせてもOK）。',
-        h('br'), '設置は、面をクリックでぴったり／何もない所をクリックで浮遊配置。'));
+        t('パーツをクリックで選択、Ctrl+クリックで複数選択。'),
+        h('br'), t('ギズモを掴めば任意の位置に動かせます（空中に浮かせてもOK）。'),
+        h('br'), t('設置は、面をクリックでぴったり／何もない所をクリックで浮遊配置。')));
       return;
     }
 
@@ -1819,24 +1929,24 @@ export class EditorUI {
         : '—';
 
       this.inspectorEl.append(
-        h('div', { class: 'tag' }, `${list.length} パーツ選択中`),
+        h('div', { class: 'tag' }, t('{0} パーツ選択中', [list.length])),
         h('div', { class: 'stat' },
-          h('span', { class: 'k' }, '連結先'),
+          h('span', { class: 'k' }, t('連結先')),
           h('span', { class: 'v', style: 'color:var(--accent)' }, anchorName)),
 
         h('div', { class: 'row tight', style: 'margin-top:6px' },
-          h('button', { onClick: () => this.app.connectSelected() }, '連結 (J)'),
-          h('button', { onClick: () => this.app.disconnectSelected() }, '解除 (⇧J)'),
+          h('button', { onClick: () => this.app.connectSelected() }, t('連結 (J)')),
+          h('button', { onClick: () => this.app.disconnectSelected() }, t('解除 (⇧J)')),
         ),
         h('div', { class: 'row tight' },
-          h('button', { onClick: () => this.app.editor.duplicateSelected() }, '複製'),
-          h('button', { onClick: () => this.app.editor.clearSelection() }, '選択解除'),
+          h('button', { onClick: () => this.app.editor.duplicateSelected() }, t('複製')),
+          h('button', { onClick: () => this.app.editor.clearSelection() }, t('選択解除')),
         ),
         ...this._bulkEdits(list),
         h('button', {
           class: 'danger wide', style: 'margin-top:8px',
           onClick: () => this.app.editor.deleteSelected(),
-        }, `${this.app.editor.doomedCount()} パーツを削除 (Del)`),
+        }, t('{0} パーツを削除 (Del)', [this.app.editor.doomedCount()])),
       );
       return;
     }
@@ -1865,7 +1975,7 @@ export class EditorUI {
     const plates = list.filter((p) => p.kind === 'equip');
 
     if (blocks.length) {
-      rows.push(h('h3', { class: 'inline' }, `寸法 — ${blocks.length} ブロック`));
+      rows.push(h('h3', { class: 'inline' }, t('寸法 — {0} ブロック', [blocks.length])));
       // Started from the first one rather than from nothing: a slider with
       // no value is a slider you have to find the right end of first.
       const base = blocks[0].size;
@@ -1879,23 +1989,23 @@ export class EditorUI {
       // the thing people actually mean next to it.
       if (blocks.length > 1 && new Set(blocks.map((b) => b.size.join())).size > 1) {
         rows.push(h('div', { class: 'note warn' },
-          'えらんだブロックの寸法はばらばらです。下のスライダーは全部を同じ寸法にします。'));
+          t('えらんだブロックの寸法はばらばらです。下のスライダーは全部を同じ寸法にします。')));
       }
       rows.push(h('div', { class: 'row tight' },
         h('button', {
-          title: 'えらんだものを、それぞれの寸法のまま大きくします',
+          title: t('えらんだものを、それぞれの寸法のまま大きくします'),
           onClick: () => app.editor.scaleSelected(1.1),
         }, '× 1.1'),
         h('button', { onClick: () => app.editor.scaleSelected(1 / 1.1) }, '÷ 1.1'),
         h('button', {
-          title: '最後にえらんだものの寸法に揃えます',
+          title: t('最後にえらんだものの寸法に揃えます'),
           onClick: () => app.editor.matchSizeSelected(),
-        }, '寸法を揃える'),
+        }, t('寸法を揃える')),
       ));
-      rows.push(...['X', 'Y', 'Z'].map((axis, i) => slider(`幅 ${axis}`, {
+      rows.push(...['X', 'Y', 'Z'].map((axis, i) => slider(t('幅 {0}', [axis]), {
         min: SIZE_MIN, max: SIZE_MAX, step: SIZE_STEP, value: base[i], fixed: 2,
       }, (v) => set(i, v))));
-      rows.push(vectorField('寸法', base, SIZE_STEP, (v) => {
+      rows.push(vectorField(t('寸法'), base, SIZE_STEP, (v) => {
         // Three independent fields, unless the lock says otherwise: making
         // a part "a bit bigger" without squashing it meant working out two
         // more numbers by hand, every time.
@@ -1909,30 +2019,30 @@ export class EditorUI {
         app.editor.resizeKeepingShape(axis, v[axis]);
         this.renderInspector(app.editor.selectedParts());
       }));
-      rows.push(h('label', { class: 'checkline' }, this.keepAspect, '縦横比を保つ'));
+      rows.push(h('label', { class: 'checkline' }, this.keepAspect, t('縦横比を保つ')));
 
-      rows.push(h('h3', { class: 'inline' }, '形'));
+      rows.push(h('h3', { class: 'inline' }, t('形')));
       rows.push(...this._shapeGrid(() => blocks[0].shape, (id) => app.editor.setBlockShapeSelected(id)));
 
     }
 
     if (bones.length) {
-      rows.push(h('h3', { class: 'inline' }, `ボーン — ${bones.length} 本`));
+      rows.push(h('h3', { class: 'inline' }, t('ボーン — {0} 本', [bones.length])));
       const b = bones[0];
-      rows.push(slider('長さ', {
+      rows.push(slider(t('長さ'), {
         min: BONE_LENGTH_MIN, max: BONE_LENGTH_MAX, step: 0.25, value: b.length, fixed: 2,
       }, (v) => app.editor.setBoneShapeSelected({ length: v })));
-      rows.push(slider('太さ', {
+      rows.push(slider(t('太さ'), {
         min: BONE_RADIUS_MIN, max: BONE_RADIUS_MAX, step: 0.01, value: b.radius, fixed: 2,
       }, (v) => app.editor.setBoneShapeSelected({ radius: v })));
-      rows.push(slider('可動域', {
+      rows.push(slider(t('可動域'), {
         min: 10, max: 170, step: 5, value: b.limit, unit: '°',
       }, (v) => app.editor.setBoneShapeSelected({ limit: v })));
     }
 
     if (plates.length) {
-      rows.push(h('h3', { class: 'inline' }, `プレート — ${plates.length} 枚`));
-      rows.push(slider('プレート径', {
+      rows.push(h('h3', { class: 'inline' }, t('プレート — {0} 枚', [plates.length])));
+      rows.push(slider(t('プレート径'), {
         min: EQUIP_SIZE_MIN, max: EQUIP_SIZE_MAX, step: EQUIP_SIZE_STEP,
         value: plates[0].size, fixed: 2,
       }, (v) => app.editor.setEquipSizeSelected(v)));
@@ -1947,12 +2057,12 @@ export class EditorUI {
     const rows = [
       h('div', { class: 'tag' },
         part.kind.toUpperCase()
-        + (part.kind === 'bone' ? ` / ${BONE_META[part.boneType].label}` : '')
+        + (part.kind === 'bone' ? ` / ${t(BONE_META[part.boneType].label)}` : '')
         + (part.kind === 'equip' ? ` / ${EQUIP_META[part.equipType]?.label ?? part.equipType}` : '')),
     ];
 
     if (part.mount) {
-      rows.push(h('h3', { class: 'inline' }, '位置'));
+      rows.push(h('h3', { class: 'inline' }, t('位置')));
       rows.push(vectorField('POS', part.mount.pos, SIZE_STEP, (v) => {
         app.editor.setMountSelected({ pos: v });
       }));
@@ -1969,7 +2079,7 @@ export class EditorUI {
       // decides where the part ends up. Typing 90 into Y after 90 into X
       // gives a different answer than the other way round, and the panel
       // never said which one it was doing.
-      rows.push(h('div', { class: 'note' }, 'X → Y → Z の順。'));
+      rows.push(h('div', { class: 'note' }, t('X → Y → Z の順。')));
 
       // Where it sits on the machine, not on its parent.
       //
@@ -1979,16 +2089,16 @@ export class EditorUI {
       const world = app.editor.machinePosition(part.id);
       if (world) {
         rows.push(h('div', { class: 'stat' },
-          h('span', { class: 'k' }, '機体基準'),
+          h('span', { class: 'k' }, t('機体基準')),
           h('span', { class: 'v' }, world.map((n) => n.toFixed(2)).join(' , '))));
       }
 
       // Which face it is on. Getting this wrong used to mean deleting the
       // part and placing it again, which loses everything carved into it.
       if (part.mount?.face !== undefined) {
-        rows.push(h('h3', { class: 'inline' }, 'ついている面'));
+        rows.push(h('h3', { class: 'inline' }, t('ついている面')));
         rows.push(h('div', { class: 'row tight wrap' },
-          ...[['右', 0], ['左', 1], ['上', 2], ['下', 3], ['前', 4], ['後', 5]]
+          ...[[t('右'), 0], [t('左'), 1], [t('上'), 2], [t('下'), 3], [t('前'), 4], [t('後'), 5]]
             .map(([label, face]) => h('button', {
               class: part.mount.face === face ? 'active' : '',
               onClick: () => app.editor.moveToFace(face),
@@ -1999,69 +2109,69 @@ export class EditorUI {
       // --- which segment does it ride with?
       rows.push(h('button', {
         class: 'ghost wide',
-        title: 'クリックしたパーツを新しい連結先にします',
+        title: t('クリックしたパーツを新しい連結先にします'),
         onClick: () => app.editor.beginReparent(),
-      }, 'クリックでつなぎ替え'));
+      }, t('クリックでつなぎ替え')));
       const options = [...app.assembly.parts.values()]
         .filter((p) => app.assembly.canReparent(part.id, p.id))
         .map((p) => h('option', {
           value: p.id, ...(p.id === part.parent ? { selected: 'selected' } : {}),
         }, `${partName(p)} (${p.id})`));
 
-      rows.push(h('h3', { class: 'inline' }, '連結先'));
+      rows.push(h('h3', { class: 'inline' }, t('連結先')));
       rows.push(h('select', {
         onChange: (ev) => app.editor.reparentSelected(ev.target.value),
       }, ...options));
       const half = app.editor.boneHalfOf(part.id);
       if (half) {
         rows.push(h('div', { class: 'stat' },
-          h('span', { class: 'k' }, 'ボーン'),
+          h('span', { class: 'k' }, t('ボーン')),
           h('span', { class: `v ${half === 'far' ? 'good' : 'warn'}` },
-            half === 'far' ? '可動側' : '固定側')));
+            half === 'far' ? t('可動側') : t('固定側'))));
         rows.push(h('div', { class: 'note' }, half === 'far'
-          ? 'この関節から先なので、ボーンと一緒に振れます。'
-          : 'ボーンの手前半分なので動きません。中点より先へ動かすと可動側になります。'));
+          ? t('この関節から先なので、ボーンと一緒に振れます。')
+          : t('ボーンの手前半分なので動きません。中点より先へ動かすと可動側になります。')));
         rows.push(h('div', { class: 'row tight' },
-          h('button', { title: 'ボーンの根元へ', onClick: () => app.editor.slideAlongBone(0) }, '根元へ'),
-          h('button', { title: '関節の少し先へ', onClick: () => app.editor.slideAlongBone(0.55) }, '可動側へ'),
-          h('button', { title: 'ボーンの先端へ', onClick: () => app.editor.slideAlongBone(1) }, '先端へ'),
+          h('button', { title: t('ボーンの根元へ'), onClick: () => app.editor.slideAlongBone(0) }, t('根元へ')),
+          h('button', { title: t('関節の少し先へ'), onClick: () => app.editor.slideAlongBone(0.55) }, t('可動側へ')),
+          h('button', { title: t('ボーンの先端へ'), onClick: () => app.editor.slideAlongBone(1) }, t('先端へ')),
         ));
       }
 
       rows.push(h('button', {
         class: 'ghost wide', onClick: () => app.disconnectSelected(),
-      }, '連結を解除 (⇧J)'));
+      }, t('連結を解除 (⇧J)')));
     }
 
     if (part.kind === 'bone') {
-      rows.push(h('h3', { class: 'inline' }, '寸法'));
-      rows.push(slider('長さ', {
+      rows.push(h('h3', { class: 'inline' }, t('寸法')));
+      rows.push(slider(t('長さ'), {
         min: BONE_LENGTH_MIN, max: BONE_LENGTH_MAX, step: 0.25, value: part.length, fixed: 2,
       }, (v) => app.editor.setBoneShapeSelected({ length: v })));
-      rows.push(slider('太さ', {
+      rows.push(slider(t('太さ'), {
         min: BONE_RADIUS_MIN, max: BONE_RADIUS_MAX, step: 0.01, value: part.radius, fixed: 2,
       }, (v) => app.editor.setBoneShapeSelected({ radius: v })));
       rows.push(h('label', { class: 'checkline' },
         h('input', {
           type: 'checkbox', ...(part.invert ? { checked: 'checked' } : {}),
           onChange: (ev) => { part.invert = ev.target.checked; app.editor.rebuild(); },
-        }), '動きを反転'));
+        }), t('動きを反転')));
 
       rows.push(h('button', {
         class: 'ghost wide',
-        title: '選んだ他のボーンを、このボーンの長さと太さに揃えます',
+        title: t('選んだ他のボーンを、このボーンの長さと太さに揃えます'),
         onClick: () => app.editor.matchBoneSelected(),
-      }, '他のボーンをこれに揃える'));
+      }, t('他のボーンをこれに揃える')));
 
       rows.push(...this._boneTravel(part));
       rows.push(...this._boneMotion(part));
 
-      rows.push(h('h3', { class: 'inline' }, 'つなげる'));
+      rows.push(h('h3', { class: 'inline' }, t('つなげる')));
       rows.push(h('button', {
         class: 'ghost wide',
-        title: 'このボーンの先端に、もう1本つなげます',
+        title: t('このボーンの先端に、もう1本つなげます'),
         onClick: () => app.editor.addBoneOnTipSelected(),
-      }, `＋ 先端に${BONE_META[part.boneType].label}`));
+      }, t('＋ 先端に{0}', [t(BONE_META[part.boneType].label)])));
       rows.push(...this._boneLink(part));
 
       if (part.boneType === 'custom') rows.push(...this._customMotion(part));
@@ -2072,44 +2182,44 @@ export class EditorUI {
     } else if (part.kind === 'equip') {
       const meta = EQUIP_META[part.equipType];
 
-      rows.push(h('div', { class: 'note' }, meta.blurb));
+      rows.push(h('div', { class: 'note' }, t(meta.blurb)));
 
-      rows.push(h('h3', { class: 'inline' }, '種類'));
+      rows.push(h('h3', { class: 'inline' }, t('種類')));
       const swap = (type) => h('button', {
         class: part.equipType === type ? 'active' : '',
-        title: EQUIP_META[type].blurb,
+        title: t(EQUIP_META[type].blurb),
         onClick: () => app.editor.setEquipTypeSelected(type),
-      }, EQUIP_META[type].label);
+      }, t(EQUIP_META[type].label));
       rows.push(h('div', { class: 'equipgrid' }, ...WEAPON_TYPES.map(swap)));
       rows.push(h('div', { class: 'equipgrid' }, ...SYSTEM_TYPES.map(swap)));
 
-      rows.push(h('h3', { class: 'inline' }, '大きさ'));
-      rows.push(slider('径', {
+      rows.push(h('h3', { class: 'inline' }, t('大きさ')));
+      rows.push(slider(t('径'), {
         min: EQUIP_SIZE_MIN, max: EQUIP_SIZE_MAX, step: EQUIP_SIZE_STEP,
         value: part.size, fixed: 2,
       }, (v) => app.editor.setEquipSizeSelected(v)));
 
       if (meta.category === 'weapon' && meta.ammo) {
         rows.push(h('div', { class: 'stat' },
-          h('span', { class: 'k' }, '装弾 / リロード'),
-          h('span', { class: 'v' }, `${meta.ammo} 発 / ${meta.reload.toFixed(1)}s`)));
+          h('span', { class: 'k' }, t('装弾 / リロード')),
+          h('span', { class: 'v' }, t('{0} 発 / {1}s', [meta.ammo, meta.reload.toFixed(1)]))));
       }
       if (meta.dps) {
         rows.push(h('div', { class: 'stat' },
-          h('span', { class: 'k' }, '接触ダメージ'),
+          h('span', { class: 'k' }, t('接触ダメージ')),
           h('span', { class: 'v' }, `${meta.dps}/s`)));
       }
 
       if (part.spin) {
         const parent = app.assembly.get(part.parent);
-        rows.push(h('h3', { class: 'inline' }, '回転'));
+        rows.push(h('h3', { class: 'inline' }, t('回転')));
 
         // A gimmick that never stops is a gimmick you cannot build on: the
         // ring carries its riders out from under the cursor. This stops it
         // here and only here — in the field it turns regardless.
         const running = app.editor.gimmickRunning(part.id);
         rows.push(h('div', { class: 'row tight' },
-          ...[[true, '動かす'], [false, '止める']].map(([on, label]) => h('button', {
+          ...[[true, t('動かす')], [false, t('止める')]].map(([on, label]) => h('button', {
             class: running === on ? 'active' : '',
             onClick: () => {
               app.editor.setGimmickRunning(part.id, on);
@@ -2117,21 +2227,21 @@ export class EditorUI {
             },
           }, label)),
           h('div', { class: 'spacer' }),
-          h('span', { class: 'note', style: 'margin:0' }, '編集中だけ'),
+          h('span', { class: 'note', style: 'margin:0' }, t('編集中だけ')),
         ));
         rows.push(h('div', { class: 'row tight' },
-          ...[[1, '正転 ↻'], [-1, '逆転 ↺']].map(([d, label]) => h('button', {
+          ...[[1, t('正転 ↻')], [-1, t('逆転 ↺')]].map(([d, label]) => h('button', {
             class: part.spin.dir === d ? 'active' : '',
             onClick: () => {
               app.editor.setEquipSpinSelected({ dir: d });
               this.renderInspector(app.editor.selectedParts());
             },
           }, label))));
-        rows.push(slider('速さ', {
+        rows.push(slider(t('速さ'), {
           min: SPIN_RPM_MIN, max: SPIN_RPM_MAX, step: 5, value: part.spin.rpm, unit: ' rpm',
         }, (v) => app.editor.setEquipSpinSelected({ rpm: v })));
         if (meta.ring) {
-          rows.push(slider('半径', {
+          rows.push(slider(t('半径'), {
             min: CIRCLE_RADIUS_MIN, max: CIRCLE_RADIUS_MAX, step: CIRCLE_RADIUS_STEP,
             value: part.ringRadius, fixed: 2, unit: ' m',
           }, (v) => app.editor.setEquipRingSelected(v)));
@@ -2139,58 +2249,58 @@ export class EditorUI {
           // Which way the circle lies. Without this the answer is decided
           // entirely by which face the plate went on, and a plate on a chest
           // draws its circle standing on edge — where nothing is standing.
-          rows.push(h('h3', { class: 'inline' }, '円線の向き'));
+          rows.push(h('h3', { class: 'inline' }, t('円線の向き')));
           rows.push(h('div', { class: 'row tight' },
             ...RING_PLANES.map((planeOpt) => h('button', {
               class: (part.ringPlane ?? RING_PLANE_DEFAULT) === planeOpt.id ? 'active' : '',
-              title: planeOpt.note,
+              title: t(planeOpt.note),
               onClick: () => {
                 app.editor.setEquipRingPlaneSelected(planeOpt.id);
                 this.renderInspector(app.editor.selectedParts());
               },
-            }, planeOpt.label))));
+            }, t(planeOpt.label)))));
 
           const riders = app.editor.rig.nodes.get(part.id)?.ring?.members?.length ?? 0;
           rows.push(h('div', { class: 'stat' },
-            h('span', { class: 'k' }, '回るパーツ'),
+            h('span', { class: 'k' }, t('回るパーツ')),
             h('span', { class: `v ${riders ? 'good' : 'warn'}` }, `${riders}`)));
 
           // Zero riders is the one state that reads as "broken", so it says
           // what would fix it instead of just showing a 0.
           if (!riders) {
             rows.push(h('div', { class: 'inspector-empty warn' },
-              '線の上にパーツがありません。よくある原因は4つ:',
-              h('br'), '① 円線の向きが違う（上のボタンで変える）',
-              h('br'), '② 円の', h('b', {}, '中'), 'に置いてある（線の上に動かすか半径を合わせる）',
-              h('br'), '③ 線から', h('b', {}, '軸の方向に離れている'),
-              '（半径は合っていても、線の高さから外れていると乗りません）',
-              h('br'), '④ 回したいパーツが、プレートより先の',
-              h('b', {}, '関節にぶら下がっている'),
-              '（関節から先は、その関節が動かすので巻き取りません）',
-              h('br'), 'パーツを先に置いてからプレートを貼ると、',
-              h('b', {}, '半径はそれに合わせて決まります'), '。'));
+              t('線の上にパーツがありません。よくある原因は4つ:'),
+              h('br'), t('① 円線の向きが違う（上のボタンで変える）'),
+              h('br'), t('② 円の'), h('b', {}, t('中')), t('に置いてある（線の上に動かすか半径を合わせる）'),
+              h('br'), t('③ 線から'), h('b', {}, t('軸の方向に離れている')),
+              t('（半径は合っていても、線の高さから外れていると乗りません）'),
+              h('br'), t('④ 回したいパーツが、プレートより先の'),
+              h('b', {}, t('関節にぶら下がっている')),
+              t('（関節から先は、その関節が動かすので巻き取りません）'),
+              h('br'), t('パーツを先に置いてからプレートを貼ると、'),
+              h('b', {}, t('半径はそれに合わせて決まります')), '。'));
           }
 
           rows.push(h('div', { class: 'note' },
-            '円線に触れているパーツが回ります。',
-            h('br'), '円の中に置いただけ・線から高さがずれているものは回りません。',
-            h('br'), '線の上に立っていれば、足元が触れているので、',
-            h('br'), '高く伸びたパーツもまるごと一緒に回ります。',
-            h('br'), '円線は編集画面だけの表示です（左パネルで消せます）。'));
+            t('円線に触れているパーツが回ります。'),
+            h('br'), t('円の中に置いただけ・線から高さがずれているものは回りません。'),
+            h('br'), t('線の上に立っていれば、足元が触れているので、'),
+            h('br'), t('高く伸びたパーツもまるごと一緒に回ります。'),
+            h('br'), t('円線は編集画面だけの表示です（左パネルで消せます）。')));
         } else {
           rows.push(h('div', { class: 'note' },
-            '貼った面の向きが回転軸。'));
+            t('貼った面の向きが回転軸。')));
         }
         if (parent?.kind === 'bone' && !meta.ring) {
           rows.push(h('div', { class: 'inspector-empty warn' },
-            'ボーンに貼っても回りません。ブロックに貼ってください。'));
+            t('ボーンに貼っても回りません。ブロックに貼ってください。')));
         } else if (part.parent === app.assembly.rootId) {
           rows.push(h('div', { class: 'inspector-empty warn' },
-            'コアは回せません（機体ごと回ってしまうため）。'));
+            t('コアは回せません（機体ごと回ってしまうため）。')));
         }
       }
 
-      rows.push(h('h3', { class: 'inline' }, '弾の色'));
+      rows.push(h('h3', { class: 'inline' }, t('弾の色')));
       if (meta.colorable) {
         rows.push(h('div', { class: 'palette' },
           ...BULLET_COLORS.map((hex) => h('button', {
@@ -2200,18 +2310,18 @@ export class EditorUI {
             onClick: () => app.setBulletColor(hex),
           }))));
         rows.push(h('label', { class: 'field' },
-          h('span', {}, '自由な色'),
+          h('span', {}, t('自由な色')),
           h('input', {
             type: 'color', value: hexToCss(part.bulletColor ?? meta.bullet),
             onInput: (ev) => app.setBulletColor(parseInt(ev.target.value.slice(1), 16)),
           })));
       } else {
         rows.push(h('div', { class: 'inspector-empty' },
-          `${meta.label}は弾の色を変えられません。`));
+          t('{0}は弾の色を変えられません。', [t(meta.label)])));
       }
     } else {
-      rows.push(h('h3', { class: 'inline' }, '寸法'));
-      rows.push(vectorField('数値', part.size, SIZE_STEP,
+      rows.push(h('h3', { class: 'inline' }, t('寸法')));
+      rows.push(vectorField(t('数値'), part.size, SIZE_STEP,
         (v) => app.editor.resizeSelected(v)));
       rows.push(h('div', { class: 'row tight' },
         h('button', { onClick: () => app.editor.scaleSelected(1.1) }, '× 1.1'),
@@ -2236,7 +2346,7 @@ export class EditorUI {
       // settled long before its size is. Say what it IS, and open the rack
       // on request.
       const now = part.shape ?? SHAPE_DEFAULT;
-      const label = (open) => `形: ${SHAPES[now]?.label ?? now} ${open ? '▴' : '▾'}`;
+      const label = (open) => t('形: {0} {1}', [SHAPES[now]?.label ?? now, open ? '▴' : '▾']);
       const shapeGrid = h('div', { class: 'collapsed' },
         ...this._shapeGrid(
           () => now,
@@ -2251,24 +2361,24 @@ export class EditorUI {
       shapeBtn.addEventListener('click', () => {
         shapeBtn.textContent = label(!shapeGrid.classList.toggle('collapsed'));
       });
-      rows.push(h('h3', { class: 'inline' }, '形'), shapeBtn, shapeGrid);
+      rows.push(h('h3', { class: 'inline' }, t('形')), shapeBtn, shapeGrid);
 
-      rows.push(h('h3', { class: 'inline' }, '中身'));
+      rows.push(h('h3', { class: 'inline' }, t('中身')));
       const vox = part.vox;
       rows.push(h('div', { class: 'stat' },
         h('span', { class: 'k' }, `1/${vox.n}`),
-        h('span', { class: 'v' }, `${Math.round((vox.solid / vox.total) * 100)}% 充填`)));
+        h('span', { class: 'v' }, t('{0}% 充填', [Math.round((vox.solid / vox.total) * 100)]))));
       rows.push(h('div', { class: 'meter' }, h('i', { style: `width:${(vox.solid / vox.total) * 100}%` })));
       rows.push(h('div', { class: 'row tight' },
-        h('button', { onClick: () => app.fillSelected() }, '全埋め'),
-        h('button', { onClick: () => app.bevelSelected() }, '角落とし'),
-        h('button', { onClick: () => app.repaintSelected() }, '全塗り'),
+        h('button', { onClick: () => app.fillSelected() }, t('全埋め')),
+        h('button', { onClick: () => app.bevelSelected() }, t('角落とし')),
+        h('button', { onClick: () => app.repaintSelected() }, t('全塗り')),
       ));
     }
 
     if (!isCore) {
       rows.push(h('div', { class: 'row tight', style: 'margin-top:8px' },
-        h('button', { onClick: () => app.editor.duplicateSelected() }, '複製'),
+        h('button', { onClick: () => app.editor.duplicateSelected() }, t('複製')),
         h('button', {
           class: 'danger',
           onClick: () => app.editor.deleteSelected(),
@@ -2276,12 +2386,12 @@ export class EditorUI {
           // Say what goes WITH it. Deleting one block takes everything
           // standing on it, and the outline only ever drew the one.
           const n = app.editor.doomedCount();
-          return n > 1 ? `削除 ${n}個 (Del)` : '削除 (Del)';
+          return n > 1 ? t('削除 {0}個 (Del)', [n]) : t('削除 (Del)');
         })()),
       ));
     } else {
       rows.push(h('div', { class: 'inspector-empty', style: 'margin-top:6px' },
-        'コアブロックは削除できません。前面 (+Z) が進行方向です。'));
+        t('コアブロックは削除できません。前面 (+Z) が進行方向です。')));
     }
 
     return rows;
@@ -2317,9 +2427,9 @@ export class EditorUI {
       ...row.ids.map((id) => {
         const btn = h('button', {
           class: id === now ? 'active' : '',
-          title: `${SHAPES[id].group} / ${SHAPES[id].label}`,
+          title: `${t(SHAPES[id].group)} / ${t(SHAPES[id].label)}`,
           onClick: () => onPick(id),
-        }, SHAPES[id].label);
+        }, t(SHAPES[id].label));
         registry?.set(id, btn);
         return btn;
       }),
@@ -2337,19 +2447,19 @@ export class EditorUI {
     const app = this.app;
     const set = (patch) => app.editor.setBoneTravelSelected(patch);
     const redraw = () => this.renderInspector(app.editor.selectedParts());
-    const rows = [h('h3', { class: 'inline' }, '可動域')];
+    const rows = [h('h3', { class: 'inline' }, t('可動域'))];
 
     const even = (part.limitBack ?? null) === null;
-    rows.push(slider('前へ', {
+    rows.push(slider(t('前へ'), {
       min: 0, max: 170, step: 5, value: part.limit, unit: '°',
     }, (v) => set({ limit: v })));
     rows.push(h('label', { class: 'checkline' },
       h('input', {
         type: 'checkbox', ...(even ? { checked: 'checked' } : {}),
         onChange: (ev) => { set({ limitBack: ev.target.checked ? null : part.limit }); redraw(); },
-      }), '前後おなじ'));
+      }), t('前後おなじ')));
     if (!even) {
-      rows.push(slider('後ろへ', {
+      rows.push(slider(t('後ろへ'), {
         min: 0, max: 170, step: 5, value: part.limitBack, unit: '°',
       }, (v) => set({ limitBack: v })));
     }
@@ -2358,13 +2468,13 @@ export class EditorUI {
       ...LIMIT_MODES.map(([id, label]) => h('button', {
         class: (part.limitMode ?? 'clamp') === id ? 'active' : '',
         onClick: () => { set({ limitMode: id }); redraw(); },
-      }, label))));
+      }, t(label)))));
 
     rows.push(h('label', { class: 'checkline' },
       h('input', {
         type: 'checkbox', ...(part.hinge ? { checked: 'checked' } : {}),
         onChange: (ev) => set({ hinge: ev.target.checked }),
-      }), '1軸だけ動く'));
+      }), t('1軸だけ動く')));
 
     // What it is actually reaching, as opposed to what it is allowed to.
     // The arc drawn round a joint is the setting; whether the motion under
@@ -2372,18 +2482,18 @@ export class EditorUI {
     const reach = app.editor.boneReach(part.id);
     if (reach > 0) {
       rows.push(h('div', { class: 'stat' },
-        h('span', { class: 'k' }, '実測'),
+        h('span', { class: 'k' }, t('実測')),
         h('span', { class: 'v' }, reach + '° / ' + part.limit + '°')));
     }
 
-    rows.push(h('h3', { class: 'inline' }, '追従'));
-    rows.push(slider('なじみ', {
-      min: 0, max: 0.6, step: 0.02, value: part.follow?.ease ?? 0, fixed: 2, unit: ' 秒',
+    rows.push(h('h3', { class: 'inline' }, t('追従')));
+    rows.push(slider(t('なじみ'), {
+      min: 0, max: 0.6, step: 0.02, value: part.follow?.ease ?? 0, fixed: 2, unit: t(' 秒'),
     }, (v) => set({ follow: { ease: v } })));
-    rows.push(slider('ゆれ戻り', {
+    rows.push(slider(t('ゆれ戻り'), {
       min: 0.2, max: 1, step: 0.05, value: part.follow?.damping ?? 1, fixed: 2,
     }, (v) => set({ follow: { damping: v } })));
-    rows.push(slider('先へ伝わる量', {
+    rows.push(slider(t('先へ伝わる量'), {
       min: 0, max: 1, step: 0.05, value: part.chain ?? CHAIN_FALLOFF_DEFAULT, fixed: 2,
     }, (v) => set({ chain: v })));
 
@@ -2405,7 +2515,7 @@ export class EditorUI {
     });
     if (!others.length) return [];
 
-    const rows = [h('h3', { class: 'inline' }, '連動')];
+    const rows = [h('h3', { class: 'inline' }, t('連動'))];
     rows.push(h('select', {
       onChange: (ev) => {
         const to = ev.target.value;
@@ -2415,13 +2525,13 @@ export class EditorUI {
         redraw();
       },
     },
-    h('option', { value: '', ...(part.link?.to ? {} : { selected: 'selected' }) }, 'なし'),
+    h('option', { value: '', ...(part.link?.to ? {} : { selected: 'selected' }) }, t('なし')),
     ...others.map((p) => h('option', {
       value: p.id, ...(part.link?.to === p.id ? { selected: 'selected' } : {}),
-    }, BONE_META[p.boneType].label + ' ' + p.id))));
+    }, t(BONE_META[p.boneType].label) + ' ' + p.id))));
 
     if (part.link?.to) {
-      rows.push(slider('比率', {
+      rows.push(slider(t('比率'), {
         min: -1.5, max: 1.5, step: 0.05, value: part.link.ratio ?? 1, fixed: 2,
       }, (v) => app.editor.setBoneTravelSelected({ link: { to: part.link.to, ratio: v } })));
     }
@@ -2440,30 +2550,30 @@ export class EditorUI {
     const w = part.weapon ?? {};
     const set = (patch) => app.editor.setWeaponMotionSelected(patch);
     const redraw = () => this.renderInspector(app.editor.selectedParts());
-    const rows = [h('h3', { class: 'inline' }, '構える武器')];
+    const rows = [h('h3', { class: 'inline' }, t('構える武器'))];
 
     rows.push(h('select', { onChange: (ev) => { set({ when: ev.target.value }); redraw(); } },
-      h('option', { value: 'any', ...(w.when === 'any' ? { selected: 'selected' } : {}) }, 'どれでも'),
-      ...WEAPON_TYPES.map((t) => h('option', {
-        value: t, ...(w.when === t ? { selected: 'selected' } : {}),
-      }, EQUIP_META[t].label))));
+      h('option', { value: 'any', ...(w.when === 'any' ? { selected: 'selected' } : {}) }, t('どれでも')),
+      ...WEAPON_TYPES.map((kind) => h('option', {
+        value: kind, ...(w.when === kind ? { selected: 'selected' } : {}),
+      }, t(EQUIP_META[kind].label)))));
 
     rows.push(h('div', { class: 'row tight' },
       ...['x', 'y', 'z'].map((ax) => h('button', {
         class: (w.axis ?? 'x') === ax ? 'active' : '',
         onClick: () => { set({ axis: ax }); redraw(); },
-      }, { x: '前後', y: 'ひねり', z: '上下' }[ax]))));
+      }, { x: t('前後'), y: t('ひねり'), z: t('上下') }[ax]))));
 
-    rows.push(slider('しまう角度', {
+    rows.push(slider(t('しまう角度'), {
       min: -170, max: 170, step: 5, value: w.stowed ?? 0, unit: '°',
     }, (v) => set({ stowed: v })));
-    rows.push(slider('構える角度', {
+    rows.push(slider(t('構える角度'), {
       min: -170, max: 170, step: 5, value: w.deployed ?? -60, unit: '°',
     }, (v) => set({ deployed: v })));
-    rows.push(slider('速さ', {
+    rows.push(slider(t('速さ'), {
       min: 0.5, max: 12, step: 0.1, value: w.speed ?? 3.2, fixed: 1,
     }, (v) => set({ speed: v })));
-    rows.push(slider('行き過ぎ', {
+    rows.push(slider(t('行き過ぎ'), {
       min: 0, max: 0.9, step: 0.05, value: w.overshoot ?? 0, fixed: 2,
     }, (v) => set({ overshoot: v })));
 
@@ -2483,37 +2593,37 @@ export class EditorUI {
     const app = this.app;
     const ed = app.editor;
     const redraw = () => this.renderInspector(ed.selectedParts());
-    const rows = [h('h3', { class: 'inline' }, '動作テスト')];
+    const rows = [h('h3', { class: 'inline' }, t('動作テスト'))];
 
-    rows.push(slider('走らせる', {
+    rows.push(slider(t('走らせる'), {
       min: 0, max: 1, step: 0.05, value: ed.bonePreview.run, fixed: 2,
     }, (v) => ed.setBonePreview({ run: v })));
     rows.push(h('div', { class: 'row tight' },
-      h('button', { onClick: () => ed.setBonePreview({ fire: true }) }, '撃つ'),
+      h('button', { onClick: () => ed.setBonePreview({ fire: true }) }, t('撃つ')),
       h('button', {
         class: ed.bonePreview.solo ? 'active' : '',
         onClick: () => { ed.setBonePreview({ solo: !ed.bonePreview.solo }); redraw(); },
-      }, '選択中だけ'),
+      }, t('選択中だけ')),
     ));
 
     if (part.boneType === 'weapon') {
       rows.push(h('select', {
         onChange: (ev) => ed.setBonePreview({ weapon: ev.target.value || null }),
       },
-      h('option', { value: '' }, '武器なし'),
-      ...WEAPON_TYPES.map((t) => h('option', {
-        value: t, ...(ed.bonePreview.weapon === t ? { selected: 'selected' } : {}),
-      }, EQUIP_META[t].label))));
+      h('option', { value: '' }, t('武器なし')),
+      ...WEAPON_TYPES.map((kind) => h('option', {
+        value: kind, ...(ed.bonePreview.weapon === kind ? { selected: 'selected' } : {}),
+      }, t(EQUIP_META[kind].label)))));
     }
 
     rows.push(h('button', {
       class: 'ghost wide',
-      title: '反対側の同じボーンに、この設定をそのまま写します',
+      title: t('反対側の同じボーンに、この設定をそのまま写します'),
       onClick: () => ed.copyBoneSettingsToTwin(),
-    }, '反対側にも同じ設定'));
+    }, t('反対側にも同じ設定')));
     rows.push(h('div', { class: 'row tight' },
-      h('button', { onClick: () => ed.scaleChainGainSelected(0.8) }, '先まで弱く'),
-      h('button', { onClick: () => ed.scaleChainGainSelected(1.25) }, '先まで強く'),
+      h('button', { onClick: () => ed.scaleChainGainSelected(0.8) }, t('先まで弱く')),
+      h('button', { onClick: () => ed.scaleChainGainSelected(1.25) }, t('先まで強く')),
     ));
 
     return rows;
@@ -2522,12 +2632,12 @@ export class EditorUI {
   _boneMotion(part) {
     const app = this.app;
     const redraw = () => this.renderInspector(app.editor.selectedParts());
-    const rows = [h('h3', { class: 'inline' }, '関節の効き')];
+    const rows = [h('h3', { class: 'inline' }, t('関節の効き'))];
 
-    rows.push(slider('効き', {
+    rows.push(slider(t('効き'), {
       min: 0, max: BONE_GAIN_MAX, step: 0.05, value: part.gain ?? 1, fixed: 2,
     }, (v) => app.editor.setBoneMotionSelected({ gain: v })));
-    rows.push(slider('ずらし', {
+    rows.push(slider(t('ずらし'), {
       min: 0, max: BONE_LAG_MAX, step: 0.05, value: part.lag ?? 0, fixed: 2,
     }, (v) => app.editor.setBoneMotionSelected({ lag: v })));
 
@@ -2535,10 +2645,10 @@ export class EditorUI {
       title, onClick: () => app.editor.setBoneMotionSelected(motion),
     }, label);
     rows.push(h('div', { class: 'row tight' },
-      recipe('肩', 'アームの根元。振りを抑えて、腕全体の付け根らしく', { gain: 0.4, lag: 0 }),
-      recipe('股関節', 'レッグの根元。しっかり踏み出す', { gain: 1, lag: 0 }),
-      recipe('しなり', 'ひと呼吸遅れて追従。先端側に付けるとムチのように動く', { gain: 0.8, lag: 0.12 }),
-      recipe('固定', 'まったく動かさない', { gain: 0, lag: 0 }),
+      recipe(t('肩'), t('アームの根元。振りを抑えて、腕全体の付け根らしく'), { gain: 0.4, lag: 0 }),
+      recipe(t('股関節'), t('レッグの根元。しっかり踏み出す'), { gain: 1, lag: 0 }),
+      recipe(t('しなり'), t('ひと呼吸遅れて追従。先端側に付けるとムチのように動く'), { gain: 0.8, lag: 0.12 }),
+      recipe(t('固定'), t('まったく動かさない'), { gain: 0, lag: 0 }),
     ));
     // The travel is part of the joint, not a separate decision: a knee that
     // takes the full swing and can also bend backwards is not a knee.
@@ -2546,16 +2656,16 @@ export class EditorUI {
       title, onClick: () => { app.editor.setBoneTravelSelected(patch); redraw(); },
     }, label);
     rows.push(h('div', { class: 'row tight' },
-      shape('ひざ', '片方にだけ深く曲がる', {
+      shape(t('ひざ'), t('片方にだけ深く曲がる'), {
         limit: 130, limitBack: 4, hinge: true, limitMode: 'clamp',
       }),
-      shape('ひじ', 'ひざより浅く、同じく片方だけ', {
+      shape(t('ひじ'), t('ひざより浅く、同じく片方だけ'), {
         limit: 105, limitBack: 6, hinge: true, limitMode: 'clamp',
       }),
-      shape('球', '前後にも横にも自由', {
+      shape(t('球'), t('前後にも横にも自由'), {
         limit: 70, limitBack: null, hinge: false, limitMode: 'clamp',
       }),
-      shape('バネ', '端まで行くと跳ね返る', {
+      shape(t('バネ'), t('端まで行くと跳ね返る'), {
         limit: 55, limitBack: null, hinge: false, limitMode: 'bounce',
       }),
     ));
@@ -2568,23 +2678,23 @@ export class EditorUI {
   _customMotion(part) {
     const app = this.app;
     const c = part.custom;
-    const rows = [h('h3', { class: 'inline' }, 'カスタム動作')];
+    const rows = [h('h3', { class: 'inline' }, t('カスタム動作'))];
 
     const redraw = () => this.renderInspector(app.editor.selectedParts());
 
-    rows.push(h('label', { class: 'field' }, h('span', {}, '軸')));
+    rows.push(h('label', { class: 'field' }, h('span', {}, t('軸'))));
     rows.push(h('div', { class: 'row tight' },
       ...['x', 'y', 'z'].map((ax) => h('button', {
         class: c.axis === ax ? 'active' : '',
         onClick: () => { c.axis = ax; redraw(); },
-      }, { x: '前後', y: 'ひねり', z: '上下' }[ax]))));
+      }, { x: t('前後'), y: t('ひねり'), z: t('上下') }[ax]))));
 
-    rows.push(h('label', { class: 'field' }, h('span', {}, '動き方')));
+    rows.push(h('label', { class: 'field' }, h('span', {}, t('動き方'))));
     rows.push(h('div', { class: 'equipgrid' },
       ...Object.entries(CUSTOM_WAVES).map(([k, w]) => h('button', {
         class: c.wave === k ? 'active' : '',
         onClick: () => { c.wave = k; redraw(); },
-      }, w.label))));
+      }, t(w.label)))));
 
     const spins = CUSTOM_WAVES[c.wave]?.spins && !c.bounded;
     if (spins) {
@@ -2595,31 +2705,31 @@ export class EditorUI {
         h('input', {
           type: 'checkbox', ...(c.bounded ? { checked: 'checked' } : {}),
           onChange: (ev) => { c.bounded = ev.target.checked; redraw(); },
-        }), '可動域で止める'));
+        }), t('可動域で止める')));
     } else {
-      rows.push(slider('振幅', { min: 0, max: 90, step: 5, value: c.amp, unit: '°' },
+      rows.push(slider(t('振幅'), { min: 0, max: 90, step: 5, value: c.amp, unit: '°' },
         (v) => { c.amp = v; }));
       if (CUSTOM_WAVES[c.wave]?.spins) {
         rows.push(h('label', { class: 'checkline' },
           h('input', {
             type: 'checkbox', checked: 'checked',
             onChange: (ev) => { c.bounded = ev.target.checked; redraw(); },
-          }), '可動域で止める'));
+          }), t('可動域で止める')));
       }
     }
 
-    rows.push(slider(spins ? '回転速度' : '速さ',
-      { min: 0, max: 4, step: 0.1, value: c.freq, fixed: 1, unit: spins ? ' 回転/秒' : ' Hz' },
+    rows.push(slider(spins ? t('回転速度') : t('速さ'),
+      { min: 0, max: 4, step: 0.1, value: c.freq, fixed: 1, unit: spins ? t(' 回転/秒') : ' Hz' },
       (v) => { c.freq = v; }));
 
-    rows.push(slider('中心角', { min: -90, max: 90, step: 5, value: c.offset ?? 0, unit: '°' },
+    rows.push(slider(t('中心角'), { min: -90, max: 90, step: 5, value: c.offset ?? 0, unit: '°' },
       (v) => { c.offset = v; }));
     // The resting angle itself can move with the drive: a waist that leans
     // forward the faster you go, rather than only twisting harder.
-    rows.push(slider('中心角も動かす', {
+    rows.push(slider(t('中心角も動かす'), {
       min: -1, max: 1, step: 0.05, value: c.offsetGain ?? 0, fixed: 2,
     }, (v) => { c.offsetGain = v; }));
-    rows.push(slider('位相ずらし', { min: 0, max: 1, step: 0.05, value: c.phase ?? 0, fixed: 2 },
+    rows.push(slider(t('位相ずらし'), { min: 0, max: 1, step: 0.05, value: c.phase ?? 0, fixed: 2 },
       (v) => { c.phase = v; }));
 
     /**
@@ -2628,25 +2738,25 @@ export class EditorUI {
      * One wave is either slow and wide or quick and small; it cannot be
      * both, so "sways heavily while trembling" was not expressible at all.
      */
-    rows.push(h('h3', { class: 'inline' }, '重ねる動き'));
-    rows.push(slider('振幅', { min: 0, max: 45, step: 1, value: c.amp2 ?? 0, unit: '°' },
+    rows.push(h('h3', { class: 'inline' }, t('重ねる動き')));
+    rows.push(slider(t('振幅'), { min: 0, max: 45, step: 1, value: c.amp2 ?? 0, unit: '°' },
       (v) => { c.amp2 = v; redraw(); }));
     if (c.amp2) {
-      rows.push(slider('速さ', {
+      rows.push(slider(t('速さ'), {
         min: 0, max: 12, step: 0.5, value: c.freq2 ?? 4, fixed: 1, unit: ' Hz',
       }, (v) => { c.freq2 = v; }));
       rows.push(h('div', { class: 'equipgrid' },
         ...Object.entries(CUSTOM_WAVES).map(([k, w]) => h('button', {
           class: (c.wave2 ?? 'sine') === k ? 'active' : '',
           onClick: () => { c.wave2 = k; redraw(); },
-        }, w.label))));
+        }, t(w.label)))));
     }
 
-    rows.push(h('label', { class: 'field' }, h('span', {}, '駆動ソース')));
+    rows.push(h('label', { class: 'field' }, h('span', {}, t('駆動ソース'))));
     rows.push(h('select', { onChange: (ev) => { c.source = ev.target.value; } },
       ...CUSTOM_SOURCES.map(([v, l]) => h('option', {
         value: v, ...(c.source === v ? { selected: 'selected' } : {}),
-      }, l))));
+      }, t(l)))));
 
     // Ready-made joints. These used to live in the help text as prose, so
     // building a waist meant reading a paragraph and then guessing at five
@@ -2656,24 +2766,24 @@ export class EditorUI {
       onClick: () => { Object.assign(c, motion); redraw(); },
     }, label);
     rows.push(h('div', { class: 'row tight' },
-      recipe('腰', '歩調に合わせてひねる', {
+      recipe(t('腰'), t('歩調に合わせてひねる'), {
         axis: 'y', wave: 'sine', amp: 14, freq: 1, source: 'stride', offsetGain: 0,
       }),
-      recipe('首', 'ロックオン中だけゆっくり動く', {
+      recipe(t('首'), t('ロックオン中だけゆっくり動く'), {
         axis: 'y', wave: 'sine', amp: 10, freq: 0.4, source: 'aim',
       }),
-      recipe('尾', '走るほど大きく揺れる', {
+      recipe(t('尾'), t('走るほど大きく揺れる'), {
         axis: 'x', wave: 'sine', amp: 26, freq: 1.2, source: 'speed', amp2: 6, freq2: 5,
       }),
     ));
     rows.push(h('div', { class: 'row tight' },
-      recipe('プロペラ', '回りっぱなし', {
+      recipe(t('プロペラ'), t('回りっぱなし'), {
         axis: 'y', wave: 'saw', freq: 2, source: 'time', bounded: false,
       }),
-      recipe('排熱フィン', 'ENが減るほど開く', {
+      recipe(t('排熱フィン'), t('ENが減るほど開く'), {
         axis: 'x', wave: 'sine', amp: 0, freq: 0, source: 'energy', offsetGain: 1, amp2: 0,
       }),
-      recipe('反動', '撃った瞬間だけ跳ねる', {
+      recipe(t('反動'), t('撃った瞬間だけ跳ねる'), {
         axis: 'x', wave: 'pulse', amp: 18, freq: 3, source: 'recoil',
       }),
     ));
@@ -2700,21 +2810,21 @@ export class EditorUI {
     const cell = (k, v, cls = '') => h('div', { class: 'speccell' },
       h('span', { class: 'k' }, k), h('span', { class: `v ${cls}` }, v));
     this.specStrip.replaceChildren(
-      cell('質量', stats.mass.toFixed(1), delta('mass', stats.mass)),
-      cell('機動', stats.thrustToMass.toFixed(1),
+      cell(t('質量'), stats.mass.toFixed(1), delta('mass', stats.mass)),
+      cell(t('機動'), stats.thrustToMass.toFixed(1),
         delta('thrustToMass', stats.thrustToMass)
         || (stats.agility > 0.55 ? 'good' : stats.agility < 0.22 ? 'warn' : '')),
-      cell('耐久', String(Math.round(stats.durability * (1 + (stats.hpBonus ?? 0)))),
+      cell(t('耐久'), String(Math.round(stats.durability * (1 + (stats.hpBonus ?? 0)))),
         delta('durability', stats.durability)),
-      cell('脚', String(stats.legs)),
+      cell(t('脚'), String(stats.legs)),
       // How big the thing is. A builder of robots never said.
-      cell('全高', `${(this.app.editor.measure().whole.y).toFixed(1)}m`),
+      cell(t('全高'), `${(this.app.editor.measure().whole.y).toFixed(1)}m`),
       // Only when there is something to say. A row reading "x1.0" on every
       // machine that has never fitted a tank is a row nobody reads.
       ...((stats.energyCapacity ?? 1) > 1
         ? [cell('EN', `x${stats.energyCapacity.toFixed(2)}`, 'good')] : []),
       // Part count, which is what decides how heavy the editor itself feels.
-      cell('パーツ', String(this.app.assembly.parts.size),
+      cell(t('パーツ'), String(this.app.assembly.parts.size),
         this.app.assembly.parts.size > 220 ? 'warn' : ''),
     );
     this._lastStats = {
@@ -2728,35 +2838,35 @@ export class EditorUI {
       // do is build toward the label. The leg COUNT is below, because that
       // is a fact about the parts; what it implies, the machine shows you
       // by moving.
-      h('div', { class: 'stat' }, h('span', { class: 'k' }, '質量'),
+      h('div', { class: 'stat' }, h('span', { class: 'k' }, t('質量')),
         h('span', { class: 'v' }, stats.mass.toFixed(2))),
       h('div', { class: 'meter' }, h('i', { style: `width:${stats.weightClass * 100}%` })),
 
-      h('div', { class: 'stat' }, h('span', { class: 'k' }, '機動性'),
+      h('div', { class: 'stat' }, h('span', { class: 'k' }, t('機動性')),
         h('span', { class: `v ${stats.agility > 0.55 ? 'good' : stats.agility < 0.22 ? 'warn' : ''}` },
           stats.thrustToMass.toFixed(1))),
       h('div', { class: 'meter' }, h('i', { style: `width:${stats.agility * 100}%` })),
 
-      h('div', { class: 'stat' }, h('span', { class: 'k' }, 'ブロック'), h('span', { class: 'v' }, stats.blockCount)),
-      h('div', { class: 'stat' }, h('span', { class: 'k' }, '体積'), h('span', { class: 'v' }, stats.volume.toFixed(2))),
-      h('div', { class: 'stat' }, h('span', { class: 'k' }, '密度'), h('span', { class: 'v' }, pct(stats.density))),
-      h('div', { class: 'stat' }, h('span', { class: 'k' }, '推力'), h('span', { class: 'v' }, stats.thrust.toFixed(0))),
-      h('div', { class: 'stat' }, h('span', { class: 'k' }, '慣性'), h('span', { class: 'v' }, stats.inertia.toFixed(1))),
-      h('div', { class: 'stat' }, h('span', { class: 'k' }, '脚 / 腕'),
+      h('div', { class: 'stat' }, h('span', { class: 'k' }, t('ブロック')), h('span', { class: 'v' }, stats.blockCount)),
+      h('div', { class: 'stat' }, h('span', { class: 'k' }, t('体積')), h('span', { class: 'v' }, stats.volume.toFixed(2))),
+      h('div', { class: 'stat' }, h('span', { class: 'k' }, t('密度')), h('span', { class: 'v' }, pct(stats.density))),
+      h('div', { class: 'stat' }, h('span', { class: 'k' }, t('推力')), h('span', { class: 'v' }, stats.thrust.toFixed(0))),
+      h('div', { class: 'stat' }, h('span', { class: 'k' }, t('慣性')), h('span', { class: 'v' }, stats.inertia.toFixed(1))),
+      h('div', { class: 'stat' }, h('span', { class: 'k' }, t('脚 / 腕')),
         h('span', { class: 'v' }, `${stats.legs} / ${stats.arms}`)),
-      h('div', { class: 'stat' }, h('span', { class: 'k' }, '顔 / カスタム'),
+      h('div', { class: 'stat' }, h('span', { class: 'k' }, t('顔 / カスタム')),
         h('span', { class: 'v' }, `${stats.faces} / ${stats.customs}`)),
 
-      h('div', { class: 'stat' }, h('span', { class: 'k' }, '装備 / 武装'),
+      h('div', { class: 'stat' }, h('span', { class: 'k' }, t('装備 / 武装')),
         h('span', { class: 'v' }, `${stats.equipCount ?? 0} / ${stats.weaponCount ?? 0}`)),
       this._budgetBars(),
       ...(stats.dashBonus
-        ? [h('div', { class: 'stat' }, h('span', { class: 'k' }, 'ダッシュ'),
+        ? [h('div', { class: 'stat' }, h('span', { class: 'k' }, t('ダッシュ')),
           h('span', { class: 'v good' }, `+${Math.round(stats.dashBonus * 100)}%`))]
         : []),
       ...(stats.noFly
-        ? [h('div', { class: 'stat' }, h('span', { class: 'k' }, 'グラビティ'),
-          h('span', { class: 'v warn' }, `浮遊不可 / 耐久 +${Math.round(stats.hpBonus * 100)}%`))]
+        ? [h('div', { class: 'stat' }, h('span', { class: 'k' }, t('グラビティ')),
+          h('span', { class: 'v warn' }, t('浮遊不可 / 耐久 +{0}%', [Math.round(stats.hpBonus * 100)])))]
         : []),
     );
   }
@@ -2789,10 +2899,10 @@ export class EditorUI {
         return h('div', {
           class: `budgetrow ${tone}`,
           title: kind === 'voxel'
-            ? `加工グリッド ${(n / 1e6).toFixed(2)}M / ${(cap / 1e6).toFixed(0)}M セル`
-            : `${BUDGET_LABEL[kind]} ${n} / ${cap}`,
+            ? t('加工グリッド {0}M / {1}M セル', [(n / 1e6).toFixed(2), (cap / 1e6).toFixed(0)])
+            : `${t(BUDGET_LABEL[kind])} ${n} / ${cap}`,
         },
-        h('span', { class: 'k' }, BUDGET_LABEL[kind]),
+        h('span', { class: 'k' }, t(BUDGET_LABEL[kind])),
         h('span', { class: 'budgetbar' },
           h('span', { class: 'budgetfill', style: `width:${(frac * 100).toFixed(1)}%` })),
         h('span', { class: 'v' }, shown));
@@ -2813,13 +2923,13 @@ export class EditorUI {
       // The brush, and how fine one cell of the grid is — the two lengths
       // that decide whether a cut will land where it is meant to.
       const cell = ed?.cellSize?.() ?? 0;
-      this.brushSize.textContent = `太さ ${(metres * 100).toFixed(0)}cm`
-        + (cell ? ` ・ 1マス ${(cell * 100).toFixed(1)}cm` : '');
+      this.brushSize.textContent = t('太さ {0}cm', [(metres * 100).toFixed(0)])
+        + (cell ? t(' ・ 1マス {0}cm', [(cell * 100).toFixed(1)]) : '');
       // Bigger than the block is a brush that takes the whole thing out in
       // one dab, which reads as the tool being broken.
       const big = !!ed?.brushTooBig?.();
       this.brushSize.classList.toggle('warn', big);
-      this.brushSize.title = big ? 'ブラシがブロックより大きくなっています' : '';
+      this.brushSize.title = big ? t('ブラシがブロックより大きくなっています') : '';
     }
     this.syncBlockLeft();
     return this;
@@ -2829,7 +2939,7 @@ export class EditorUI {
   syncBlockLeft() {
     if (!this.blockLeft) return this;
     const left = this.app.editor?.blockSolidShare?.() ?? 1;
-    this.blockLeft.textContent = `残り ${Math.round(left * 100)}%`;
+    this.blockLeft.textContent = t('残り {0}%', [Math.round(left * 100)]);
     this.blockLeft.classList.toggle('warn', left < 0.15);
     return this;
   }

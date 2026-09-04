@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import * as THREE from 'three';
-import { Projectiles, WeaponSystem } from '../src/game/Weapons.js';
+import { Projectiles } from '../src/game/Weapons.js';
 import { Robot, SyntheticInput } from '../src/game/Robot.js';
 import { Assembly, PRESETS, computeStats, _resetIds } from '../src/core/Assembly.js';
 import {
-  EQUIP, EQUIP_META, WEAPON_TYPES, WEAPON_SLOTS, weaponLead,
+  EQUIP, EQUIP_META, WEAPON_TYPES, WEAPON_SLOTS, WEAPON_VOICE, weaponLead,
 } from '../src/core/constants.js';
+import { KIT_SFX, sfxName } from '../src/game/Kit.js';
 import { testWorld, stripEquips } from './helpers/dom.js';
 
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -1320,5 +1321,161 @@ describe('the blade runs on the tank', () => {
       r.weapons.update({ firing: false, projectiles: pool(4), targets: [] }, 1 / 60);
     }
     expect(r.body.energy).toBe(before);
+  });
+});
+
+// ============================================================
+//  Every gun has its own voice.
+// ============================================================
+
+describe('the guns do not all speak with one voice', () => {
+  it('names a recording for every weapon there is', () => {
+    // Every weapon but the blade, which does not go off — it is held lit,
+    // and its sound is one of the three that are held rather than struck.
+    //
+    // This caught a real gap the moment it was written: the laser and the
+    // shield had no voice at all, so pressing the trigger on either of them
+    // was silent.
+    for (const t of WEAPON_TYPES) {
+      if (EQUIP_META[t].dps) continue;
+      expect(WEAPON_VOICE[t], `${t} has no voice`).toBeTruthy();
+    }
+  });
+
+  it('and a close weapon does not sound like a long one', () => {
+    // Two buckets — light and heavy — was most of why the guns sounded
+    // alike: a shotgun, a sniper rifle and a magnum all came out of one
+    // file at slightly different pitches, which the ear reads as one gun
+    // with a knob on it.
+    expect(WEAPON_VOICE[EQUIP.SHOT]).not.toBe(WEAPON_VOICE[EQUIP.SNIPER]);
+    expect(WEAPON_VOICE[EQUIP.GATLING]).not.toBe(WEAPON_VOICE[EQUIP.MAGNUM]);
+    expect(new Set(Object.values(WEAPON_VOICE)).size,
+      'more than two distinct firearms').toBeGreaterThan(2);
+  });
+
+  it('and every voice it names is a sound the game actually ships', () => {
+    const shipped = new Set(KIT_SFX.map(sfxName));
+    for (const [t, voice] of Object.entries(WEAPON_VOICE)) {
+      expect(shipped.has(voice), `${t} wants ${voice}, which is not in the kit`).toBe(true);
+    }
+  });
+});
+
+// ============================================================
+//  A weapon with no magazine still has to show something.
+// ============================================================
+
+describe('a beam has no rounds, and must not say it has none left', () => {
+  const world = testWorld();
+  const withLaser = () => {
+    const a = stripEquips(PRESETS.biped.build());
+    a.addEquipOnFace(a.core.id, 4, EQUIP.LASER, { size: 0.6 });
+    a.addEquipOnFace(a.core.id, 2, EQUIP.GATLING, { size: 0.6 });
+    return new Robot(a, world, { isPlayer: true });
+  };
+
+  it('publishes how far it is from overheating instead', () => {
+    const r = withLaser();
+    const rows = r.weapons.readout();
+    const beam = rows.find((w) => w.label === EQUIP_META[EQUIP.LASER].en);
+    const gun = rows.find((w) => w.label === EQUIP_META[EQUIP.GATLING].en);
+    expect(beam.gauge, 'a beam has a gauge').toBeGreaterThan(0);
+    expect(gun.gauge, 'and a gun does not').toBe(null);
+  });
+
+  it('and the read-out it publishes would otherwise read as EMPTY', () => {
+    // This is the trap, written down. A laser's magazine is 0 of 0, which
+    // is exactly what a gun that has run dry looks like — so anything
+    // drawing rounds for this weapon is drawing a lie. Nobody saw it for
+    // as long as no shipped machine carried one.
+    const r = withLaser();
+    const beam = r.weapons.readout().find((w) => w.label === EQUIP_META[EQUIP.LASER].en);
+    expect(beam.max).toBe(0);
+    expect(beam.ammo).toBe(0);
+    expect(beam.melee, 'and it is not melee either, so that branch will not catch it')
+      .toBe(false);
+  });
+
+  it('and the gauge moves as it is held down', () => {
+    const r = withLaser();
+    r.weapons.select(0);
+    const before = r.weapons.readout()[0].gauge;
+    for (let i = 0; i < 90; i++) {
+      r.weapons.update({ firing: true, projectiles: pool(8), targets: [] }, 1 / 60);
+    }
+    const after = r.weapons.readout()[0].gauge;
+    expect(after, `${before.toFixed(2)} -> ${after.toFixed(2)}`).toBeLessThan(before);
+  });
+});
+
+// ============================================================
+//  Holding a beam down.
+// ============================================================
+
+describe('a beam you hold down', () => {
+  const world = testWorld();
+  const beamer = () => {
+    const a = stripEquips(PRESETS.biped.build());
+    a.addEquipOnFace(a.core.id, 4, EQUIP.LASER, { size: 0.6 });
+    return new Robot(a, world, { isPlayer: true });
+  };
+  const hold = (r, secs) => {
+    const ctx = { firing: true, projectiles: pool(16), targets: [] };
+    let lit = 0;
+    for (let i = 0; i < secs * 60; i++) {
+      r.weapons.update(ctx, 1 / 60);
+      if (r.weapons.beaming) lit++;
+    }
+    return lit / 60;
+  };
+
+  it('comes back after it overheats, without letting go', () => {
+    // It used to not. Heat only bled off while the trigger was UP, so
+    // holding it — which is what everybody does with a beam — left the
+    // weapon dead: it fired for one frame every two seconds for the rest of
+    // the fight, and nothing said why.
+    const r = beamer();
+    const lit = hold(r, 10);
+    expect(lit, `${lit.toFixed(1)}s of beam in ten`).toBeGreaterThan(4);
+  });
+
+  it('and still costs something — it is not a beam you can leave on', () => {
+    const r = beamer();
+    const lit = hold(r, 10);
+    expect(lit, 'not the whole ten seconds').toBeLessThan(8);
+  });
+
+  it('says it is beaming only while it is actually burning', () => {
+    const r = beamer();
+    const ctx = { firing: true, projectiles: pool(16), targets: [] };
+    r.weapons.update(ctx, 1 / 60);
+    expect(r.weapons.beaming, 'lit').toBe(true);
+    r.weapons.update({ ...ctx, firing: false }, 1 / 60);
+    expect(r.weapons.beaming, 'and out the moment the trigger comes up').toBe(false);
+  });
+
+  it('plants the machine while it is lit', () => {
+    // A beam is aimed for as long as it is held, which nothing else here
+    // is: a gun is aimed at the instant it goes off and whatever the
+    // machine does next cannot make that shot miss. So the nose settling
+    // onto the travel direction — right for a machine that is running —
+    // dragged the beam off the target the whole time it was burning.
+    const r = beamer();
+    expect(r.body.bracing).toBe(0);
+    const ctx = { firing: true, projectiles: pool(16), targets: [] };
+    for (let i = 0; i < 30; i++) {
+      r.syncBrace(1 / 60);
+      r.weapons.update(ctx, 1 / 60);
+    }
+    expect(r.body.bracing, 'braced while burning').toBeGreaterThan(0.9);
+
+    // And it lets go slowly: snapping the nose round at the moment the
+    // player is looking to see whether the shot landed is its own problem.
+    for (let i = 0; i < 6; i++) {
+      r.weapons.update({ ...ctx, firing: false }, 1 / 60);
+      r.syncBrace(1 / 60);
+    }
+    expect(r.body.bracing, 'still mostly braced a tenth of a second later')
+      .toBeGreaterThan(0.4);
   });
 });

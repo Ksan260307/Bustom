@@ -11,7 +11,13 @@
   --warn: #ffb454;
   --danger: #ff6a5c;
   --ok: #8effc9;
-  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* The numerals are the point of this one; Japanese in a monospaced row
+     is rare here, and where it happens the shipped face still answers. */
+  --mono: "JetBrains Mono", "Zen Kaku Gothic New", ui-monospace, "SF Mono",
+    Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* Set from the options screen; see #overlay below. */
+  --ui-scale: 1;
 }
 
 /* Native widgets — dropdown popups, scrollbars, spinners — follow this.
@@ -26,7 +32,12 @@ html, body {
   overflow: hidden;
   background: var(--bg);
   color: var(--fg);
-  font-family: "Inter", system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  /* Inter answers for Latin and hands everything else to the Japanese
+     face, which is carried with the game rather than borrowed from the
+     machine — see public/kit/font/fonts.css. The system names stay behind
+     both as the last resort. */
+  font-family: "Inter", "Zen Kaku Gothic New", system-ui, -apple-system,
+    "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
 }
@@ -48,6 +59,19 @@ html, body {
   inset: 0;
   z-index: 3;
   pointer-events: none;
+  /*
+   * How large the interface is drawn.
+   *
+   * The whole UI is written in hard pixels — twenty-five rules at 11px,
+   * twenty-two at 10px, five at 9px — which reads on the 1080p screen it
+   * was built on and is genuinely unreadable on a 4K panel at 100%.
+   * Rewriting nine hundred declarations in `rem` would be the tidy answer;
+   * `zoom` on the one element that holds every panel is the honest one,
+   * and it scales layout rather than smearing it the way `transform`
+   * would. The GL canvas and the HUD canvas are siblings, so neither is
+   * touched — the HUD is told the same number separately.
+   */
+  zoom: var(--ui-scale, 1);
 }
 
 #overlay > * { pointer-events: auto; }
@@ -1767,3 +1791,245 @@ body.scrubbing, body.scrubbing * { cursor: ew-resize !important; user-select: no
   text-overflow: ellipsis; white-space: nowrap;
 }
 .sortiepick .ps { font-size: 8px; letter-spacing: 0.1em; opacity: 0.45; }
+
+
+/* ---------------------------------------------------------- options
+
+   The screen that was missing. Built like the key config — same box, same
+   head and foot — because it is the same kind of thing and a player should
+   not have to learn two dialogs.
+*/
+
+#options {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 9, 14, 0.72);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+  z-index: 41;
+}
+#options.hidden { display: none; }
+
+.optbox { width: min(600px, 94vw); }
+.optbody { overflow-y: auto; padding: 4px 14px 12px; }
+
+.opthead {
+  margin: 14px 0 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+.opthead:first-child { margin-top: 6px; }
+
+.optrow {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, .04);
+}
+.optrow:last-child { border-bottom: 0; }
+
+.optlabel { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.optlabel > span { font-size: 12px; color: var(--fg); }
+.optlabel > small { font-size: 10.5px; color: var(--dim); line-height: 1.5; }
+
+.optctl { flex: 0 0 auto; display: flex; align-items: center; }
+
+.optchoice { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.optchoice button {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, .04);
+  color: var(--dim);
+  font: 600 11px/1 var(--mono);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.optchoice button:hover { color: var(--fg); border-color: var(--line-strong); }
+.optchoice button.active {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.optslider { display: flex; align-items: center; gap: 8px; }
+.optslider input[type="range"] { width: 150px; }
+.optval {
+  min-width: 44px;
+  text-align: right;
+  font: 600 11px/1 var(--mono);
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.optswitch { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+.optswitch span { font-size: 11px; color: var(--dim); }
+.optswitch input { accent-color: var(--accent); }
+
+/* ---------------------------------------------------------- reduced motion
+
+   The game is sold on how it moves, which is exactly why there has to be a
+   way to turn that down. This handles the interface; the camera, the
+   screen shake and the bloom are handled in the renderer, from the same
+   setting.
+*/
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) *,
+  :root:not([data-motion="full"]) *::before,
+  :root:not([data-motion="full"]) *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation-duration: .001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .001ms !important;
+  scroll-behavior: auto !important;
+}
+
+/* ---------------------------------------------------------- focus
+
+   One `:focus-visible` rule in seventeen hundred lines meant that tabbing
+   through the workbench was invisible: the focus was somewhere, and there
+   was no way to see where. This is the whole interface's answer.
+*/
+:where(button, input, select, textarea, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ---------------------------------------------------------- frame rate */
+
+#fps {
+  position: fixed;
+  right: 8px;
+  bottom: 6px;
+  z-index: 30;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(7, 10, 16, .72);
+  color: var(--dim);
+  font: 600 10.5px/1.35 var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+  pointer-events: none;
+}
+#fps.hidden { display: none; }
+#fps b { color: var(--accent); font-weight: 700; }
+#fps.low b { color: var(--warn); }
+#fps.bad b { color: var(--danger); }
+
+
+/* ---------------------------------------------------------- crash
+
+   Above everything, including the options dialog: if this is on screen,
+   nothing else on screen can be trusted.
+*/
+
+#crash {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 9, 14, .88);
+  backdrop-filter: blur(4px);
+  pointer-events: auto;
+  z-index: 90;
+}
+#crash.hidden { display: none; }
+
+.crashbox {
+  width: min(620px, 94vw);
+  max-height: 84vh;
+  overflow-y: auto;
+  padding: 20px 22px;
+  background: var(--panel-solid);
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .7);
+}
+
+.crashtitle {
+  margin-bottom: 10px;
+  color: var(--danger);
+  font-size: 15px;
+  font-weight: 700;
+}
+.crashbody p { margin: 0 0 8px; font-size: 12.5px; line-height: 1.7; color: var(--fg); }
+.crashdetail {
+  margin: 12px 0;
+  padding: 10px;
+  max-height: 220px;
+  overflow: auto;
+  background: rgba(0, 0, 0, .35);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--dim);
+  font: 400 10.5px/1.6 var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.crashdetail:empty { display: none; }
+.crashactions { display: flex; align-items: center; gap: 8px; }
+
+
+/* ---------------------------------------------------------- replays
+
+   Same box as the key config and the options: three dialogs that behave
+   the same way is one dialog a player has to learn.
+*/
+
+#replays {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 9, 14, 0.72);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+  z-index: 41;
+}
+#replays.hidden { display: none; }
+#replays .keybox { width: min(560px, 94vw); }
+#replays .keyaction { display: flex; flex-direction: column; gap: 1px; }
+#replays .keyaction b { font-weight: 600; }
+#replays .keyaction small { font-size: 10.5px; font-variant-numeric: tabular-nums; }
+
+
+/* ---------------------------------------------------------- first run
+
+   The same box the draft offer uses, because it is the same kind of thing
+   and appears in the same place.
+*/
+
+#firstrun {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 9, 14, 0.7);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+  z-index: 42;
+}
+#firstrun.hidden { display: none; }
+#firstrun .draftbox { width: min(460px, 92vw); }
+.firstlist { margin: 10px 0 4px; display: flex; flex-direction: column; gap: 7px; }
+.firstlist p { margin: 0; font-size: 12.5px; line-height: 1.65; color: var(--fg); }

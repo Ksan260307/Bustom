@@ -1,4 +1,5 @@
-// ============================================================
+
+import { t } from '../ui/i18n.js';// ============================================================
 //  Undo / redo.
 //
 //  Snapshot-based, not command-based: an assembly serialises to a compact
@@ -27,8 +28,8 @@ export class History {
   get canRedo() { return this.future.length > 0; }
 
   /** What the next undo would reverse, for the tooltip. */
-  get undoLabel() { return this.past.length ? this.past[this.past.length - 1].label : null; }
-  get redoLabel() { return this.future.length ? this.future[this.future.length - 1].label : null; }
+  get undoLabel() { return this.past.length ? t(this.past[this.past.length - 1].label) : null; }
+  get redoLabel() { return this.future.length ? t(this.future[this.future.length - 1].label) : null; }
 
   clear() {
     this.past.length = 0;
@@ -54,7 +55,7 @@ export class History {
     const entry = this.past.pop();
     if (!entry) return null;
     this.bytes -= entry.snapshot.length;
-    this.future.push({ label: entry.label, snapshot: current });
+    this.future.push({ label: t(entry.label), snapshot: current });
     this.bytes += current.length;
     this._trim();
     return entry;
@@ -65,7 +66,7 @@ export class History {
     const entry = this.future.pop();
     if (!entry) return null;
     this.bytes -= entry.snapshot.length;
-    this.past.push({ label: entry.label, snapshot: current });
+    this.past.push({ label: t(entry.label), snapshot: current });
     this.bytes += current.length;
     this._trim();
     return entry;

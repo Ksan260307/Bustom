@@ -13,6 +13,8 @@ import { PRESETS } from '../core/Assembly.js';
 import { clamp, clamp01 } from '../zmf/math.js';
 import { InputFrame, FrameInput } from '../net/InputFrame.js';
 import { hashFight } from '../net/StateHash.js';
+import { Recorder } from './Replay.js';
+import { ARENA_AIR } from './Kit.js';
 import { Match, ROUND } from './Match.js';
 
 // ============================================================
@@ -133,6 +135,15 @@ export class FieldScene {
     this.enemies = [];
     /** The session, while a fight against other people is on. */
     this.netplay = null;
+    /**
+     * Writing the fight down as it happens, or reading one back.
+     *
+     * Both are the same shape as the netplay session on purpose: they hand
+     * over a tick's worth of frames and let the fight step. Nothing below
+     * this line knows which of the three is driving.
+     */
+    this.recorder = null;
+    this.replay = null;
     /** Every seat in that fight, in the order every client agrees on. */
     this.netSeats = [];
     /** One frame-driven input per seat, the local one included. */
@@ -291,6 +302,50 @@ export class FieldScene {
   }
 
   /**
+   * Begin writing the fight down.
+   *
+   * Costs one array push per step. The machines are already packed by the
+   * time they get here — that is how they crossed the network — so the
+   * header is a few kilobytes whatever was built.
+   */
+  startRecording(head) {
+    this.recorder = new Recorder(head);
+    return this.recorder;
+  }
+
+  stopRecording() {
+    this.recorder?.stop();
+    const r = this.recorder;
+    this.recorder = null;
+    return r;
+  }
+
+  /**
+   * Run a recording instead of a fight.
+   *
+   * The seats are set up exactly as a networked fight sets them up — same
+   * corners, same seed, same order — and then the frames come off the
+   * recording rather than off a socket.
+   */
+  setReplay(replay, builds = []) {
+    this.replay = replay;
+    if (!replay) return this;
+    // A replay has no local player, so seat 0 is what the camera follows
+    // until the viewer says otherwise.
+    this.setNetplay({
+      rules: replay.rules,
+      order: replay.order,
+      id: replay.order[0],
+      slotOf: (id) => Math.max(0, replay.order.indexOf(id)),
+    }, builds, 0);
+    // `setNetplay` leaves the session in place; a replay is not one, and
+    // netAdvance checks for the replay first anyway.
+    this.netplay = null;
+    this.watching = 0;
+    return this;
+  }
+
+  /**
    * Hand a seat to the computer, on the step everybody agreed on.
    *
    * A player leaving mid-fight used to leave a machine standing still,
@@ -417,11 +472,27 @@ export class FieldScene {
    * why it returns the count — the caller draws once either way.
    */
   netAdvance(dt) {
+    // A recording drives the fight from what was pressed, not from what is
+    // being pressed. Everything else about the step is identical, which is
+    // exactly why a replay is faithful rather than approximate.
+    if (this.replay) {
+      return this.replay.pump((frames, tick) => {
+        this.netFrames = frames;
+        this.netTick = tick;
+        this.update(dt);
+        this.netFrames = null;
+      });
+    }
+
     if (!this.netplay) return 0;
     const mine = InputFrame.capture(this.input);
     const ran = this.netplay.pump(mine, (frames, tick) => {
       this.netFrames = frames;
       this.netTick = tick;
+      // What the SIMULATION was handed, not what anybody meant to press: a
+      // frame that arrived late and was filled with idle is recorded as
+      // idle, so the replay makes the same mistake and ends the same way.
+      this.recorder?.push(frames);
       this.update(dt);
       this.netFrames = null;
     });
@@ -695,6 +766,19 @@ export class FieldScene {
     this.input.setEnabled(!this.paused);
     if (this.paused) this.feedback.suspend();
     return this.paused;
+  }
+
+  /**
+   * Hold the picture still for somebody the movement makes ill.
+   *
+   * This reaches the camera, which owns the shake, the FOV pumping and the
+   * speed lines — the three things that move the whole frame rather than
+   * something in it.
+   */
+  setReducedMotion(on) {
+    this.reducedMotion = !!on;
+    if (this.cameraRig) this.cameraRig.motionScale = on ? 0 : 1;
+    return this;
   }
 
   resize(w, h) {
@@ -977,6 +1061,9 @@ export class FieldScene {
 
     const firing = this.input.isDown('fire');
 
+    // Planted while a beam is lit — see Robot.syncBrace. Done before the
+    // weapons run, so the brace and the beam belong to the same step.
+    p.syncBrace?.(dt);
     p.weapons.update({
       firing,
       aimPoint: this.lock && p.body.assist.hasTarget ? p.body.assist.aimPoint : null,
@@ -1281,6 +1368,38 @@ export class FieldScene {
    * the same number of puffs into a long stride as a short one, which makes
    * a fast machine look like it is skating.
    */
+  /**
+   * A machine that is losing, saying so.
+   *
+   * Damage was legible from the bar and from nothing else: two machines at
+   * a hundred and at fifteen per cent looked identical from across an
+   * arena, so reading the fight meant reading the interface. Below half it
+   * smokes, and the worse it is the faster.
+   */
+  _damageSmoke(dt) {
+    for (const robot of this._machines()) {
+      if (!robot.alive || !robot.maxHp) continue;
+      const left = clamp01(robot.hp / robot.maxHp);
+      if (left > 0.5) continue;
+      // A puff every so often, and the interval shortens as it gets worse.
+      const hurt = 1 - left / 0.5;
+      robot.smokeT = (robot.smokeT ?? 0) - dt * (0.5 + hurt * 2.2);
+      if (robot.smokeT > 0) continue;
+      robot.smokeT = 1;
+      _v.copy(robot.position);
+      // Out of the machine rather than out of its middle, so a big one
+      // trails from its shoulders and not from a point in the air.
+      const r = (robot.hitRadius ?? 1) * 0.5;
+      _v.x += this.visualRandom.range(-r, r);
+      _v.y += this.visualRandom.range(0, r);
+      _v.z += this.visualRandom.range(-r, r);
+      this.effects.plume?.(_v, robot.velocity, {
+        scale: 0.5 + (robot.hitRadius ?? 1) * 0.5,
+        life: 0.9 + hurt * 0.6,
+      });
+    }
+  }
+
   _groundDust(dt) {
     for (const robot of this._machines()) {
       if (!robot.alive) continue;
@@ -1497,6 +1616,7 @@ export class FieldScene {
         if (this.taken.has(i)) continue;
         const input = this.netInputs[i].apply(this.netFrames[i], dt);
         r.update(input, dt);
+        r.syncBrace?.(dt);
         r.weapons.update({
           firing: input.isDown('fire'),
           projectiles: this.projectiles,
@@ -1564,6 +1684,7 @@ export class FieldScene {
     this._groundDust(dt);
     this._footfalls();
     this._landings();
+    this._damageSmoke(dt);
     this.effects.track(this._machines());
     this.effects.update(dt);
 
@@ -1645,6 +1766,10 @@ export class FieldScene {
       gait: clamp01((p.animator?.gaitFreq ?? 0) / 3),
       grounded: p.body.env?.grounded ?? 0,
       blade: p.weapons?.bladeGlow ?? 0,
+      // What this place sounds like. Seven arenas made no sound at all
+      // until now, so a salt flat and the inside of a canyon were the same
+      // silence with different pictures over it.
+      ...(ARENA_AIR[this.world.arenaId] ?? ARENA_AIR.proving),
     }, dt);
 
     // ---- post uniforms: thrust direction projected to screen

@@ -23,6 +23,15 @@ import os from 'node:os';
 
 const PORT = 45071;
 
+/**
+ * The longest single message this will assemble, in characters.
+ *
+ * Not a guess: a machine at the game's own limits packs to about 45 KB, so
+ * eight megabytes is two orders of magnitude of headroom and still small
+ * enough that a peer cannot use it to exhaust memory.
+ */
+const MAX_LINE = 8 << 20;
+
 /** Newline-delimited JSON. `JSON.stringify` never emits a raw newline. */
 function frame(obj) { return `${JSON.stringify(obj)}\n`; }
 
@@ -41,9 +50,22 @@ function reader(onMessage) {
       }
       i = buf.indexOf('\n');
     }
-    // A peer that never sends a newline must not be able to grow this for
-    // ever.
-    if (buf.length > 1 << 20) buf = '';
+    /*
+     * A peer that never sends a newline must not be able to grow this for
+     * ever — but the old cap was 1 MB and a machine used to serialise to
+     * 1.79 MB, so the guard against a hostile peer was in practice a guard
+     * against the ordinary case: the buffer was wiped, the machine never
+     * arrived, and NOTHING WAS SAID. Forever, and only to whoever had built
+     * the most.
+     *
+     * Machines are packed now (45 KB, see Codec.js) so nothing legitimate
+     * comes near this. The cap stays, because it is still the right shape
+     * of protection — but it is eight times larger and it says so.
+     */
+    if (buf.length > MAX_LINE) {
+      buf = '';
+      onMessage({ t: 'error', why: 'oversize' });
+    }
   };
 }
 

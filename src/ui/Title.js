@@ -1,6 +1,9 @@
 import { h } from './dom.js';
 import { onDesktop, quitGame, toggleFullscreen, steamStatus } from '../platform/desktop.js';
-import { DIFFICULTY_ORDER, SOLO_STAGES, getDifficulty } from '../game/SoloRun.js';
+import {
+  DIFFICULTY_ORDER, SOLO_STAGES, getDifficulty, DEFAULT_DIFFICULTY,
+} from '../game/SoloRun.js';
+import { t, num } from './i18n.js';
 
 // ============================================================
 //  The title screen and the result screen.
@@ -13,17 +16,58 @@ import { DIFFICULTY_ORDER, SOLO_STAGES, getDifficulty } from '../game/SoloRun.js
 const BEST_KEY = 'blostom.solo.best.v1';
 /** What it was called before the rename. Read as a fallback, never written. */
 const BEST_KEY_WAS = 'brostom.solo.best.v1';
+/** One record per difficulty. See loadBests. */
+const BESTS_KEY = 'blostom.solo.bests.v1';
 
-/** The best solo run so far, or null if nobody has finished one yet. */
-export function loadBest() {
+/**
+ * The best run at each difficulty.
+ *
+ * ONE PER SETTING, which it was not. There was a single record for the
+ * whole game, and the score multiplier runs from 0.6 on the easiest to 4.0
+ * on the hardest — so one run on HELL buried every other difficulty
+ * permanently, and somebody getting better on かんたん could never set a
+ * record again. A record that cannot be beaten is not a record.
+ *
+ * The old single-record store is read once and filed under whatever
+ * difficulty it was set on, so nobody loses the run they already have.
+ *
+ * @returns {Record<string, object>}
+ */
+export function loadBests() {
+  let out = {};
+  try {
+    const raw = localStorage.getItem(BESTS_KEY);
+    const v = raw ? JSON.parse(raw) : null;
+    if (v && typeof v === 'object') out = v;
+  } catch (e) {
+    out = {};
+  }
+
+  // The one-record store, from before this was per-difficulty.
   try {
     const raw = localStorage.getItem(BEST_KEY) ?? localStorage.getItem(BEST_KEY_WAS);
-    if (!raw) return null;
-    const v = JSON.parse(raw);
-    return typeof v?.score === 'number' ? v : null;
+    const old = raw ? JSON.parse(raw) : null;
+    if (typeof old?.score === 'number') {
+      const id = old.difficulty ?? DEFAULT_DIFFICULTY;
+      if (!out[id] || out[id].score < old.score) out[id] = old;
+    }
   } catch (e) {
-    return null;
+    // Nothing to carry over.
   }
+  return out;
+}
+
+/** The best run at one difficulty, or null. */
+export function loadBest(difficulty = null) {
+  const all = loadBests();
+  if (difficulty) return all[difficulty] ?? null;
+  // No difficulty asked for: the best of all of them, which is what the
+  // front page shows when nothing is selected.
+  let top = null;
+  for (const v of Object.values(all)) {
+    if (typeof v?.score === 'number' && (!top || v.score > top.score)) top = v;
+  }
+  return top;
 }
 
 /**
@@ -32,10 +76,15 @@ export function loadBest() {
  * counted for anything.
  */
 export function recordBest(result) {
-  const best = loadBest();
-  if (best && best.score >= result.score) return false;
+  const id = result.difficulty ?? DEFAULT_DIFFICULTY;
+  const all = loadBests();
+  if (all[id] && all[id].score >= result.score) return false;
+  all[id] = result;
   try {
-    localStorage.setItem(BEST_KEY, JSON.stringify(result));
+    localStorage.setItem(BESTS_KEY, JSON.stringify(all));
+    // The old key is not written any more; it is read once, above, so a
+    // record set before this change is not lost.
+    localStorage.removeItem(BEST_KEY);
   } catch (e) {
     // Private mode: the run still happened, it just is not remembered.
     return true;
@@ -71,7 +120,7 @@ export class TitleScreen {
     this.baseItems = [
       {
         id: 'solo',
-        label: 'ソロプレイ',
+        label: t('ソロプレイ'),
         // The setting is part of the row rather than a screen of its own:
         // it is one choice out of five, made once, and a whole page to make
         // it would be a page you walk through without reading.
@@ -87,31 +136,43 @@ export class TitleScreen {
       },
       {
         id: 'versus',
-        label: '対戦',
+        label: t('対戦'),
         note: 'VERSUS ・ 2-4 PLAYERS',
         run: () => this.app.openVersus(),
       },
       {
         id: 'edit',
-        label: 'ガレージ',
+        label: t('ガレージ'),
         note: 'EDITOR',
         run: () => this.app.setMode('edit'),
       },
       {
         id: 'field',
-        label: 'テストフィールド',
+        label: t('テストフィールド'),
         note: 'FREE PLAY',
         run: () => this.app.setMode('field'),
       },
       {
+        id: 'replays',
+        label: t('リプレイ'),
+        note: 'REPLAY',
+        run: () => this.app.ui.replays.show(),
+      },
+      {
+        id: 'options',
+        label: t('設定'),
+        note: 'OPTIONS',
+        run: () => this.app.openOptions(),
+      },
+      {
         id: 'keys',
-        label: 'キー設定',
+        label: t('キー設定'),
         note: 'CONTROLS',
         run: () => this.app.ui.keyConfig.show(),
       },
       {
         id: 'help',
-        label: '使い方',
+        label: t('使い方'),
         note: 'HELP',
         run: () => this.app.ui.help.show('start'),
       },
@@ -129,11 +190,11 @@ export class TitleScreen {
         this.listEl,
         this.bestEl,
         h('div', { class: 'titlefoot' },
-          h('span', {}, h('kbd', {}, '↑'), h('kbd', {}, '↓'), ' 選択'),
-          h('span', {}, h('kbd', {}, '←'), h('kbd', {}, '→'), ' 難易度'),
-          h('span', {}, h('kbd', {}, 'Enter'), ' 決定'),
-          h('span', {}, h('kbd', {}, 'F11'), ' 全画面'),
-          h('span', {}, h('kbd', {}, 'F1'), ' 使い方'),
+          h('span', {}, h('kbd', {}, '↑'), h('kbd', {}, '↓'), t(' 選択')),
+          h('span', {}, h('kbd', {}, '←'), h('kbd', {}, '→'), t(' 難易度')),
+          h('span', {}, h('kbd', {}, 'Enter'), t(' 決定')),
+          h('span', {}, h('kbd', {}, 'F11'), t(' 全画面')),
+          h('span', {}, h('kbd', {}, 'F1'), t(' 使い方')),
           this.platformEl,
         ),
       ),
@@ -153,14 +214,14 @@ export class TitleScreen {
   get items() {
     const extra = [{
       id: 'fullscreen',
-      label: 'フルスクリーン',
+      label: t('フルスクリーン'),
       note: 'F11',
       run: () => { toggleFullscreen(); },
     }];
     if (onDesktop()) {
       extra.push({
         id: 'quit',
-        label: 'ゲームを終了',
+        label: t('ゲームを終了'),
         note: 'EXIT',
         run: () => quitGame(),
       });
@@ -251,8 +312,8 @@ export class TitleScreen {
       onClick: () => { this.index = i; this.choose(); },
       onMouseEnter: () => this.highlight(i),
     },
-      h('span', { class: 'ti-label' }, item.label),
-      h('span', { class: 'ti-note' }, typeof item.note === 'function' ? item.note() : item.note),
+      h('span', { class: 'ti-label' }, t(item.label)),
+      h('span', { class: 'ti-note' }, typeof t(item.note) === 'function' ? t(item.note)() : t(item.note)),
       // Only where there is something to turn. An arrow on every row would
       // promise a choice that four of them do not have.
       item.cycle ? h('span', { class: 'ti-cycle' }, '◂ ▸') : null,
@@ -260,13 +321,17 @@ export class TitleScreen {
 
     this._showPlatform();
 
-    const best = loadBest();
+    // The record for the difficulty the player is looking at, so changing
+    // the setting on the Solo row changes the number underneath it. A
+    // single global best told somebody on かんたん about a run on HELL.
+    const best = loadBest(this.app.difficulty);
     this.bestEl.replaceChildren(
       best
         ? h('span', {},
-          'BEST ', h('b', {}, best.score.toLocaleString('en-US')),
+          `${getDifficulty(this.app.difficulty).label} `,
+          'BEST ', h('b', {}, num(best.score)),
           ' / WAVE ', h('b', {}, String(best.wave)))
-        : h('span', { class: 'dim' }, 'まだ記録がありません'),
+        : h('span', { class: 'dim' }, t('まだ記録がありません')),
     );
     return this;
   }
@@ -310,9 +375,9 @@ export class ResultScreen {
         this.recordEl,
         this.rowsEl,
         h('div', { class: 'resultbuttons' },
-          h('button', { class: 'primary wide', onClick: () => this.app.startSolo() }, '▶ もう一度'),
-          h('button', { class: 'wide', onClick: () => this.app.setMode('edit') }, '🔧 機体を組む'),
-          h('button', { class: 'wide', onClick: () => this.app.goTitle() }, '← タイトルへ'),
+          h('button', { class: 'primary wide', onClick: () => this.app.startSolo() }, t('▶ もう一度')),
+          h('button', { class: 'wide', onClick: () => this.app.setMode('edit') }, t('🔧 機体を組む')),
+          h('button', { class: 'wide', onClick: () => this.app.goTitle() }, t('← タイトルへ')),
         ),
       ),
     );
@@ -331,14 +396,14 @@ export class ResultScreen {
     this.rowsEl.replaceChildren(
       // How far up the ladder, first: a run is a walk through the places
       // now, and that is what the player was trying to do.
-      this._row('難易度', result.difficultyLabel ?? '—'),
-      this._row('到達ステージ', result.cleared
+      this._row(t('難易度'), result.difficultyLabel ?? '—'),
+      this._row(t('到達ステージ'), result.cleared
         ? `ALL CLEAR (${result.stages})`
         : `${result.stage} / ${result.stages}`),
-      this._row('到達ウェーブ', String(result.wave)),
-      this._row('撃破', String(result.kills)),
-      this._row('生存時間', clock(result.time)),
-      this._row('スコア', result.score.toLocaleString('en-US'), true),
+      this._row(t('到達ウェーブ'), String(result.wave)),
+      this._row(t('撃破'), String(result.kills)),
+      this._row(t('生存時間'), clock(result.time)),
+      this._row(t('スコア'), result.score.toLocaleString('en-US'), true),
     );
     this.open = true;
     this.el.classList.remove('hidden');

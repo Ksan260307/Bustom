@@ -39,6 +39,9 @@ export const KIT_ENVS = ['dikhololo_night', 'modern_buildings_night', 'moonless_
  */
 export const KIT_FX = [
   'muzzle', 'spark', 'flame', 'smoke', 'dirt', 'flare', 'trace', 'blob', 'scorch',
+  // An arc for the blade, a ring for a shockwave, and a softer smoke for a
+  // machine that is losing.
+  'slash', 'ring', 'plume',
 ];
 
 /**
@@ -89,20 +92,66 @@ export const SKY_MEAN = 0.32;
  * `spark` turned out to be lightning.
  */
 export const KIT_SFX = [
-  // What was already here: the fight.
-  'fire-light', 'fire-heavy', 'hit-landed', 'hit-taken', 'boom', 'lock-on', 'lock-off',
-  // What makes it a machine rather than a shooter.
-  'step', 'land', 'jump', 'dash', 'reload', 'swap', 'wreck',
-  // Held down for as long as the thing is happening.
-  'servo', 'thrust', 'blade',
-  // Told, rather than shown.
-  'alarm', 'round',
-  // The menus.
-  'ui-move', 'ui-select', 'ui-back',
-];
+  /*
+   * The guns: real firearms, recorded outdoors.
+   *
+   * These were synthesised before, and it is exactly what you could hear —
+   * a shot with no crack in front of it and no hillside behind it. A gun is
+   * a transient and a room; an oscillator has neither. One per class, so a
+   * shotgun and a rifle do not go off with the same voice.
+   */
+  'fire-light.wav', 'fire-heavy.wav', 'fire-shot.wav', 'fire-sniper.wav',
+  'fire-pistol.wav',
+  /*
+   * Moving: air under pressure, not a whirr.
+   *
+   * The dash, the jump, the thruster and the servos were all synthesised
+   * too, and all four came out as the same inorganic "wiiin". A machine of
+   * this size moves on hydraulics, and hydraulics are recorded steam.
+   */
+  'dash.wav', 'jump.wav', 'servo.wav', 'thrust.wav', 'blade.wav',
+  /*
+   * And the places themselves.
+   *
+   * Seven arenas and not one of them made a sound: a salt flat, a scrapped
+   * factory and the inside of a canyon were distinguishable by eye and by
+   * nothing else. `ambient` in Arenas.js turns out to be a LIGHTING value,
+   * which is most of why nobody noticed.
+   */
+  'air.ogg', 'deep.ogg',
+  // Recordings all along, and never the part that sounded wrong: struck
+  // metal, a slammed door, a ratchet, a switch, a gong, a firework.
+  'hit-landed.ogg', 'hit-taken.ogg', 'boom.ogg', 'step.ogg', 'land.ogg',
+  'reload.ogg', 'swap.ogg', 'wreck.ogg', 'round.ogg',
+  // Beeps, which have no honest recording and never wanted one.
+  'lock-on.ogg', 'lock-off.ogg', 'alarm.ogg',
+  'ui-move.ogg', 'ui-select.ogg', 'ui-back.ogg',
+].map((f) => f);
 
-/** The three that are held rather than struck. */
-export const KIT_LOOPS = new Set(['servo', 'thrust', 'blade']);
+/** The name a sound is asked for by: everything before the dot. */
+export const sfxName = (file) => file.replace(/\.[a-z0-9]+$/i, '');
+
+/** The ones that are held rather than struck. */
+export const KIT_LOOPS = new Set(['servo', 'thrust', 'blade', 'air', 'deep']);
+
+/**
+ * What each place sounds like when nothing is happening in it.
+ *
+ * Two recordings and a gain, not seven files: the difference between a
+ * canyon and a salt flat is how much air is moving, and one loop at two
+ * volumes says that better than two loops nobody would tell apart. Space
+ * gets neither, because that is the whole idea of it.
+ */
+export const ARENA_AIR = {
+  proving: { air: 0.30, deep: 0.10 },
+  city: { air: 0.22, deep: 0.26 },
+  works: { air: 0.16, deep: 0.40 },
+  canyon: { air: 0.46, deep: 0.16 },
+  flats: { air: 0.55, deep: 0.05 },
+  moon: { air: 0.00, deep: 0.22 },
+  // Nothing. A vacuum that hums is a vacuum with something in it.
+  orbit: { air: 0.00, deep: 0.00 },
+};
 
 /**
  * What a detail map averages out to, from the bake.
@@ -125,7 +174,7 @@ const skies = new Map();
 let loaded = { surfaces: 0, envs: 0, sfx: 0, fx: 0, space: 0, skies: 0, failed: 0 };
 
 /** Where the files sit, relative to whatever is serving the page. */
-function kitURL(rel) {
+export function kitURL(rel) {
   const base = typeof document !== 'undefined' ? document.baseURI : 'http://localhost/';
   return new URL(`kit/${rel}`, base).toString();
 }
@@ -227,13 +276,14 @@ export function loadKit() {
   // Fetched now, decoded later: an AudioContext does not exist until the
   // player has clicked something, and the bytes should already be here when
   // it does.
-  for (const name of KIT_SFX) {
+  for (const file of KIT_SFX) {
+    const name = sfxName(file);
     jobs.push(
-      fetch(kitURL(`sfx/${name}.ogg`))
+      fetch(kitURL(`sfx/${file}`))
         .then((r) => (r.ok ? r.arrayBuffer() : null))
         .then((buf) => {
           /**
-           * Ogg, and actually Ogg.
+           * Really a sound, and not a 404 wearing a body.
            *
            * Neither the status nor the length can be trusted here: asking
            * the desktop scheme for a file that is not there comes back as a
@@ -242,11 +292,14 @@ export function loadKit() {
            * decode much later, with nothing anywhere saying why.
            *
            * The four bytes at the front of the file cannot lie about it.
+           * `OggS` for the packs that ship compressed; `RIFF` for the ones
+           * cut from field recordings, which are written as plain WAV
+           * because there is no Vorbis encoder in the toolchain and a
+           * second-long mono clip does not need one.
            */
           const head = buf && buf.byteLength >= 4 ? new Uint8Array(buf, 0, 4) : null;
-          const ogg = head
-            && head[0] === 0x4F && head[1] === 0x67 && head[2] === 0x67 && head[3] === 0x53;
-          if (!ogg) { loaded.failed++; return; }
+          const tag = head ? String.fromCharCode(head[0], head[1], head[2], head[3]) : '';
+          if (tag !== 'OggS' && tag !== 'RIFF') { loaded.failed++; return; }
           sfx.set(name, buf);
           loaded.sfx++;
         })

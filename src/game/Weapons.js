@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { EQUIP_META, weaponLead, STAGGER } from '../core/constants.js';
+import { EQUIP_META, weaponLead, STAGGER, WEAPON_VOICE } from '../core/constants.js';
 import { clamp01 } from '../zmf/math.js';
 
 // ============================================================
@@ -683,6 +683,15 @@ export class WeaponSystem {
     this.activeIndex = 0;
     /** 0..1 — how lit the blades are, exported for the rig. */
     this.bladeGlow = 0;
+    /**
+     * True on any frame a continuous beam is actually firing.
+     *
+     * A beam is aimed for as long as it is held, which is the opposite of
+     * every other weapon here: a gun is aimed at the instant it goes off
+     * and what the machine does afterwards cannot miss. So the body needs
+     * to know, and this is the only place that does.
+     */
+    this.beaming = false;
     this.build();
   }
 
@@ -787,6 +796,7 @@ export class WeaponSystem {
       lockTarget = null, effects = null, feedback = null,
     } = ctx;
     let blade = 0;
+    let beaming = false;
 
     // World transforms are read straight off the posed rig, so a plate on a
     // swinging arm really does fire from where the arm is pointing. The
@@ -811,8 +821,22 @@ export class WeaponSystem {
       const auto = !s.meta.semi && (s.meta.interval ?? 1) < 0.25;
       const heating = auto && firing && s === this.active;
       s.warmth = clamp01(s.warmth + (heating ? dt / WARM_UP : -dt / WARM_DOWN));
-      // Heat bleeds off whenever the plate is not the one being held down.
-      if (s.meta.beam && (s !== live || !firing)) {
+      /*
+       * Heat bleeds off whenever the beam is not actually burning.
+       *
+       * That is: when it is not the plate being held down, OR when it has
+       * overheated and is serving its cooldown. The second half was
+       * missing, and holding the trigger down — which is what everybody
+       * does with a beam — left the weapon dead for the rest of the fight:
+       * heat sat at 1.00, the cooldown ran out, it fired for one frame,
+       * overheated again on the same frame, and started another cooldown.
+       * Measured: two and a half seconds of laser, then one frame every
+       * two seconds until the player let go of a button they had no reason
+       * to think was the problem.
+       *
+       * A reload IS the cooldown. Making it cool is what the word means.
+       */
+      if (s.meta.beam && (s !== live || !firing || s.reloadT > 0)) {
         s.heat = Math.max(0, s.heat - dt / Math.max(0.2, s.meta.reload));
       }
       if (s.reloadT > 0) {
@@ -848,7 +872,11 @@ export class WeaponSystem {
       if (s.meta.beam) {
         // ---- laser: a line that exists while the trigger is down, paid
         // for in heat rather than rounds.
-        if (s.reloadT <= 0) this._laser(s, { aimPoint, projectiles, targets, lockTarget, effects }, dt);
+        if (s.reloadT <= 0) {
+          this._laser(s, { aimPoint, projectiles, targets, lockTarget, effects }, dt);
+          // Aimed for as long as it is held, which nothing else here is.
+          beaming = true;
+        }
         continue;
       }
 
@@ -866,6 +894,7 @@ export class WeaponSystem {
 
     // Ramp rather than snap: a blade that pops on is a blade that looks like
     // a bug rather than a weapon coming alive.
+    this.beaming = beaming;
     const rate = blade > this.bladeGlow ? 9 : 5;
     this.bladeGlow += (blade - this.bladeGlow) * Math.min(1, rate * dt);
     this.robot.rig.setBladeGlow?.(this.bladeGlow);
@@ -934,8 +963,10 @@ export class WeaponSystem {
     // white blob rather than a gun going off.
     const heft = Math.min(1.4, meta.damage * (meta.shots ?? 1) / 40);
     effects?.muzzle(position, direction, { scale: scale * (0.5 + heft), color });
-    // How big it sounds is how hard it hits, not how big the plate is.
-    feedback?.fire?.(heft / 1.4, this.robot.isPlayer);
+    // How big it sounds is how hard it hits, not how big the plate is —
+    // and WHICH gun it sounds like is what kind of weapon it is.
+    feedback?.fire?.(heft / 1.4, this.robot.isPlayer,
+      WEAPON_VOICE[slot.type] ?? 'fire-light');
 
     // Local frame of the shot: right, then up. Used for both the deliberate
     // fan of a shotgun and the random scatter of a gatling.
@@ -1097,6 +1128,13 @@ export class WeaponSystem {
         _to.copy(t.position).sub(_v);
         effects.impact(_v, _to, {
           color: slot.part.bulletColor ?? slot.meta.bullet, scale: 0.6, life: 0.18,
+        });
+        // And the cut itself. The one weapon you have to be in reach to
+        // use looked exactly like the ones you do not: the same spray a
+        // bullet landing makes, and nothing to say a blade went through.
+        effects.slash?.(_v, _to, {
+          color: slot.part.bulletColor ?? slot.meta.bullet,
+          scale: 1.6 * (slot.part.size ?? 0.7) / 0.7,
         });
       }
     }

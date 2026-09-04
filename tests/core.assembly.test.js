@@ -9,7 +9,7 @@ import {
   BONE, SIZE_MIN, SIZE_MAX, BONE_LENGTH_MAX, BONE_RADIUS_MAX,
   EQUIP, EQUIP_META, EQUIP_SIZE_MIN, EQUIP_SIZE_MAX, equipShape,
   SPIN_RPM_MIN, SPIN_RPM_MAX, CUSTOM_DEFAULT, BONE_GAIN_MAX, BONE_LAG_MAX,
-  CIRCLE_RADIUS_DEFAULT, BUDGET,
+  BUDGET,
 } from '../src/core/constants.js';
 import { STANDARD_COLORS } from '../src/core/Palette.js';
 import { SHAPE, SHAPE_DEFAULT, shapeMask } from '../src/core/Shapes.js';

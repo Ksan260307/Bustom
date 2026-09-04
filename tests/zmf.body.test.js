@@ -874,8 +874,6 @@ describe('the air is a different place', () => {
 });
 
 describe('landing and stepping', () => {
-  const of = (id) => computeStats(PRESETS[id].build());
-
   it('a hard landing costs speed, and costs a heavy machine more', () => {
     // Asked of the rule directly. Driving a machine off a ledge and reading
     // the speed either side of the touchdown measures the drop as much as

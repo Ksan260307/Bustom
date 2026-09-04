@@ -4,6 +4,7 @@ import * as THREE from 'three';
 const _right = new THREE.Vector3();
 import { clamp01, damp, lerp } from '../zmf/math.js';
 import { LOCK_COLOR } from '../core/constants.js';
+import { t } from '../ui/i18n.js';
 
 // ============================================================
 //  HUD : the lock-on reticle and the telemetry strip.
@@ -69,8 +70,16 @@ export class Hud {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
+    /*
+     * Read once here and then whenever the display changes: this was a boot
+     * value, so a window dragged onto a monitor of a different density kept
+     * painting the read-out at the old one until the game was restarted.
+     */
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    /** Multiplies every size the HUD paints; see setScale. */
+    this.scale = 1;
     this.w = 0; this.h = 0;
+    this._cssW = 0; this._cssH = 0;
     this.time = 0;
 
     this.lockProgress = 0;   // 0..1 acquisition animation
@@ -132,19 +141,19 @@ export class Hud {
    * never needed the whole machine to say what it is showing.
    */
   debugRows(s) {
-    const t = s.telemetry;
+    const tel = s.telemetry;
     // ZETA, JERK, ASSIST and FRAME are how the motion model is TUNED. They
     // belong on the practice field, where somebody is deliberately looking
     // at how the machine behaves — and nowhere near a run, where they are
     // six rows of numbers that mean nothing and sit where something useful
     // could be.
     const rows = s.diagnostics === false ? [] : [
-      ['MASS', `${t.mass.toFixed(2)}`],
-      ['ZETA', `${t.zeta.toFixed(2)}`],
-      ['JERK', `${t.jerk.toFixed(0)}`],
-      ['ASSIST', `${(t.assist * 100).toFixed(0)}%`],
-      ['GROUND', `${(t.grounded * 100).toFixed(0)}%`],
-      ['FRAME', `${(t.frameLock * 100).toFixed(0)}%`],
+      ['MASS', `${tel.mass.toFixed(2)}`],
+      ['ZETA', `${tel.zeta.toFixed(2)}`],
+      ['JERK', `${tel.jerk.toFixed(0)}`],
+      ['ASSIST', `${(tel.assist * 100).toFixed(0)}%`],
+      ['GROUND', `${(tel.grounded * 100).toFixed(0)}%`],
+      ['FRAME', `${(tel.frameLock * 100).toFixed(0)}%`],
     ];
     // The gait is NOT reported. It is a category the code sorts machines
     // into so it knows which legs to swing; put it on screen and it becomes
@@ -154,13 +163,49 @@ export class Hud {
     return rows;
   }
 
+  /**
+   * Follow the screen the window is actually on.
+   *
+   * @returns {boolean} whether it changed, so the caller can re-lay-out
+   */
+  setPixelRatio(dpr) {
+    const next = Math.max(0.5, Math.min(3, Number(dpr) || 1));
+    if (this.dpr === next) return false;
+    this.dpr = next;
+    this.resize(this._cssW, this._cssH);
+    return true;
+  }
+
+  /**
+   * How large the read-out is drawn.
+   *
+   * The HUD paints thirty-three hard-coded font sizes onto a canvas, the
+   * smallest of them 9px, and there is no cascade here to scale them with.
+   * So the scale goes on the CONTEXT instead: everything is drawn `scale`
+   * times bigger and the logical canvas is `scale` times smaller, which
+   * means anything anchored to `this.w` is still anchored to the edge. One
+   * place, thirty-three sizes.
+   */
+  setScale(scale) {
+    const next = Math.max(0.5, Math.min(2, Number(scale) || 1));
+    if (this.scale === next) return false;
+    this.scale = next;
+    this.resize(this._cssW, this._cssH);
+    return true;
+  }
+
   resize(w, h) {
-    this.w = w; this.h = h;
+    this._cssW = w; this._cssH = h;
+    const k = this.dpr * this.scale;
+    // The logical size shrinks as the scale grows, so a panel pinned to the
+    // right edge stays pinned to the right edge.
+    this.w = w / this.scale;
+    this.h = h / this.scale;
     this.canvas.width = Math.floor(w * this.dpr);
     this.canvas.height = Math.floor(h * this.dpr);
     this.canvas.style.width = `${w}px`;
     this.canvas.style.height = `${h}px`;
-    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.ctx.setTransform(k, 0, 0, k, 0, 0);
   }
 
   project(world, camera) {
@@ -299,9 +344,9 @@ export class Hud {
     }
 
     // ---- the machines
-    for (const t of s.targets ?? []) {
-      place(t.position.x, t.position.z, at);
-      const locked = s.lock && s.lock === t;
+    for (const target of s.targets ?? []) {
+      place(target.position.x, target.position.z, at);
+      const locked = s.lock && s.lock === target;
       ctx.fillStyle = locked ? '#ffd166' : '#ff6a5c';
       ctx.beginPath();
       ctx.arc(at[0], at[1], locked ? 4.5 : 3.2, 0, Math.PI * 2);
@@ -415,11 +460,11 @@ export class Hud {
       ctx.globalAlpha = 0.95;
       ctx.fillStyle = '#dff0ff';
       ctx.font = '700 17px ui-monospace, Menlo, Consolas, monospace';
-      ctx.fillText(c.label, x, y + 10);
+      ctx.fillText(t(c.label), x, y + 10);
       ctx.globalAlpha = 0.55;
       ctx.fillStyle = '#9fc4dd';
       ctx.font = '600 10px ui-monospace, Menlo, Consolas, monospace';
-      ctx.fillText(c.note, x, y + 26);
+      ctx.fillText(t(c.note), x, y + 26);
     });
     ctx.restore();
   }
@@ -736,33 +781,59 @@ export class Hud {
     ctx.textAlign = 'left';
 
     for (const w of list) {
-      const css = `#${w.color.toString(16).padStart(6, '0')}`;
+      const hex = `#${w.color.toString(16).padStart(6, '0')}`;
       // Only one plate is wired to the trigger; the rest are a menu.
       const on = w.active;
       const fade = on ? 1 : 0.42;
 
       if (on) {
         ctx.globalAlpha = 0.12;
-        ctx.fillStyle = css;
+        ctx.fillStyle = hex;
         ctx.fillRect(x - 5, y - 13, 168, rowH - 2);
         ctx.globalAlpha = 0.85;
-        ctx.fillStyle = css;
+        ctx.fillStyle = hex;
         ctx.fillText('\u25B8', x - 6, y);
       }
 
       ctx.globalAlpha = 0.9 * fade;
-      ctx.fillStyle = css;
+      ctx.fillStyle = hex;
       ctx.beginPath();
       ctx.arc(x + 8, y - 3, on ? 3.5 : 2.6, 0, TAU);
       ctx.fill();
 
       ctx.globalAlpha = (on ? 0.95 : 0.55) * 1;
       ctx.fillStyle = '#dff0ff';
-      ctx.fillText(w.label, x + 18, y);
+      ctx.fillText(t(w.label), x + 18, y);
 
       if (w.melee) {
         ctx.globalAlpha = 0.45 * fade;
         ctx.fillText('MELEE', x + 100, y);
+      } else if (w.gauge !== null && w.gauge !== undefined) {
+        /*
+         * A weapon with no magazine, showing what it does have.
+         *
+         * The weapon system has always published this — "a laser has no
+         * magazine, so its bar shows how far from overheating it is" — and
+         * this read-out has never once looked at it. So every beam weapon
+         * fell through to the rounds branch and printed ` 0 /0` in the
+         * colour that means EMPTY, which is exactly what a gun that has run
+         * out looks like.
+         *
+         * Nobody saw it because no machine that shipped carried one. The
+         * moment a preset did, it read as the ammo having gone to zero and
+         * staying there however many machines you tried.
+         */
+        const bw = 62;
+        const heat = clamp01(w.gauge);
+        ctx.globalAlpha = 0.2 * fade;
+        ctx.fillStyle = '#dff0ff';
+        ctx.fillRect(x + 100, y - 7, bw, 5);
+        ctx.globalAlpha = 0.9 * fade;
+        // Its own colour while there is room, and the warning colour as it
+        // runs out — the same reading as a magazine, in the unit this
+        // weapon actually spends.
+        ctx.fillStyle = heat < 0.25 ? '#ff8a5c' : css;
+        ctx.fillRect(x + 100, y - 7, bw * heat, 5);
       } else if (w.reloading) {
         // The bar IS the wait: no number, just the thing filling back up.
         const bw = 62;
@@ -770,7 +841,7 @@ export class Hud {
         ctx.fillStyle = '#dff0ff';
         ctx.fillRect(x + 100, y - 7, bw, 5);
         ctx.globalAlpha = 0.9 * fade;
-        ctx.fillStyle = css;
+        ctx.fillStyle = hex;
         ctx.fillRect(x + 100, y - 7, bw * clamp01(w.reloadFrac), 5);
       } else {
         ctx.globalAlpha = 0.95 * fade;
@@ -801,11 +872,11 @@ export class Hud {
   // ---------------------------------------------------------- reticle
 
   _drawCandidates(s, ctx) {
-    for (const t of s.targets) {
-      if (s.lock && t === s.lock.robot) continue;
-      const p = this.project(t.position, s.camera);
+    for (const target of s.targets) {
+      if (s.lock && target === s.lock.robot) continue;
+      const p = this.project(target.position, s.camera);
       if (p.behind) continue;
-      const r = this._screenRadius(t, s.camera, p);
+      const r = this._screenRadius(target, s.camera, p);
       ctx.save();
       ctx.globalAlpha = 0.22;
       ctx.strokeStyle = LOCK_COLOR;
@@ -952,7 +1023,7 @@ export class Hud {
 
   _drawCrosshair(s, ctx) {
     const cx = this.w / 2, cy = this.h / 2;
-    const t = s.telemetry;
+    const tel = s.telemetry;
     ctx.save();
     // Drawn dark first, then light on top.
     //
@@ -975,12 +1046,12 @@ export class Hud {
     ctx.stroke();
 
     // thrust arc around the crosshair — the machine's actual output
-    if (t.thrust > 0.02) {
+    if (tel.thrust > 0.02) {
       ctx.globalAlpha = 0.55;
-      ctx.strokeStyle = t.layer.color;
+      ctx.strokeStyle = tel.layer.color;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(cx, cy, 13, -Math.PI * 0.5, -Math.PI * 0.5 + TAU * clamp01(t.thrust));
+      ctx.arc(cx, cy, 13, -Math.PI * 0.5, -Math.PI * 0.5 + TAU * clamp01(tel.thrust));
       ctx.stroke();
     }
     ctx.restore();
@@ -988,9 +1059,9 @@ export class Hud {
 
   _drawSpeedLines(s, ctx) {
     // The shader owns the real speed lines; this is the horizon tell.
-    const t = s.telemetry;
-    if (t.speed < 22) return;
-    const a = clamp01((t.speed - 22) / 26) * 0.20;
+    const tel = s.telemetry;
+    if (tel.speed < 22) return;
+    const a = clamp01((tel.speed - 22) / 26) * 0.20;
     const g = ctx.createRadialGradient(this.w / 2, this.h / 2, this.h * 0.25, this.w / 2, this.h / 2, this.h * 0.75);
     g.addColorStop(0, 'rgba(0,0,0,0)');
     g.addColorStop(1, `rgba(120,200,255,${a})`);
@@ -1001,7 +1072,7 @@ export class Hud {
   // ---------------------------------------------------------- telemetry
 
   _drawTelemetry(s, ctx) {
-    const t = s.telemetry;
+    const tel = s.telemetry;
     const pad = 22;
     const bottom = this.h - pad;
 
@@ -1012,29 +1083,29 @@ export class Hud {
     // ---- ABC layer badge
     const bx = pad, by = bottom - 74;
     ctx.globalAlpha = 0.9;
-    ctx.strokeStyle = t.layer.color;
+    ctx.strokeStyle = tel.layer.color;
     ctx.lineWidth = 1.2;
     ctx.strokeRect(bx + 0.5, by + 0.5, 40, 40);
-    ctx.fillStyle = t.layer.color;
+    ctx.fillStyle = tel.layer.color;
     ctx.globalAlpha = 0.13;
     ctx.fillRect(bx, by, 41, 41);
     ctx.globalAlpha = 1;
     ctx.font = '700 22px ui-monospace, Menlo, Consolas, monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(t.layer.key, bx + 20, by + 28);
+    ctx.fillText(tel.layer.key, bx + 20, by + 28);
     ctx.font = '600 8px ui-monospace, Menlo, Consolas, monospace';
     ctx.globalAlpha = 0.65;
-    ctx.fillText(t.layer.label, bx + 20, by + 50);
+    ctx.fillText(t(tel.layer.label), bx + 20, by + 50);
 
     // ---- speed
     ctx.textAlign = 'left';
     ctx.globalAlpha = 0.95;
     ctx.fillStyle = '#dff0ff';
     ctx.font = '700 30px ui-monospace, Menlo, Consolas, monospace';
-    ctx.fillText(t.speed.toFixed(1), bx + 56, by + 30);
+    ctx.fillText(tel.speed.toFixed(1), bx + 56, by + 30);
     ctx.font = '600 9px ui-monospace, Menlo, Consolas, monospace';
     ctx.globalAlpha = 0.5;
-    ctx.fillText('m/s', bx + 56 + ctx.measureText(t.speed.toFixed(1)).width * 2.1, by + 30);
+    ctx.fillText('m/s', bx + 56 + ctx.measureText(tel.speed.toFixed(1)).width * 2.1, by + 30);
 
     // ---- energy bar
     //
@@ -1042,13 +1113,13 @@ export class Hud {
     // gauge that is always the same width says the opposite — it would look
     // like the fuel simply drains more slowly for no reason.
     const ex = bx + 56, ey = by + 40, eh = 5;
-    const ew = 172 * Math.min(2, t.energyCapacity ?? 1);
+    const ew = 172 * Math.min(2, tel.energyCapacity ?? 1);
     ctx.globalAlpha = 0.25;
     ctx.fillStyle = '#dff0ff';
     ctx.fillRect(ex, ey, ew, eh);
     ctx.globalAlpha = 0.95;
-    ctx.fillStyle = t.energy > 0.3 ? '#6fe3ff' : '#ff8a5c';
-    ctx.fillRect(ex, ey, ew * clamp01(t.energy), eh);
+    ctx.fillStyle = tel.energy > 0.3 ? '#6fe3ff' : '#ff8a5c';
+    ctx.fillRect(ex, ey, ew * clamp01(tel.energy), eh);
     ctx.globalAlpha = 0.5;
     ctx.fillStyle = '#dff0ff';
     ctx.font = '600 8px ui-monospace, Menlo, Consolas, monospace';

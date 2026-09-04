@@ -152,6 +152,10 @@ export class PostFX {
     this.renderer = renderer;
     this.enabled = true;
     this.bloomStrength = bloom;
+    /** Whether the bloom chain runs at all; see setQuality. */
+    this.bloomEnabled = true;
+    /** What the scene target was actually built with. */
+    this._samples = 4;
 
     const size = renderer.getDrawingBufferSize(new THREE.Vector2());
     this.target = new THREE.WebGLRenderTarget(size.x, size.y, {
@@ -242,6 +246,35 @@ export class PostFX {
   }
 
   /** How much light spills. 0 turns the whole chain off, cost included. */
+  /**
+   * Turn the expensive parts down, or off.
+   *
+   * Bloom is the whole chain — bright pass plus six blur passes at three
+   * scales — so switching it off is not a small saving. MSAA is a property
+   * of the render target, which cannot be changed in place, so the target
+   * is rebuilt; that is why this is a setting rather than a slider.
+   *
+   * @param {{bloom?: boolean, msaa?: number}} opts
+   */
+  setQuality({ bloom = true, msaa = 4 } = {}) {
+    this.bloomEnabled = bloom !== false;
+    this.uniforms.uBloom.value = this.bloomEnabled ? this.bloomStrength : 0;
+
+    const want = Math.max(0, Math.round(msaa));
+    if (want !== this._samples) {
+      this._samples = want;
+      const { width, height } = this.target;
+      this.target.dispose();
+      this.target = new THREE.WebGLRenderTarget(width, height, {
+        type: THREE.HalfFloatType,
+        colorSpace: THREE.NoColorSpace,
+        samples: want,
+      });
+      this.uniforms.tScene.value = this.target.texture;
+    }
+    return this;
+  }
+
   setBloom(amount) {
     this.bloomStrength = Math.max(0, amount);
     this.uniforms.uBloom.value = this.bloomStrength;

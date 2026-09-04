@@ -311,8 +311,12 @@ export const EQUIP_META = {
     // one gun whose whole identity is holding the trigger down. Held fire
     // also loosens the group now, so it was being charged twice for the
     // thing it is for.
-    ammo: 30, reload: 3.0, interval: 0.07, auto: true,
-    shots: 1, spread: 0.022, speed: 88, damage: 3.6, life: 1.9, radius: 0.13, mass: 0.7,
+    // Still bottom of the table on both measures after the last pass — 21.2
+    // sustained and 4 a trigger — with no advantage anywhere else to show
+    // for it. A gun whose whole idea is holding the trigger down should not
+    // be the worst gun for holding the trigger down.
+    ammo: 30, reload: 2.6, interval: 0.07, auto: true,
+    shots: 1, spread: 0.022, speed: 88, damage: 4.4, life: 1.9, radius: 0.13, mass: 0.7,
     lead: 0.95,   // a stream: what it needs is to be pointed right
     blurb: '押しっぱなしで連射。30発でリロード3秒',
   },
@@ -386,7 +390,20 @@ export const EQUIP_META = {
     //     and the shot goes where the target is going to be whatever the
     //     target does. 0.9 is as close as it is allowed to get, and it is a
     //     long way from the 0.6 it had.
-    ammo: 3, reload: 2.6, interval: 1.0, auto: false,
+    /*
+     * Slower than it was, and that is the whole fix.
+     *
+     * Measured over a full magazine and reload, the sniper was doing 51.4
+     * sustained against the beam's 31.3 — while ALSO hitting for 96 a shot
+     * against 26, at 240 m/s against 112, with no spread against none. It
+     * was not a trade, it was a strictly better gun, and with six weapon
+     * slots the best loadout was six of them.
+     *
+     * The identity is "one shot, and it hurts". So the shot stays exactly
+     * as heavy and the gap between shots is what pays for it: 28.8
+     * sustained now, comfortably under the beam.
+     */
+    ammo: 3, reload: 4.0, interval: 2.0, auto: false,
     shots: 1, spread: 0, speed: 240, damage: 96, life: 3.2, radius: 0.14, mass: 0.9,
     lead: 0.95,                     // the best-aimed shot there is, still dodgeable
     shape: 'beam', streak: 20,
@@ -845,6 +862,46 @@ export const RUN = {
  */
 export const LEG_SLEW = 3.0;
 
+/**
+ * The two axes a shoulder and a hip were not using.
+ *
+ * Measured on a walking machine: hips swung 88 degrees fore and aft and
+ * exactly ZERO about the other two. A shoulder and a hip are ball joints,
+ * and the rig was working them as hinges — which is what "stiff" is. Not a
+ * small swing; a swing in one flat plane, like a pendulum on a pin.
+ *
+ * The fix is not more of the same axis. It is a second one, driven from the
+ * SAME gait phase a quarter of a cycle later — because two sines a quarter
+ * apart trace an ELLIPSE, and a limb whose tip goes round a closed curve
+ * reads as a joint rather than as a hinge. That phase offset is the whole
+ * idea; the amplitudes below are small on purpose.
+ */
+export const BALL = {
+  /** Hip: how far the leg opens away from the body, in degrees. */
+  hipSplay: 9,
+  /** Hip: how far the thigh rolls, in degrees. */
+  hipTwist: 8,
+  /** Shoulder: how far the arm swings away from the ribs. */
+  armSplay: 9,
+  /** Shoulder: how far the upper arm rolls. */
+  armTwist: 7,
+  /** Where the second axis sits against the first, in cycles. */
+  splayPhase: 0.25,
+  twistPhase: 0.5,
+  /**
+   * How much each link further down a chain lags the one above it, in
+   * cycles.
+   *
+   * A forearm that moves at the same instant as the upper arm is one rigid
+   * piece with a bend in it. Lagging it slightly gives the whip that says
+   * the arm is being carried rather than aimed. Per-bone `lag` still wins
+   * where somebody has set one — this is only the default.
+   */
+  chainLag: 0.06,
+  /** How far the chest counter-turns against the hips, in radians. */
+  waist: 0.09,
+};
+
 export const LANDING = {
   /**
    * How much of its speed a hard landing takes.
@@ -884,6 +941,20 @@ export const EQUIP_TYPES = Object.keys(EQUIP_META);
  * rather than the whole shop.
  */
 export const WEAPON_SLOTS = 6;
+
+/**
+ * The most of ANY ONE weapon that may be carried.
+ *
+ * The rack has six slots and, until this, no rule about what went in them —
+ * so the strongest loadout was always six of whatever the strongest gun
+ * was, and every choice in the weapon table was a choice between one right
+ * answer and eight wrong ones. Three of a kind still lets somebody commit
+ * to a plan; it just stops the plan being "take six".
+ *
+ * Set beside WEAPON_SLOTS rather than per weapon, because it is a rule
+ * about the rack, not about any one gun.
+ */
+export const WEAPON_SAME_MAX = 3;
 
 /**
  * What one machine is allowed to be made of.
@@ -969,6 +1040,35 @@ export const ACTION_BITS = [
  * can feel and every machine agrees on.
  */
 export const LOOK_SCALE = 16384;
+
+/**
+ * Which recording each weapon speaks with.
+ *
+ * Two buckets — light and heavy — was most of why the guns sounded alike:
+ * a shotgun, a sniper rifle and a magnum all came out of the same file at
+ * slightly different pitches, which the ear reads as one gun with a knob on
+ * it. These are five separate firearms, recorded outdoors.
+ *
+ * Anything not named here falls back to the light one, so adding a weapon
+ * cannot silence it.
+ */
+export const WEAPON_VOICE = {
+  [EQUIP.GATLING]: 'fire-light',
+  // A beam has no field recording anywhere, so it borrows the driest
+  // report in the library and lets the synthesised zap on top do the rest.
+  [EQUIP.BEAM]: 'fire-pistol',
+  [EQUIP.SHOT]: 'fire-shot',
+  [EQUIP.SPREAD]: 'fire-shot',
+  [EQUIP.SNIPER]: 'fire-sniper',
+  [EQUIP.MAGNUM]: 'fire-heavy',
+  [EQUIP.MISSILE]: 'fire-heavy',
+  [EQUIP.GRENADE]: 'fire-heavy',
+  // A held beam and a deployed shield are not reports either, but both do
+  // something on the frame they start, and silence there reads as the
+  // button not working.
+  [EQUIP.LASER]: 'fire-pistol',
+  [EQUIP.SHIELD]: 'swap',
+};
 
 export const WEAPON_TYPES = EQUIP_TYPES.filter((t) => EQUIP_META[t].category === 'weapon');
 export const SYSTEM_TYPES = EQUIP_TYPES.filter((t) => EQUIP_META[t].category === 'system');

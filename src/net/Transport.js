@@ -1,3 +1,4 @@
+import { t } from '../ui/i18n.js';
 /**
  * How a message gets from one machine to another — or does not.
  *
@@ -68,15 +69,15 @@ export class LoopbackHub {
 
   connect(id) {
     const hub = this;
-    const t = new Transport(id);
-    t.send = function send(msg) {
+    const peer = new Transport(id);
+    peer.send = function send(msg) {
       hub._post(id, msg);
       return this;
     };
-    const close = t.close.bind(t);
-    t.close = function closed() { hub.peers.delete(id); return close(); };
-    this.peers.set(id, t);
-    return t;
+    const close = peer.close.bind(peer);
+    peer.close = function closed() { hub.peers.delete(id); return close(); };
+    this.peers.set(id, peer);
+    return peer;
   }
 
   /** 0..1. `next()` hands back a 32-bit word, which is not a probability. */
@@ -136,17 +137,17 @@ export class DesktopTransport extends Transport {
   /** Open a game others can join. Resolves to the address to tell them. */
   static async host(port) {
     const info = await window.desktop.net.host(port);
-    const t = new DesktopTransport(info.id);
-    t.address = info;
-    return t;
+    const link = new DesktopTransport(info.id);
+    link.address = info;
+    return link;
   }
 
   /** Join somebody else's. */
   static async join(address, port) {
     const info = await window.desktop.net.join(address, port);
-    const t = new DesktopTransport(info.id);
-    t.address = info;
-    return t;
+    const link = new DesktopTransport(info.id);
+    link.address = info;
+    return link;
   }
 
   send(msg) {
@@ -180,7 +181,7 @@ export class SteamTransport extends Transport {
 
   /** Whether this build of Steam can actually do it, and why not. */
   static async support() {
-    if (!SteamTransport.available) return { ok: false, reason: 'Steamがありません' };
+    if (!SteamTransport.available) return { ok: false, reason: t('Steamがありません') };
     return window.desktop.net.steam.support();
   }
 
@@ -194,9 +195,9 @@ export class SteamTransport extends Transport {
 
   static async host({ players = 2, name = 'PLAYER', rules = null } = {}) {
     const info = await window.desktop.net.steam.host(players, name, rules);
-    const t = new SteamTransport(info.id);
-    t.lobby = info;
-    return t;
+    const link = new SteamTransport(info.id);
+    link.lobby = info;
+    return link;
   }
 
   /** Rooms with space in them. */
@@ -204,9 +205,9 @@ export class SteamTransport extends Transport {
 
   static async join(lobbyId) {
     const info = await window.desktop.net.steam.join(lobbyId);
-    const t = new SteamTransport(info.id);
-    t.lobby = info;
-    return t;
+    const link = new SteamTransport(info.id);
+    link.lobby = info;
+    return link;
   }
 
   send(msg) { this.bridge.send(msg); return this; }

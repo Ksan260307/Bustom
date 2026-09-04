@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { clamp, clamp01, damp, lerp, smoothstep } from '../zmf/math.js';
-import { SLIDE, RETREAT, RUN, LEG_SLEW, CHAIN_FALLOFF_DEFAULT } from '../core/constants.js';
+import {
+  SLIDE, RETREAT, RUN, BALL, LEG_SLEW, CHAIN_FALLOFF_DEFAULT,
+} from '../core/constants.js';
 
 // ============================================================
 //  Procedural animation driven by bone ATTRIBUTE.
@@ -971,6 +973,47 @@ export class Animator {
         _q.setFromAxisAngle(this._strideAxis(node), angle * walking * Animator.gainOf(node));
         node.target.copy(limitQuat(_q, node.part, 0, node));
 
+        /*
+         * The other two axes of a joint that has three.
+         *
+         * A hip swung 88 degrees fore and aft and exactly nothing about the
+         * other two, which is a ball joint being worked as a hinge — and is
+         * what "stiff" looks like from outside. The amplitudes here are
+         * small; what does the work is the PHASE. Driven a quarter and a
+         * half cycle behind the stride, the three together take the foot
+         * round a closed curve instead of back and forth along a line.
+         *
+         * Taken from the same clock as everything else, so it cannot drift
+         * out of step with the leg it belongs to.
+         */
+        if (walking > 1e-3 && lift > 1e-3) {
+          /*
+           * Only while the foot is off the ground.
+           *
+           * A planted foot does not swing out from the hip — the floor is
+           * holding it, and the machine turns about IT rather than the other
+           * way round. Moving it anyway put the foot through the floor, and
+           * the foot-planting correction spent every frame hauling the
+           * machine back up out of its own animation: the sole ended up
+           * wandering twenty-four metres instead of fifteen centimetres.
+           *
+           * Gating on the swing is not a workaround for that. It is what a
+           * leg does, and the collision that found it was the floor being
+           * right.
+           */
+          const g = Animator.gainOf(node) * walking * lift
+            * (i === 0 ? 1 : SLIDE.taper ** i);
+          const open = Math.sin((p + BALL.splayPhase) * TAU);
+          const roll = Math.sin((p + BALL.twistPhase) * TAU);
+          // Outward is away from the machine's middle, so the sign follows
+          // which side the limb is on rather than which way it is facing.
+          _q.setFromAxisAngle(node.axisSplay, open * BALL.hipSplay * DEG * g * -node.side);
+          node.target.multiply(_q);
+          _q.setFromAxisAngle(node.axisTwist, roll * BALL.hipTwist * DEG * g * mirror);
+          node.target.multiply(_q);
+          limitQuat(node.target, node.part, 0, node);
+        }
+
         // Cant the whole leg over onto the side it is being dragged from.
         // A positive turn about the splay axis takes the tip toward -X, so
         // travelling +X wants a positive one: the feet trail, the body goes
@@ -1253,6 +1296,16 @@ export class Animator {
   _arms(s, dt) {
     const drive = clamp01(this.gaitFreq / 2.6);
     const swingAmp = lerp(4, 34, drive) * DEG;
+    /*
+     * The arms were being eaten by the same filter the legs were.
+     *
+     * Measured: a shoulder asked for 43 degrees of swing and delivered
+     * 12.6. The compensation that fixed it for the legs was never applied
+     * here, so the arms have been running at a third of their written
+     * amplitude the whole time — which reads as an arm held stiffly at the
+     * side rather than as a small swing.
+     */
+    const pull = this._slewPull(dt);
     /**
      * How far a chained arm folds at rest, before any swing.
      *
@@ -1275,9 +1328,11 @@ export class Animator {
       // all of it.
       const perLink = node.part.chain ?? CHAIN_FALLOFF_DEFAULT;
       const chainFalloff = depth === 0 ? 1 : perLink ** depth;
-      const chainLag = depth * 0.08;
+      // Each link behind the one above it. A forearm that moves on the
+      // same frame as the upper arm is one rigid piece with a bend in it.
+      const chainLag = depth * BALL.chainLag;
       const p = this._phaseFor(node, phaseSide + chainLag);
-      const swing = -Math.sin(p * TAU) * swingAmp * chainFalloff;
+      const swing = -Math.sin(p * TAU) * swingAmp * chainFalloff * pull;
       const idleFloat = Math.sin(this.time * 1.3 + node.restPos.x * 2) * 3 * DEG;
       // Negative folds the tip forward: the elbow closes rather than opening
       // backwards into a shape no arm makes.
@@ -1287,6 +1342,23 @@ export class Animator {
         this._strideAxis(node),
         (swing + bend + idleFloat + s.thrust * 12 * DEG) * Animator.gainOf(node),
       );
+
+      /*
+       * And the shoulder's other two axes, exactly as the hip's.
+       *
+       * An arm that swings in one flat plane is a pendulum. A real one
+       * arcs: away from the ribs as it comes forward, back in as it goes
+       * behind, with the upper arm rolling through it.
+       */
+      if (drive > 0.02) {
+        const g = Animator.gainOf(node) * chainFalloff;
+        const open = Math.sin((p + BALL.splayPhase) * TAU);
+        const roll = Math.sin((p + BALL.twistPhase) * TAU);
+        _q2.setFromAxisAngle(node.axisSplay, open * BALL.armSplay * DEG * g * -node.side);
+        _q.multiply(_q2);
+        _q2.setFromAxisAngle(node.axisTwist, roll * BALL.armTwist * DEG * g);
+        _q.multiply(_q2);
+      }
 
       if (s.aimDir && this.aimBlend > 0.001) {
         this._aimQuat(node, s.aimDir, s.bodyQ, _q2);
@@ -1751,10 +1823,22 @@ export class Animator {
     return this;
   }
 
-  /** Visual-only body offset: bob and lean, applied by the caller. */
+  /**
+   * Visual-only body offset: bob, lean, and the waist.
+   *
+   * The waist is the counter-turn — the chest going one way while the hips
+   * go the other. It is what stops a walking machine reading as a box being
+   * carried along on two sticks: without it, everything above the hips is
+   * one rigid piece that never answers what the legs are doing.
+   *
+   * Driven off the same gait clock and OPPOSED to it, because that is what
+   * a counter-turn is; if it moved with the legs it would just be a wobble.
+   */
   applyBodyCarriage(object) {
     object.position.y += this.bodyBob;
-    _euler.set(this.bodyLean.x, 0, this.bodyLean.y, 'XZY');
+    const twist = -Math.sin(this.gaitPhase * TAU)
+      * BALL.waist * clamp01(this.gaitFreq / 2.2) * (1 - this.slide);
+    _euler.set(this.bodyLean.x, twist, this.bodyLean.y, 'XZY');
     _q.setFromEuler(_euler);
     object.quaternion.multiply(_q);
   }

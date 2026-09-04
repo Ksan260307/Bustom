@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { Assembly, boneAnchor } from './Assembly.js';
 import { SHAPE } from './Shapes.js';
 import { BONE, EQUIP } from './constants.js';
+import { t } from '../ui/i18n.js';
 
 // ============================================================
 //  The machines that come with the game.
@@ -27,6 +28,42 @@ import { BONE, EQUIP } from './constants.js';
 //     able to tell, from any angle, at any distance.
 // ============================================================
 
+/**
+ * How each machine MOVES, as opposed to what it is made of.
+ *
+ * Every walking preset used to hand its shoulders `gain: 0.4` and its legs
+ * `gain: 1`, so twenty machines that look nothing alike all walked with the
+ * same temperament — and the shoulder figure was actively wrong once the
+ * joints started using all three of their axes, because the extra two scale
+ * with the gain like everything else. Forty percent of a ball joint is a
+ * hinge again.
+ *
+ * These are the knobs the bone system already had, used for what they are
+ * for:
+ *
+ *   hip   how far a leg swings, and with it how far it opens and rolls
+ *   arm   the same at the shoulder — the one that was flat 0.4 everywhere
+ *   lag   how far each link trails the one above it, in cycles. Zero is a
+ *         rigid limb moving as one piece; a lot is a whip. This is the
+ *         single most legible difference between a scout and a siege frame
+ *   chain how much of the swing each link further down keeps
+ *
+ * A light machine gets a loose, whippy limb; a heavy one gets a deliberate
+ * one that arrives all at once. Same code, same gait, different animal.
+ */
+const TEMPER = {
+  /** Quick and loose: everything trails, nothing is planted. */
+  scout: { hip: 1.15, arm: 1.1, lag: 0.14, chain: 0.7 },
+  /** Nimble but controlled — the shape most people picture. */
+  soldier: { hip: 1, arm: 0.95, lag: 0.09, chain: 0.6 },
+  /** Low and scuttling: short steps, and the chain barely gives. */
+  crawler: { hip: 0.9, arm: 0.8, lag: 0.05, chain: 0.5 },
+  /** Deliberate. It swings once, all of it together, and means it. */
+  heavy: { hip: 0.78, arm: 0.6, lag: 0.03, chain: 0.45 },
+  /** A building that walks. Almost no give anywhere. */
+  siege: { hip: 0.62, arm: 0.45, lag: 0.015, chain: 0.4 },
+};
+
 const UP = new THREE.Vector3(0, 1, 0);
 const _q = new THREE.Quaternion();
 const _v = new THREE.Vector3();
@@ -38,7 +75,7 @@ function bent(bone, deg) {
 }
 
 /** Turned about the vertical, for anything arranged in a ring. */
-const spun = (t) => new THREE.Quaternion().setFromAxisAngle(UP, -t).toArray();
+const spun = (ang) => new THREE.Quaternion().setFromAxisAngle(UP, -ang).toArray();
 
 /**
  * A pair of legs, mirrored, with the joints the walk model wants.
@@ -60,21 +97,31 @@ const spun = (t) => new THREE.Quaternion().setFromAxisAngle(UP, -t).toArray();
  */
 function legs(a, hipId, {
   faces = [0, 1], length = 1.6, gauge = 'mid', thigh = 0.65, foot = [0.75, 0.35, 1.25],
-  bend = -14, gain = 1, color = 1, hipSize = null, segments = 2,
+  bend = -14, gain = null, color = 1, hipSize = null, segments = 2,
+  temper = TEMPER.soldier,
 }) {
+  const swing = gain ?? temper.hip;
   const out = [];
   for (const face of faces) {
     const hip = a.addBlockOnFace(hipId, face, 2, {
       size: hipSize ?? [thigh * 0.4, thigh * 0.8, thigh * 0.8], shape: SHAPE.SPHERE, label: 'HIP',
     });
-    const upper = a.addBoneOnFace(hip.id, 3, BONE.LEG, { length, gauge, gain });
+    const upper = a.addBoneOnFace(hip.id, 3, BONE.LEG, {
+      length, gauge, gain: swing, chain: temper.chain,
+    });
     a.addBlockOnBone(upper.id, length * 0.45, color, {
       size: [thigh, length * 0.94, thigh * 1.08], shape: SHAPE.CAPSULE, label: 'THIGH',
     });
     let last = upper;
     for (let i = 1; i < segments; i++) {
       const seg = a.addBone(last.id, bent(last, bend), BONE.LEG, {
-        length: length * 0.88, gauge, gain: gain * 0.9, lag: 0.08 * i,
+        length: length * 0.88,
+        gauge,
+        gain: swing * 0.9,
+        // Trailing the thigh by the machine's own temperament, rather than
+        // by one number every machine shared.
+        lag: temper.lag * i,
+        chain: temper.chain,
       });
       a.addBlockOnBone(seg.id, 0, color, {
         size: [thigh * 0.85, thigh * 0.85, thigh * 0.85], shape: SHAPE.SPHERE, label: 'KNEE',
@@ -99,7 +146,7 @@ function legs(a, hipId, {
  */
 function arms(a, hostId, {
   faces = [0, 1], length = 1.05, gauge = 'mid', thick = 0.5, color = 1,
-  pauldron = [0.65, 0.8, 1.15], segments = 2,
+  pauldron = [0.65, 0.8, 1.15], segments = 2, temper = TEMPER.soldier,
 }) {
   const out = [];
   for (const face of faces) {
@@ -107,15 +154,22 @@ function arms(a, hostId, {
       size: pauldron, shape: SHAPE.DOME, label: 'PAULDRON',
     });
     // The SHOULDER is the joint that gives; everything past it swings with
-    // the arm. One reduced bone per side, which is what makes an arm read
-    // as an arm rather than as a stick on a hinge.
-    let last = a.addBoneOnFace(shoulder.id, 3, BONE.ARM, { length, gauge, gain: 0.4 });
+    // the arm. Its gain is the machine's own, not a flat 0.4 — that figure
+    // was halving the swing on every machine in the game, and once the
+    // shoulder started using all three of its axes it was halving those too.
+    let last = a.addBoneOnFace(shoulder.id, 3, BONE.ARM, {
+      length, gauge, gain: temper.arm, chain: temper.chain,
+    });
     a.addBlockOnBone(last.id, length * 0.45, color, {
       size: [thick, length * 0.95, thick], shape: SHAPE.CAPSULE, label: 'UPPER ARM',
     });
     for (let i = 1; i < segments; i++) {
       const seg = a.addBone(last.id, bent(last, 12), BONE.ARM, {
-        length: length * 0.9, gauge: 'thin', gain: 1, lag: 0.1 * i,
+        length: length * 0.9,
+        gauge: 'thin',
+        gain: 1,
+        lag: temper.lag * 1.3 * i,
+        chain: temper.chain,
       });
       a.addBlockOnBone(seg.id, length * 0.42, color, {
         size: [thick * 0.9, length * 0.86, thick * 0.9], shape: SHAPE.CAPSULE, label: 'FOREARM',
@@ -166,10 +220,10 @@ function hull(a, core, size, shape = SHAPE.BEVEL, color = 1, label = 'HULL') {
 /** Thrusters arranged round the back of something. */
 function thrusters(a, hostId, count, radius, size, y = 0) {
   for (let i = 0; i < count; i++) {
-    const t = (i / count) * Math.PI * 2;
+    const ang = (i / count) * Math.PI * 2;
     const pod = a.addBlock(hostId, {
-      pos: [Math.cos(t) * radius, y + Math.sin(t) * radius * 0.4, -radius * 0.6],
-      rot: spun(t),
+      pos: [Math.cos(ang) * radius, y + Math.sin(ang) * radius * 0.4, -radius * 0.6],
+      rot: spun(ang),
     }, 2, { size: [size, size, size * 1.3], shape: SHAPE.CYLINDER, label: 'THRUSTER' });
     a.addEquipOnFace(pod.id, 5, EQUIP.BOOST, { size: size * 0.8 });
   }
@@ -178,10 +232,10 @@ function thrusters(a, hostId, count, radius, size, y = 0) {
 /** Free-floating bits on a ring, the way FUNNEL carries them. */
 function bits(a, core, { count = 6, radius = 1.9, size = [0.5, 0.3, 0.9], weapon = EQUIP.SHOT }) {
   for (let i = 0; i < count; i++) {
-    const t = (i / count) * Math.PI * 2;
+    const ang = (i / count) * Math.PI * 2;
     const bit = a.addBlock(core.id, {
-      pos: [Math.cos(t) * radius, 0.35 + Math.sin(t * 2) * radius * 0.16, Math.sin(t) * radius],
-      rot: spun(t),
+      pos: [Math.cos(ang) * radius, 0.35 + Math.sin(ang * 2) * radius * 0.16, Math.sin(ang) * radius],
+      rot: spun(ang),
     }, 15, { size, shape: SHAPE.PRISM, label: 'BIT' });
     if (i % 2 === 0) {
       a.addEquipOnFace(bit.id, 2, EQUIP.ROLLING, {
@@ -206,6 +260,9 @@ export function presetGnat() {
   // this size that would stop it being the smallest machine in the game.
   const pod = hull(a, core, [1.3, 1.2, 1.4], SHAPE.BEVEL, 9, 'POD');
   const lens = a.addBlockOnFace(pod.id, 4, 15, { size: [0.5, 0.35, 0.18], shape: SHAPE.DISH });
+  // One gun, and that is the whole machine. GNAT carries the least of
+  // anything in the game and is the only preset for which "and nothing
+  // else" is the point rather than an omission.
   a.addEquipOnFace(lens.id, 4, EQUIP.SHOT, { size: 0.3 });
   a.addEquipOnFace(pod.id, 5, EQUIP.BOOST, { size: 0.45 });
   a.addEquipOnFace(pod.id, 2, EQUIP.FLOAT, { size: 0.4 });
@@ -224,8 +281,11 @@ export function presetMite() {
   const core = a.addCore();
   const body = hull(a, core, [1.25, 1.2, 1.3], SHAPE.BEVEL, 1, 'BODY');
   const cap = a.addBlockOnFace(body.id, 2, 15, { size: [0.55, 0.3, 0.55], shape: SHAPE.DOME });
+  // A scout carries a gun and an answer, not a gun and nothing.
   a.addEquipOnFace(cap.id, 4, EQUIP.SHOT, { size: 0.35 });
+  a.addEquipOnFace(cap.id, 2, EQUIP.LASER, { size: 0.3 });
   legs(a, body.id, {
+    temper: TEMPER.crawler,
     length: 0.85, gauge: 'thin', thigh: 0.34, foot: [0.42, 0.2, 0.66], gain: 1.2,
   });
   a.addEquipOnFace(body.id, 5, EQUIP.BOOST, { size: 0.4 });
@@ -243,7 +303,12 @@ export function presetSpark() {
   const shell = hull(a, core, [1.8, 1.75, 1.8], SHAPE.SPHERE, 9, 'SHELL');
   a.addEquipOnFace(shell.id, 2, EQUIP.FLOAT, { size: 0.45 });
   a.addEquipOnFace(shell.id, 5, EQUIP.BOOST, { size: 0.5 });
-  bits(a, core, { count: 3, radius: 1.15, size: [0.34, 0.22, 0.6] });
+  // Not the gun GNAT has. Two machines this small carrying one identical
+  // weapon between them are one machine painted twice, and GNAT is the one
+  // whose character is carrying nothing — so the difference is SPARK's.
+  bits(a, core, {
+    count: 3, radius: 1.15, size: [0.34, 0.22, 0.6], weapon: EQUIP.LASER,
+  });
   return a;
 }
 
@@ -257,9 +322,12 @@ export function presetTick() {
   const prow = a.addBlockOnFace(body.id, 4, 5, {
     size: [1.0, 0.9, 0.9], shape: SHAPE.WEDGE, label: 'PROW',
   });
+  // Both of them. TICK's entire argument is that it got close.
   a.addEquipOnFace(prow.id, 4, EQUIP.BLADE, { size: 0.5 });
+  a.addEquipOnFace(prow.id, 0, EQUIP.BLADE, { size: 0.4 });
   a.addEquipOnFace(body.id, 5, EQUIP.BOOST, { size: 0.55 });
   legs(a, body.id, {
+    temper: TEMPER.scout,
     length: 0.7, gauge: 'thin', thigh: 0.3, foot: [0.34, 0.18, 0.5], gain: 1.4, color: 5,
   });
   return a;
@@ -293,7 +361,11 @@ export function presetHopper() {
   const eye = a.addBoneOnFace(pod.id, 4, BONE.FACE, { length: 0.6, gauge: 'thin' });
   const lens = a.addBlockOnBone(eye.id, 0.4, 1, { size: [0.9, 0.6, 0.6], shape: SHAPE.DOME });
   a.addBlockOnFace(lens.id, 4, 15, { size: [0.6, 0.3, 0.15], shape: SHAPE.DISH });
-  a.addEquipOnFace(lens.id, 2, EQUIP.SHOT, { size: 0.5 });
+  // Not the gun GNAT has. Two machines this small carrying one identical
+  // weapon between them are one machine painted twice, and GNAT is the one
+  // whose character is carrying nothing — so the difference is SPARK's.
+  a.addEquipOnFace(lens.id, 2, EQUIP.LASER, { size: 0.5 });
+  a.addEquipOnFace(lens.id, 0, EQUIP.SHOT, { size: 0.32 });
 
   for (const face of [0, 1]) {
     const fin = a.addBlock(pod.id, {
@@ -302,6 +374,7 @@ export function presetHopper() {
     a.addEquipOnFace(fin.id, 5, EQUIP.BOOST, { size: 0.45 });
   }
   arms(a, pod.id, {
+    temper: TEMPER.scout,
     length: 0.9, gauge: 'thin', thick: 0.35, pauldron: [0.4, 0.5, 0.6], segments: 1,
   }).forEach(({ hand }) => a.addEquipOnFace(hand.id, 4, EQUIP.BLADE, { size: 0.4 }));
 
@@ -350,12 +423,15 @@ export function presetScarab() {
     size: [0.9, 0.55, 1.0], shape: SHAPE.HEX, label: 'TURRET',
   });
   a.addEquipOnFace(turret.id, 4, EQUIP.GATLING, { size: 0.5 });
+  // Low and wide: a spread gun is the shape of how it fights.
+  a.addEquipOnFace(turret.id, 2, EQUIP.SPREAD, { size: 0.45 });
   a.addEquipOnFace(body.id, 5, EQUIP.BOOST, { size: 0.5 });
   for (const z of [0.7, -0.7]) {
     const rail = a.addBlock(body.id, { pos: [0, -0.4, z] }, 2, {
       size: [1.9, 0.3, 0.4], shape: SHAPE.BEVEL, label: 'RAIL',
     });
     legs(a, rail.id, {
+      temper: TEMPER.crawler,
       length: 0.8, gauge: 'thin', thigh: 0.32, foot: [0.4, 0.2, 0.6], gain: 1.1, color: 2,
     });
   }
@@ -378,6 +454,8 @@ export function presetPip() {
   });
   a.addEquipOnFace(mantlet.id, 4, EQUIP.SNIPER, { size: 0.55 });
   a.addEquipOnFace(mantlet.id, 2, EQUIP.MISSILE, { size: 0.4 });
+  // It cannot leave, so it needs something for whatever reaches it.
+  a.addEquipOnFace(mantlet.id, 0, EQUIP.SPREAD, { size: 0.4 });
   a.addEquipOnFace(skirt.id, 3, EQUIP.FLOAT, { size: 0.6 });
   a.addEquipOnFace(skirt.id, 5, EQUIP.BOOST, { size: 0.5 });
   return a;
@@ -418,11 +496,15 @@ export function presetBiped() {
   });
   a.addBlockOnFace(skull.id, 4, 15, { size: [0.6, 0.25, 0.1] });
 
-  arms(a, chest.id, { length: 1.05, thick: 0.5 })
+  arms(a, chest.id, { length: 1.05, thick: 0.5, temper: TEMPER.soldier })
     .forEach(({ hand }) => a.addEquipOnFace(hand.id, 4, EQUIP.GATLING, { size: 0.5 }));
-  legs(a, pelvis.id, { length: 1.6, thigh: 0.65, foot: [0.75, 0.35, 1.25] });
+  legs(a, pelvis.id, { length: 1.6, thigh: 0.65, foot: [0.75, 0.35, 1.25], temper: TEMPER.soldier });
 
   a.addEquipOnFace(chest.id, 1, EQUIP.MISSILE, { size: 0.7 });
+  // Something for close, and something for far. STRIDER is the machine
+  // people learn on, so its rack should show what a rack is for.
+  a.addEquipOnFace(chest.id, 0, EQUIP.SHOT, { size: 0.5 });
+  a.addEquipOnFace(skull.id, 2, EQUIP.LASER, { size: 0.35 });
   a.addEquipOnFace(chest.id, 5, EQUIP.BOOST, { size: 0.8 });
   return a;
 }
@@ -461,6 +543,7 @@ export function presetMultileg() {
       size: [2.1, 0.35, 0.5], shape: SHAPE.BEVEL, label: 'RAIL',
     });
     legs(a, rail.id, {
+      temper: TEMPER.crawler,
       length: 1.1, gauge: 'thin', thigh: 0.4, foot: [0.5, 0.24, 0.8], gain: 1.05, color: 2,
     });
   }
@@ -480,9 +563,9 @@ export function presetBits() {
   // than every SMALL machine while being classed MEDIUM, which makes the
   // classes labels rather than facts.
   for (let i = 0; i < 6; i++) {
-    const t = (i / 6) * Math.PI * 2 + 0.5;
+    const ang = (i / 6) * Math.PI * 2 + 0.5;
     a.addBlock(shell.id, {
-      pos: [Math.cos(t) * 1.0, -0.35, Math.sin(t) * 1.0], rot: spun(t),
+      pos: [Math.cos(ang) * 1.0, -0.35, Math.sin(ang) * 1.0], rot: spun(ang),
     }, 2, { size: [0.55, 0.4, 0.95], shape: SHAPE.WEDGE, label: 'VANE' });
   }
   bits(a, core, { count: 8, radius: 2.1, size: [0.55, 0.34, 1.0] });
@@ -519,10 +602,13 @@ export function presetLance() {
     size: [0.45, 0.45, 3.2], shape: SHAPE.CYLINDER, label: 'BARREL',
   });
   a.addEquipOnFace(barrel.id, 4, EQUIP.SNIPER, { size: 0.6 });
-  arms(a, chest.id, { faces: [1], length: 1.0, thick: 0.45 })
+  // The whole machine is built round standing still, which is the worst
+  // place to be when something arrives. One blade, for exactly that.
+  a.addEquipOnFace(barrel.id, 0, EQUIP.BLADE, { size: 0.4 });
+  arms(a, chest.id, { faces: [1], length: 1.0, thick: 0.45, temper: TEMPER.soldier })
     .forEach(({ hand }) => a.addEquipOnFace(hand.id, 4, EQUIP.SHOT, { size: 0.45 }));
 
-  legs(a, pelvis.id, { length: 1.7, thigh: 0.6, foot: [0.85, 0.35, 1.4] });
+  legs(a, pelvis.id, { length: 1.7, thigh: 0.6, foot: [0.85, 0.35, 1.4], temper: TEMPER.soldier });
   a.addEquipOnFace(chest.id, 5, EQUIP.BOOST, { size: 0.7 });
   a.addEquipOnFace(chest.id, 2, EQUIP.TANK, { size: 0.5 });
   return a;
@@ -542,12 +628,16 @@ export function presetTurtle() {
   a.addEquipOnFace(head.id, 4, EQUIP.SPREAD, { size: 0.55 });
   a.addEquipOnFace(carapace.id, 2, EQUIP.SHIELD, { size: 0.7 });
   a.addEquipOnFace(carapace.id, 0, EQUIP.MISSILE, { size: 0.5 });
+  // A machine that will not move needs to be able to hurt what stops in
+  // front of it.
+  a.addEquipOnFace(head.id, 0, EQUIP.MAGNUM, { size: 0.5 });
   a.addEquipOnFace(body.id, 5, EQUIP.BOOST, { size: 0.6 });
   for (const z of [0.9, -0.9]) {
     const rail = a.addBlock(body.id, { pos: [0, -0.3, z] }, 2, {
       size: [2.5, 0.4, 0.6], shape: SHAPE.BEVEL, label: 'RAIL',
     });
     legs(a, rail.id, {
+      temper: TEMPER.heavy,
       length: 1.15, gauge: 'thick', thigh: 0.55, foot: [0.7, 0.3, 1.0], gain: 0.9, color: 2,
     });
   }
@@ -574,15 +664,21 @@ export function presetTitan() {
     size: [2.2, 1.2, 2.2], shape: SHAPE.BEVEL, label: 'PELVIS',
   });
 
-  arms(a, chest.id, { length: 2.2, gauge: 'thick', thick: 1.0, pauldron: [1.3, 1.6, 2.2] })
+  arms(a, chest.id, { length: 2.2, gauge: 'thick', thick: 1.0, pauldron: [1.3, 1.6, 2.2], temper: TEMPER.heavy })
     .forEach(({ hand }, i) => a.addEquipOnFace(
       hand.id, 4, i === 0 ? EQUIP.GATLING : EQUIP.BEAM, { size: 0.9 },
     ));
   legs(a, pelvis.id, {
+    temper: TEMPER.heavy,
     length: 3.2, gauge: 'thick', thigh: 1.3, foot: [1.6, 0.7, 2.6], gain: 0.85,
   });
 
   a.addEquipOnFace(collar.id, 2, EQUIP.MISSILE, { size: 1.0 });
+  // Twelve metres tall with three guns on it was a machine dressed as a
+  // threat. A grenade for what is behind cover and a shotgun for what has
+  // got past the arms — this thing should not have a range it is helpless at.
+  a.addEquipOnFace(collar.id, 0, EQUIP.GRENADE, { size: 0.8 });
+  a.addEquipOnFace(pelvis.id, 4, EQUIP.SPREAD, { size: 0.7 });
   a.addEquipOnFace(chest.id, 5, EQUIP.BOOST, { size: 1.2 });
   a.addEquipOnFace(chest.id, 0, EQUIP.TANK, { size: 0.8 });
   return a;
@@ -601,6 +697,9 @@ export function presetSpider() {
     size: [1.3, 1.0, 1.2], shape: SHAPE.WEDGE, label: 'HEAD',
   });
   a.addEquipOnFace(head.id, 4, EQUIP.GATLING, { size: 0.7 });
+  // Six legs hold it steady enough for a beam that has to be aimed.
+  a.addEquipOnFace(head.id, 2, EQUIP.LASER, { size: 0.5 });
+  a.addEquipOnFace(head.id, 0, EQUIP.SPREAD, { size: 0.45 });
   a.addEquipOnFace(body.id, 5, EQUIP.BOOST, { size: 0.9 });
 
   for (const z of [1.4, 0, -1.4]) {
@@ -608,6 +707,7 @@ export function presetSpider() {
       size: [3.0, 0.5, 0.7], shape: SHAPE.BEVEL, label: 'RAIL',
     });
     legs(a, rail.id, {
+      temper: TEMPER.crawler,
       length: 2.6, gauge: 'mid', thigh: 0.55, foot: [0.6, 0.3, 1.1],
       gain: 1.0, bend: -24, color: 2,
     });
@@ -658,6 +758,9 @@ export function presetWyvern() {
     size: [1.4, 1.2, 2.8], shape: SHAPE.CONE, label: 'NOSE',
   });
   a.addEquipOnFace(nose.id, 4, EQUIP.BEAM, { size: 0.8 });
+  // Nothing to stand on, so nothing to hold ground with: it dives, hits,
+  // and is somewhere else. A grenade is the one thing it can leave behind.
+  a.addEquipOnFace(nose.id, 0, EQUIP.GRENADE, { size: 0.5 });
   a.addEquipOnFace(body.id, 2, EQUIP.FLOAT, { size: 1.0 });
   const spine = a.addBlockOnFace(body.id, 2, 1, {
     size: [1.0, 0.7, 4.2], shape: SHAPE.WEDGE, label: 'SPINE',
@@ -712,12 +815,15 @@ export function presetColossus() {
     size: [4.0, 2.0, 3.6], shape: SHAPE.BEVEL, label: 'PELVIS',
   });
 
-  arms(a, chest.id, { length: 3.6, gauge: 'thick', thick: 1.7, pauldron: [2.2, 2.8, 3.6] })
+  arms(a, chest.id, { length: 3.6, gauge: 'thick', thick: 1.7, pauldron: [2.2, 2.8, 3.6], temper: TEMPER.siege })
     .forEach(({ hand, shoulder }, i) => {
       a.addEquipOnFace(hand.id, 4, i === 0 ? EQUIP.GATLING : EQUIP.SNIPER, { size: 1.3 });
       a.addEquipOnFace(shoulder.id, 2, EQUIP.MISSILE, { size: 1.0 });
+      // One hand carries something that ends an argument at arm's length.
+      if (i === 1) a.addEquipOnFace(hand.id, 0, EQUIP.MAGNUM, { size: 0.9 });
     });
   legs(a, pelvis.id, {
+    temper: TEMPER.siege,
     length: 5.4, gauge: 'thick', thigh: 2.2, foot: [2.8, 1.1, 4.4], gain: 0.75,
   });
 
@@ -741,6 +847,10 @@ export function presetLeviathan() {
   a.addEquipOnFace(head.id, 4, EQUIP.SPREAD, { size: 1.0 });
   a.addEquipOnFace(spine.id, 2, EQUIP.MISSILE, { size: 1.2 });
   a.addEquipOnFace(spine.id, 0, EQUIP.BEAM, { size: 0.9 });
+  // Eight legs and a hull you could park a HAULER on. Nothing about this
+  // machine is restrained, and its rack should not be either.
+  a.addEquipOnFace(head.id, 0, EQUIP.LASER, { size: 0.8 });
+  a.addEquipOnFace(head.id, 2, EQUIP.GRENADE, { size: 0.8 });
   a.addEquipOnFace(body.id, 5, EQUIP.BOOST, { size: 1.4 });
   a.addEquipOnFace(body.id, 1, EQUIP.TANK, { size: 1.0 });
 
@@ -749,6 +859,7 @@ export function presetLeviathan() {
       size: [5.0, 0.8, 1.1], shape: SHAPE.BEVEL, label: 'RAIL',
     });
     legs(a, rail.id, {
+      temper: TEMPER.siege,
       length: 3.6, gauge: 'thick', thigh: 1.0, foot: [1.1, 0.5, 1.9],
       gain: 0.9, bend: -22, color: 2,
     });
@@ -777,9 +888,9 @@ export function presetFortress() {
 
   // Four corner batteries, each on a ring so they read as turrets.
   for (let i = 0; i < 4; i++) {
-    const t = (i / 4) * Math.PI * 2 + Math.PI / 4;
+    const ang = (i / 4) * Math.PI * 2 + Math.PI / 4;
     const bastion = a.addBlock(keep.id, {
-      pos: [Math.cos(t) * 3.6, 0.6, Math.sin(t) * 3.6], rot: spun(t),
+      pos: [Math.cos(ang) * 3.6, 0.6, Math.sin(ang) * 3.6], rot: spun(ang),
     }, 2, { size: [2.2, 2.6, 2.2], shape: SHAPE.HEX, label: 'BASTION' });
     const cap = a.addBlockOnFace(bastion.id, 2, 1, {
       size: [1.6, 0.9, 1.6], shape: SHAPE.DOME, label: 'CUPOLA',
@@ -810,10 +921,10 @@ export function starterParts() {
     if (doc) out.push({ name, json: doc.toJSON() });
   };
   const biped = presetBiped();
-  take(biped, 'PAULDRON', '腕 ARM');
-  take(biped, 'HIP', '脚 LEG');
-  take(biped, 'HEAD', '頭 HEAD');
-  take(biped, 'CHEST', '上半身 UPPER BODY');
+  take(biped, 'PAULDRON', t('腕 ARM'));
+  take(biped, 'HIP', t('脚 LEG'));
+  take(biped, 'HEAD', t('頭 HEAD'));
+  take(biped, 'CHEST', t('上半身 UPPER BODY'));
   return out;
 }
 

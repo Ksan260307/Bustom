@@ -1,4 +1,5 @@
 import { RtcTransport, rtcAvailable } from './Rtc.js';
+import { t } from '../ui/i18n.js';
 
 /**
  * Standing in a queue until somebody who wants the same fight turns up.
@@ -12,7 +13,33 @@ import { RtcTransport, rtcAvailable } from './Rtc.js';
  * in. Anybody can run `tools/matchmaker.js` and put the address in, and
  * when whoever was running one stops, the code-swap and the LAN game are
  * both still there.
+ *
+ * There is a DEFAULT now, which there was not. The screen used to open
+ * with an empty box and "enter the matchmaking server address", which is a
+ * question almost nobody can answer — so internet play shipped switched off
+ * for everyone who was not already running their own. Setting
+ * `DEFAULT_MATCHMAKER` below to a running instance is the whole of turning
+ * it on; leaving it empty is honest about there not being one, and the
+ * screen says so rather than asking for something the player has not got.
  */
+
+/**
+ * The queue this build points at, or '' for none.
+ *
+ * One line to fill in when a server is running. It is not a secret and not
+ * a credential — the matchmaker introduces two people and then has nothing
+ * further to do with the fight.
+ */
+export const DEFAULT_MATCHMAKER = '';
+
+/**
+ * How long to stand in a queue before saying something.
+ *
+ * A queue with nobody in it looked exactly like a queue that was about to
+ * find somebody: "looking for an opponent (0/2)", for ever. At a quiet hour
+ * that is the whole of the player's experience of internet play.
+ */
+export const QUEUE_PATIENCE = 90;
 export class Matchmaker {
   constructor({ name = 'PLAYER', onState = () => {}, onNotice = () => {} } = {}) {
     this.name = name;
@@ -29,6 +56,9 @@ export class Matchmaker {
     this.transport = null;
     this._off = null;
     this._pending = null;
+    /** Seconds spent queued, so a quiet hour can say so. */
+    this.waited = 0;
+    this._timer = null;
   }
 
   static get available() {
@@ -44,24 +74,53 @@ export class Matchmaker {
     return this;
   }
 
+  /**
+   * Count the wait, and speak up when it has gone on.
+   *
+   * Not a failure and not a cancel: the queue keeps running, because
+   * somebody may still turn up. It just stops pretending that silence is
+   * progress, and points at the two things that work with nobody else
+   * online.
+   */
+  _startPatience() {
+    this._stopPatience();
+    this.waited = 0;
+    this._timer = setInterval(() => {
+      this.waited += 5;
+      if (this.state !== 'queued') { this._stopPatience(); return; }
+      if (this.waited === QUEUE_PATIENCE) {
+        this.onNotice(t('まだ相手が見つかりません。ソロプレイかコード交換も使えます'));
+      }
+    }, 5000);
+    return this;
+  }
+
+  _stopPatience() {
+    if (this._timer) clearInterval(this._timer);
+    this._timer = null;
+    return this;
+  }
+
   /** Join the queue for a game with these rules. */
   async queue(address, { players = 2, rules = null } = {}) {
-    if (!this.bridge) { this._set('failed', 'この環境ではマッチングできません'); return this; }
+    if (!this.bridge) { this._set('failed', t('この環境ではマッチングできません')); return this; }
     const [host, port] = String(address ?? '').split(':');
     this._off?.();
     this._off = this.bridge.onMessage((msg) => this._receive(msg));
     try {
       await this.bridge.connect(host, Number(port) || 45080);
     } catch (e) {
-      this._set('failed', `マッチングサーバーにつながりません（${e?.code ?? e?.message ?? 'エラー'}）`);
+      this._set('failed', t('マッチングサーバーにつながりません（{0}）', [e?.code ?? e?.message ?? 'エラー']));
       return this;
     }
     this.bridge.send({ t: 'queue', name: this.name, want: { players, rules } });
-    this._set('queued', '対戦相手を探しています');
+    this._set('queued', t('対戦相手を探しています'));
+    this._startPatience();
     return this;
   }
 
   cancel() {
+    this._stopPatience();
     this.bridge?.send({ t: 'cancel' });
     this.bridge?.close();
     this._off?.();
@@ -72,6 +131,7 @@ export class Matchmaker {
 
   /** Done with the introduction; the fight does not need it any more. */
   release() {
+    this._stopPatience();
     this.bridge?.close();
     this._off?.();
     this._off = null;
@@ -87,7 +147,7 @@ export class Matchmaker {
       return;
     }
     if (msg.t === 'peerGone') {
-      this._set('failed', '相手が離脱しました');
+      this._set('failed', t('相手が離脱しました'));
       return;
     }
     if (msg.t === 'matched') {
@@ -95,7 +155,7 @@ export class Matchmaker {
       this.players = msg.players | 0;
       this.names = msg.names ?? [];
       this.rules = msg.rules ?? null;
-      this._set('matched', `${this.names.join(' vs ')} — 接続しています`);
+      this._set('matched', t('{0} — 接続しています', [this.names.join(' vs ')]));
       // Seat zero offers, everybody else answers. Somebody has to go first
       // and the rule has to be one both ends work out the same way, without
       // asking.
@@ -136,9 +196,9 @@ export class Matchmaker {
       // The introduction is over. Everything from here is between the two
       // computers, and the matchmaker never hears about it.
       this.release();
-      this._set('ready', '接続しました');
+      this._set('ready', t('接続しました'));
     } catch {
-      this._set('failed', '接続できませんでした（相手のネットワークが厳しいようです）');
+      this._set('failed', t('接続できませんでした（相手のネットワークが厳しいようです）'));
     }
   }
 }

@@ -158,7 +158,6 @@ export class AssistController {
 
     // --- proportional navigation:  a_cmd = N * |v_rel| * (LOS rate x los_unit)
     if (range > 1e-3) {
-      const los = _tmp.copy(_r).divideScalar(range);
       // omega_los = (r x v_rel) / |r|^2
       _omega.copy(_r).cross(_vrel).divideScalar(range * range);
       this.losRate.copy(_omega);

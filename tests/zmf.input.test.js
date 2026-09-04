@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
+  TOOL_ACTIONS, DEFAULT_TOOL_BINDINGS,
   InputManager, BINDINGS, DEFAULT_BINDINGS, ACTIONS, ACTION_GROUPS, ACTION_LABEL, keyLabel,
 } from '../src/zmf/InputManager.js';
 import { installFakeDom } from './helpers/dom.js';
@@ -35,10 +36,65 @@ describe('bindings', () => {
 
 describe('key config', () => {
   it('every action is named and lives in exactly one group', () => {
+    // Two sets of actions now: the fight's, and the workbench's tool keys,
+    // which used to be the one part of the game that could not be rebound.
+    // They share the config screen and nothing else — a key may mean the
+    // weapon bone on the bench and forward in a fight, and neither is
+    // wrong — so the invariant is that between them they cover the groups
+    // exactly, with nothing named twice.
     const grouped = ACTION_GROUPS.flatMap((g) => g.actions);
-    expect(grouped.sort()).toEqual([...ACTIONS].sort());
+    const all = [...ACTIONS, ...TOOL_ACTIONS];
+    expect(grouped.sort()).toEqual([...all].sort());
     expect(new Set(grouped).size).toBe(grouped.length);
-    for (const a of ACTIONS) expect(ACTION_LABEL[a], a).toBeTruthy();
+    for (const a of all) expect(ACTION_LABEL[a], a).toBeTruthy();
+  });
+
+  it('every workbench tool has a key, and no key does two jobs', () => {
+    const seen = new Map();
+    for (const action of TOOL_ACTIONS) {
+      const codes = DEFAULT_TOOL_BINDINGS[action];
+      expect(codes, action).toBeTruthy();
+      expect(codes.length, `${action} needs a key`).toBeGreaterThan(0);
+      for (const c of codes) {
+        expect(seen.has(c), `${c} is already ${seen.get(c)}`).toBe(false);
+        seen.set(c, action);
+      }
+    }
+  });
+
+  it('a tool key can be moved, and it leaves where it was', () => {
+    expect(input.toolFor('KeyB')).toBe('toolBlock');
+    const stolen = input.bindTool('toolPaint', 'KeyB');
+    expect(stolen, 'it says what it took the key from').toBe('toolBlock');
+    expect(input.toolFor('KeyB')).toBe('toolPaint');
+    expect(input.toolFor('KeyP')).toBe('toolPaint');
+  });
+
+  it('refuses a tool action it does not have', () => {
+    expect(input.bindTool('toolNonsense', 'KeyQ')).toBe(null);
+  });
+
+  it('carries moved tool keys across a save, and old saves still load', () => {
+    input.bindTool('toolPaint', 'KeyQ');
+    const saved = input.bindingsToJSON();
+    expect(saved.__tools.toolPaint).toContain('KeyQ');
+
+    const fresh = new InputManager(dom.el);
+    fresh.loadBindings(saved);
+    expect(fresh.toolFor('KeyQ')).toBe('toolPaint');
+
+    // A file written before the bench's keys were rebindable has no
+    // `__tools` at all, and has to load as the factory layout.
+    const old = new InputManager(dom.el);
+    old.loadBindings({ forward: ['KeyI'] });
+    expect(old.toolFor('KeyB')).toBe('toolBlock');
+    expect(old.keysFor('forward')).toEqual(['KeyI']);
+  });
+
+  it('resetting puts the tool keys back too', () => {
+    input.bindTool('toolPaint', 'KeyB');
+    input.resetBindings();
+    expect(input.toolFor('KeyB')).toBe('toolBlock');
   });
 
   it('reads keys back the way a person says them', () => {

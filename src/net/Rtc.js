@@ -49,6 +49,14 @@ export function rtcAvailable() {
 }
 
 /**
+ * The most one data-channel message may be.
+ *
+ * Chromium negotiates 256 KB; this leaves room under it rather than sitting
+ * exactly on the edge of an implementation detail.
+ */
+const RTC_MESSAGE_MAX = 200 * 1024;
+
+/**
  * Squeeze a session description into something a person can send.
  *
  * An SDP is a couple of kilobytes of text with newlines in it, which
@@ -179,7 +187,22 @@ export class RtcTransport extends Transport {
   }
 
   send(msg) {
-    if (this.channel?.readyState === 'open') this.channel.send(JSON.stringify(msg));
+    if (this.channel?.readyState !== 'open') return this;
+    const text = JSON.stringify(msg);
+    /*
+     * A data channel negotiates a maximum message size — 256 KB in
+     * Chromium — and `send` past it throws or takes the channel down with
+     * it. This used to hand it the whole machine, which was 1.79 MB.
+     * Packed, that is 45 KB; the check is here so that if a message ever
+     * does grow past this, it says so instead of killing the connection
+     * mid-fight.
+     */
+    if (text.length > RTC_MESSAGE_MAX) {
+      console.warn(`rtc: refusing a ${text.length}B '${msg?.t}' message`);
+      this.onMessage?.({ t: 'error', why: 'oversize' });
+      return this;
+    }
+    this.channel.send(text);
     return this;
   }
 
