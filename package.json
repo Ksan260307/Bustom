@@ -15,15 +15,24 @@
     "game": "npm run build:release && electron .",
     "game:dev": "electron . --dev-server=http://localhost:3000",
     "pack": "npm run build:release && electron-builder --dir",
-    "dist:win": "npm run build:release && electron-builder --win",
-    "dist:linux": "npm run build:release && electron-builder --linux",
     "smoke": "vite build && electron tests/smoke/smoke.cjs",
     "stage": "vite build --mode stage && electron electron/stage.js",
-    "stage:dev": "vite --mode stage"
+    "stage:dev": "vite --mode stage",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "i18n:check": "node tools/check-i18n.mjs",
+    "check": "npm run lint && npm run i18n:check && npm test",
+    "pack:win": "npm run build:release && electron-builder --win",
+    "pack:linux": "npm run build:release && electron-builder --linux",
+    "bake:icon": "python tools/bake-icon.py",
+    "smoke:packaged": "node tools/smoke-packaged.mjs"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "electron": "^33.4.11",
     "electron-builder": "^25.1.8",
+    "eslint": "^9.39.5",
+    "globals": "^17.12.0",
     "vite": "^5.4.10",
     "vitest": "^2.1.9"
   },
@@ -38,31 +47,37 @@
     "executableName": "BLOSTOM",
     "asar": true,
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "electron/**/*",
       "!electron/stage.js",
+      "build/icon.*",
       "dist/**/*",
+      "!dist/**/*.map",
       "package.json"
     ],
     "win": {
       "target": [
         "dir"
       ],
+      "icon": "build/icon.ico",
       "signAndEditExecutable": false
     },
     "linux": {
       "target": [
         "dir"
       ],
-      "category": "Game"
+      "category": "Game",
+      "icon": "build/icon.png"
     },
     "mac": {
       "target": [
         "dir"
       ],
-      "category": "public.app-category.games"
+      "category": "public.app-category.games",
+      "icon": "build/icon.png"
     }
   },
   "allowScripts": {

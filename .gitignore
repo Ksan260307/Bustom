@@ -21,3 +21,17 @@ public/kit/
 
 # The stage editor is built on its own; the game never ships it.
 dist-stage/
+
+# electron-builder's staging, but NOT the icon: that is drawn by
+# tools/bake-icon.py and it is ours, so it is tracked like any other file we
+# made. It also has to exist before a build can run.
+build/*
+!build/icon.png
+!build/icon.ico
+
+# Promo material. Not wanted, and a video is the one thing that must never
+# go into git — 8.1MB that every clone pays for for ever, even after it is
+# deleted, because git does not forget.
+media/
+*.mp4
+*.mov

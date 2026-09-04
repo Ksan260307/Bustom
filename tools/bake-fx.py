@@ -41,6 +41,21 @@ PARTICLES = {
     'blob': 'circle_05',
     # What a hit leaves behind on the wall.
     'scorch': 'scorch_03',
+
+    # Ninety-six sprites came in this pack and nine were being used. These
+    # three were picked the way the others were — by MEASURING the shape
+    # rather than reading the filename, which is how `spark` turned out to
+    # be lightning:
+    #
+    #   slash_03   5.2x longer than it is wide — an arc, not a blob
+    #   circle_03  375x more ink at its edge than at its middle — a ring
+    #   smoke_09   dense and soft, and not the one the floor already uses
+    #
+    # A blade had NO visual of its own until now: swinging it drew the same
+    # spray as a bullet landing.
+    'slash': 'slash_03',
+    'ring': 'circle_03',
+    'plume': 'smoke_09',
 }
 
 

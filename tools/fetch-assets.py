@@ -51,6 +51,26 @@ DIRECT = {
     '100-CC0-SFX_0.zip': 'https://opengameart.org/sites/default/files/100-CC0-SFX_0.zip',
     '25-CC0-bang-sfx.zip':
         'https://opengameart.org/sites/default/files/25-CC0-bang-sfx.zip',
+    # Real firearms, recorded outdoors. CC0. 194MB, and worth every byte:
+    # the guns were synthesised before and it is exactly what you could
+    # hear — a shot with no crack in front of it and no hillside behind it.
+    'Prepared_SFX_Library.7z':
+        'https://opengameart.org/sites/default/files/Prepared%20SFX%20Library.7z',
+    # Air under pressure, recorded. CC0. This is what a machine of this size
+    # actually sounds like when it moves; an oscillator is not.
+    'steam_hisses.zip':
+        'https://opengameart.org/sites/default/files/steam_hisses.zip',
+    # The soundtrack. All CC0. The game had a title screen, a workbench and
+    # a match, and all three were silent apart from the machine itself.
+    'ehlers-free-music-pack.zip':
+        'https://opengameart.org/sites/default/files/'
+        'Alexander%20Ehlers%20-%20Free%20Music%20Pack.zip',
+    'ObservingTheStar.zip':
+        'https://opengameart.org/sites/default/files/ObservingTheStar.zip',
+    # And what a place sounds like when nothing is happening in it.
+    'dark-ambience-loop.ogg':
+        'https://opengameart.org/sites/default/files/'
+        'Iwan%20Gabovitch%20-%20Dark%20Ambience%20Loop.ogg',
     # ESO's Milky Way panorama. CC BY 4.0 — the game credits it on the help
     # screen, and that credit is not optional.
     'eso0932a.jpg': 'https://cdn.eso.org/images/large/eso0932a.jpg',
@@ -64,15 +84,22 @@ DIRECT = {
 
 # ---- the seven sounds, and which pack each is cut from
 SFX = [
-    ('sci-fi-sfx.zip', 'shoot_01.ogg', 'fire-light.ogg'),
-    ('25-CC0-bang-sfx.zip', 'bang_03.ogg', 'fire-heavy.ogg'),
     ('100-CC0-SFX_0.zip', 'metal_02.ogg', 'hit-landed.ogg'),
     ('100-CC0-SFX_0.zip', 'metal_11.ogg', 'hit-taken.ogg'),
-    ('sci-fi-sfx.zip', 'explosion_02.ogg', 'boom.ogg'),
+    ('25-CC0-bang-sfx.zip', 'bang_06.ogg', 'boom.ogg'),
     ('sci-fi-sfx.zip', 'beep_01.ogg', 'lock-on.ogg'),
     ('sci-fi-sfx.zip', 'beep_03.ogg', 'lock-off.ogg'),
+    # What a place sounds like with nothing happening in it. Two recordings
+    # and a gain per arena, not seven files: the difference between a canyon
+    # and a salt flat is how much air is moving.
+    ('sci-fi-sfx.zip', 'loop_ambient_01.ogg', 'air.ogg'),
 
     # ---- what makes it sound like a machine rather than a shooter.
+    #
+    # NOTE: the guns and everything pneumatic are NOT in this list any more.
+    # They are cut out of field recordings by tools/cut-sfx.py, which runs
+    # after this — a five-megabyte recording of a hillside is not a game
+    # asset until somebody has found the gunshot in it.
     #
     # Chosen by DECODING all 175 sounds in these packs and measuring them —
     # length, how fast they get loud, how long they stay loud, how bright
@@ -85,15 +112,10 @@ SFX = [
     # 0.57s, 293ms of body, the loudest low slam in the pack.
     ('100-CC0-SFX_0.zip', 'slam_03.ogg', 'land.ogg'),
     # Loops cleanly (0.80), low and mechanical: joints, while they move.
-    ('sci-fi-sfx.zip', 'loop_machine_02.ogg', 'servo.ogg'),
     # Loops (0.70) and broadband, which is what a thruster actually is.
-    ('sci-fi-sfx.zip', 'loop_ambient_weird.ogg', 'thrust.ogg'),
     # Loops almost perfectly (0.96) and bright: an energy blade held lit.
-    ('sci-fi-sfx.zip', 'loop_machine_03.ogg', 'blade.ogg'),
     # 130ms swell, low: a whoosh rather than a bang.
-    ('sci-fi-sfx.zip', 'teleport_01.ogg', 'dash.ogg'),
     # 0.81s, 29ms attack, low: a whoomph as the legs let go.
-    ('sci-fi-sfx.zip', 'misc_04.ogg', 'jump.ogg'),
     # 291ms of bright mechanical body: a ratchet.
     ('100-CC0-SFX_0.zip', 'tools_02.ogg', 'reload.ogg'),
     # 12ms of body: a clean click, and nothing after it.
@@ -205,6 +227,52 @@ def main():
         with zipfile.ZipFile(path) as z, open(os.path.join(out, name), 'wb') as fh:
             fh.write(z.read(member))
         print('  %-16s <- %s' % (name, member))
+
+    # ---- the soundtrack, chosen by measuring eleven tracks (see LICENSES)
+    out_music = os.path.join(KIT, 'music')
+    os.makedirs(out_music, exist_ok=True)
+    print('bake  music -> %s' % out_music)
+    pack = os.path.join(DL, 'ehlers-free-music-pack.zip')
+    if os.path.exists(pack):
+        pre = 'Alexander Ehlers - Free Music Pack/Alexander Ehlers - '
+        with zipfile.ZipFile(pack) as z:
+            # Three fight tracks, not one. A solo run walks seven arenas
+            # and takes far longer than 2.5 minutes, so one battle track
+            # meant hearing the same loop for the whole ladder — the one
+            # place in the game where the music is heard longest was the
+            # one place it repeated. Chosen the same way the first three
+            # were, by measuring the pack rather than by the titles:
+            #
+            #   Doomed         bright 2824, rms 0.306   the brightest
+            #   Warped         bright 1743, rms 0.200   next brightest
+            #   Great mission  bright 1071, rms 0.285   loudest of the rest
+            #
+            # The two left over are the quiet ones (Waking the devil 903,
+            # Spacetime 880) and neither belongs under a fight.
+            for member, name in [('Flags.mp3', 'title.mp3'),
+                                 ('Twists.mp3', 'garage.mp3'),
+                                 ('Doomed.mp3', 'fight.mp3'),
+                                 ('Warped.mp3', 'fight2.mp3'),
+                                 ('Great mission.mp3', 'fight3.mp3')]:
+                with open(os.path.join(out_music, name), 'wb') as fh:
+                    fh.write(z.read(pre + member))
+                print('  %-16s <- %s' % (name, member))
+    star = os.path.join(DL, 'ObservingTheStar.zip')
+    if os.path.exists(star):
+        with zipfile.ZipFile(star) as z,                 open(os.path.join(out_music, 'space.ogg'), 'wb') as fh:
+            fh.write(z.read('ObservingTheStar.ogg'))
+        print('  %-16s <- ObservingTheStar.ogg' % 'space.ogg')
+    amb = os.path.join(DL, 'dark-ambience-loop.ogg')
+    if os.path.exists(amb):
+        import shutil as _sh
+        _sh.copy(amb, os.path.join(KIT, 'sfx', 'deep.ogg'))
+        print('  %-16s <- Dark Ambience Loop' % 'deep.ogg')
+
+    # ---- and the sounds that have to be cut out of a recording first
+    print('bake  field recordings')
+    import subprocess as _sp
+    _sp.check_call([sys.executable, os.path.join(HERE, 'unpack-sfx.py')])
+    _sp.check_call([sys.executable, os.path.join(HERE, 'cut-sfx.py')])
 
     # ---- the Open Font License asks that its text travel with the fonts
     print('bake  font licences')

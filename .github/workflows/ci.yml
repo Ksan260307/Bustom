@@ -1,0 +1,100 @@
+# ============================================================
+#  1,114 tests and 68 smoke checks that nobody was running.
+#
+#  The suite takes 41 seconds. There was no reason not to have this except
+#  that it had never been written, and the cost of not having it is paid
+#  quietly: a change that breaks something is found by the next person to
+#  remember to run the tests.
+#
+#  Four jobs, cheapest first, so a typo is reported in twenty seconds rather
+#  than after the whole thing has built Electron.
+# ============================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  i18n:
+    name: both languages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # Fails when a string in `src` has no English, which is how a mixed
+      # screen gets found before a player finds it.
+      - run: npm run i18n:check
+
+  test:
+    name: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  smoke:
+    name: does the built game start
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # A CI runner has no GPU and no X server. `xvfb-run` gives Electron a
+      # display; SwiftShader gives it something to draw with — the smoke
+      # test checks that frames are PRODUCED, which software rendering does
+      # perfectly well, not that they are produced quickly.
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
+      - run: xvfb-run --auto-servernum npm run smoke
+        env:
+          SMOKE_TIMEOUT: 180000
+
+  packaged:
+    name: does the packaged game start
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # A different question from the one above. That drives the built game
+      # in a development shell; this drives what electron-builder actually
+      # produced — asar packed, file list applied, every path resolved the
+      # way it will be on a player's machine. The self-check for this has
+      # been in `electron/main.js` since it was written and nothing ever ran
+      # it, so it sat there asserting something that could not be true.
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
+      - run: npm run pack
+      - run: xvfb-run --auto-servernum npm run smoke:packaged

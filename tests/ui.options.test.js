@@ -1,5 +1,5 @@
 import {
-  describe, it, expect, beforeEach, vi,
+  describe, it, expect, beforeEach,
 } from 'vitest';
 import { Settings } from '../src/core/Settings.js';
 

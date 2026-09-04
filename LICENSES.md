@@ -55,36 +55,53 @@ BLOSTOM 本体のコードとは別に、`public/kit/` 以下に外部素材を�
 
 | ファイル | 元素材 | 作者 | ライセンス |
 |---|---|---|---|
-| `fire-light.ogg` | [50 CC0 Sci-Fi SFX](https://opengameart.org/content/50-cc0-sci-fi-sfx) `shoot_01` | rubberduck | CC0 1.0 |
-| `fire-heavy.ogg` | [25 CC0 bang / firework SFX](https://opengameart.org/content/25-cc0-bang-firework-sfx) `bang_03` | rubberduck | CC0 1.0 |
+| `fire-light.wav` | [The Free Firearm Sound Library](https://opengameart.org/content/the-free-firearm-sound-library) PPSh `P_22P` | bart | CC0 1.0 |
+| `fire-heavy.wav` | 同上 Mosin Nagant `M_21P` | bart | CC0 1.0 |
+| `fire-shot.wav` | 同上 Mossberg `N_26P` | bart | CC0 1.0 |
+| `fire-sniper.wav` | 同上 Tikka `W_24P` | bart | CC0 1.0 |
+| `fire-pistol.wav` | 同上 Ruger Mark III `R_30P` | bart | CC0 1.0 |
+| `dash.wav` | [Steam release sounds](https://opengameart.org/content/steam-release-sounds) Marker #2 | bart | CC0 1.0 |
+| `jump.wav` | 同上 Marker #4 | bart | CC0 1.0 |
+| `thrust.wav` | 同上 Marker #1 | bart | CC0 1.0 |
+| `servo.wav` | 同上 Marker #3 | bart | CC0 1.0 |
+| `blade.wav` | 同上 Marker #5 | bart | CC0 1.0 |
+| `air.ogg` | 50 CC0 Sci-Fi SFX `loop_ambient_01` | rubberduck | CC0 1.0 |
+| `deep.ogg` | [Dark Ambience Loop](https://opengameart.org/content/dark-ambience-loop) | Iwan Gabovitch (qubodup) | CC0 1.0 |
 | `hit-landed.ogg` | [100 CC0 SFX](https://opengameart.org/content/100-cc0-sfx) `metal_02` | rubberduck | CC0 1.0 |
 | `hit-taken.ogg` | 同上 `metal_11` | rubberduck | CC0 1.0 |
-| `boom.ogg` | 50 CC0 Sci-Fi SFX `explosion_02` | rubberduck | CC0 1.0 |
-| `lock-on.ogg` | 同上 `beep_01` | rubberduck | CC0 1.0 |
-| `lock-off.ogg` | 同上 `beep_03` | rubberduck | CC0 1.0 |
-| `step.ogg` | 100 CC0 SFX `metal_03` | rubberduck | CC0 1.0 |
+| `step.ogg` | 同上 `metal_03` | rubberduck | CC0 1.0 |
 | `land.ogg` | 同上 `slam_03` | rubberduck | CC0 1.0 |
-| `jump.ogg` | 50 CC0 Sci-Fi SFX `misc_04` | rubberduck | CC0 1.0 |
-| `dash.ogg` | 同上 `teleport_01` | rubberduck | CC0 1.0 |
-| `servo.ogg` | 同上 `loop_machine_02` | rubberduck | CC0 1.0 |
-| `thrust.ogg` | 同上 `loop_ambient_weird` | rubberduck | CC0 1.0 |
-| `blade.ogg` | 同上 `loop_machine_03` | rubberduck | CC0 1.0 |
-| `reload.ogg` | 100 CC0 SFX `tools_02` | rubberduck | CC0 1.0 |
+| `reload.ogg` | 同上 `tools_02` | rubberduck | CC0 1.0 |
 | `swap.ogg` | 同上 `switch_01` | rubberduck | CC0 1.0 |
 | `round.ogg` | 同上 `gong_01` | rubberduck | CC0 1.0 |
-| `alarm.ogg` | 50 CC0 Sci-Fi SFX `retro_beep_05` | rubberduck | CC0 1.0 |
-| `wreck.ogg` | 25 CC0 bang / firework SFX `bang_09` | rubberduck | CC0 1.0 |
-| `ui-move.ogg` | 50 CC0 Sci-Fi SFX `terminal_01` | rubberduck | CC0 1.0 |
+| `boom.ogg` | [25 CC0 bang / firework SFX](https://opengameart.org/content/25-cc0-bang-firework-sfx) `bang_06` | rubberduck | CC0 1.0 |
+| `wreck.ogg` | 同上 `bang_09` | rubberduck | CC0 1.0 |
+| `lock-on.ogg` | [50 CC0 Sci-Fi SFX](https://opengameart.org/content/50-cc0-sci-fi-sfx) `beep_01` | rubberduck | CC0 1.0 |
+| `lock-off.ogg` | 同上 `beep_03` | rubberduck | CC0 1.0 |
+| `alarm.ogg` | 同上 `retro_beep_05` | rubberduck | CC0 1.0 |
+| `ui-move.ogg` | 同上 `terminal_01` | rubberduck | CC0 1.0 |
 | `ui-select.ogg` | 同上 `terminal_04` | rubberduck | CC0 1.0 |
 | `ui-back.ogg` | 同上 `terminal_05` | rubberduck | CC0 1.0 |
 
-**加工:** 改名のみ。中身は元のまま。
+**加工（.ogg）:** 改名のみ。中身は元のまま。
+
+**加工（.wav）:** フィールド録音は数MBの長尺（丘の上で数秒の風、真ん中で1発、
+長い残響）なので、`tools/cut-sfx.py` で **最大トランジェントを探して立ち上がりの
+手前まで遡り**、その前後を切り出し → 両端フェード → モノラル化 → 32kHz/16bit
+正規化。ループ音（`thrust` `servo` `blade`）は録音の中央から取り、
+末尾を先頭にクロスフェードしてつなぎ目が鳴らないようにしています。
+Vorbisエンコーダがツールチェーンに無いためWAVのままですが、
+1秒前後のモノラルなので実害はありません。
 
 **選び方:** ファイル名では選んでいません（`spark` という名前のスプライトが
-実際には稲妻だった、という失敗があったので）。3つのパックの **175音すべてを
+実際には稲妻だった、という失敗があったので）。パックの **175音すべてを
 実際にデコードして測り**、長さ・立ち上がり・鳴っている長さ・明るさ（ゼロ交差）・
-両端の一致度（＝ループにできるか）から選びました。各音の測定値は
-`tools/fetch-assets.py` のコメントに残してあります。
+両端の一致度（＝ループにできるか）から選びました。
+
+**合成音と録音:** 当初は rubberduck の3パックだけを使っていましたが、
+そのうち *50 CC0 Sci-Fi SFX* は**オシレーターで作った合成音**です。
+移動・ダッシュ・スラスター・サーボ・銃声がどれも無機質だったのはこれが原因で、
+同じパックの中から選び直しても直りません。**実銃と蒸気の録音に差し替えました。**
 
 ## エフェクト — `public/kit/fx/`
 
@@ -93,6 +110,9 @@ BLOSTOM 本体のコードとは別に、`public/kit/` 以下に外部素材を�
 | `muzzle.png` | [Particle Pack](https://opengameart.org/content/particle-pack-80-sprites) `muzzle_01` | Kenney | CC0 1.0 |
 | `spark.png` | 同上 `scorch_01` | Kenney | CC0 1.0 |
 | `flame.png` | 同上 `muzzle_05` | Kenney | CC0 1.0 |
+| `slash.png` | 同上 `slash_03` | Kenney | CC0 1.0 |
+| `ring.png` | 同上 `circle_03` | Kenney | CC0 1.0 |
+| `plume.png` | 同上 `smoke_09` | Kenney | CC0 1.0 |
 | `smoke.png` | 同上 `smoke_08` | Kenney | CC0 1.0 |
 | `dirt.png` | 同上 `dirt_02` | Kenney | CC0 1.0 |
 | `flare.png` | 同上 `flare_01` | Kenney | CC0 1.0 |
@@ -142,16 +162,56 @@ BLOSTOM 本体のコードとは別に、`public/kit/` 以下に外部素材を�
 > ゲーム内の「使い方」画面末尾にクレジット欄を置いてある。
 > ここを消す場合は、この画像も一緒に外すこと。
 
+## 音楽 — `public/kit/music/`
+
+| ファイル | 元素材 | 作者 | ライセンス |
+|---|---|---|---|
+| `title.mp3` | [Free Music Pack](https://opengameart.org/content/free-music-pack) `Flags` | Alexander Ehlers | CC0 1.0 |
+| `garage.mp3` | 同上 `Twists` | Alexander Ehlers | CC0 1.0 |
+| `fight.mp3` | 同上 `Doomed` | Alexander Ehlers | CC0 1.0 |
+| `space.ogg` | [Another space background track](https://opengameart.org/content/another-space-background-track) `ObservingTheStar` | yd | CC0 1.0 |
+
+**加工:** 改名のみ。中身は元のまま。
+
+**選び方:** 11曲を実際にデコードして、長さ・音量(RMS)・明るさ・両端の一致度を
+測って割り当てました。
+
+| | 長さ | RMS | 明るさ | 割り当てた理由 |
+|---|---|---|---|---|
+| Flags | 1.6分 | 0.315 | 927 | 大きく暗い — タイトルには重さが要る |
+| Twists | 3.0分 | 0.209 | 1027 | 一番長く落ち着いている — **一番長く聞く画面**（ガレージ）へ |
+| Doomed | 2.5分 | 0.306 | 2824 | 一番明るく忙しい — 戦闘 |
+| ObservingTheStar | 2.2分 | 0.056 | 904 | 極端に静か — 宇宙は空っぽであるべきなので |
+
+**ストリーミング再生**です（デコードして常駐させない）。1曲数分あり、
+18MBぶんをヒープに置く理由がないので。起動もブロックしません。
+
 ## フォント — `public/kit/font/`
 
 | ファイル | 元素材 | ライセンス |
 |---|---|---|
 | `inter-400.woff2` | [Inter](https://github.com/rsms/inter) | SIL OFL 1.1 — [Inter-OFL.txt](public/kit/font/Inter-OFL.txt) |
+| `zen-kaku-gothic-new-400.woff2` `-700` | [Zen Kaku Gothic New](https://github.com/googlefonts/zen-kakugothic) (Yoshimichi Ohira) | SIL OFL 1.1 |
 | `jetbrains-mono-400.woff2` `-600` | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | SIL OFL 1.1 — [JetBrainsMono-OFL.txt](public/kit/font/JetBrainsMono-OFL.txt) |
 
-Google Fonts 経由で取得した woff2。**ラテン部分集合のみ**。
-日本語は OS のフォントに任せている（部分集合にしても数 MB あり、
-このゲームが動くデスクトップにはどれも日本語フォントが入っているため）。
+ラテン2書体は Google Fonts 経由の woff2（ラテン部分集合）。
+
+**日本語は同梱している。** 以前は「部分集合にしても数MBある」としてOS任せに
+していましたが、それは**全字種**の話でした。`tools/bake-fonts.py` が
+`src/` を走査して**ゲーム自身の文字列が使っている文字だけ**（679字）に
+切り出すので:
+
+| | 元 | 部分集合 |
+|---|---|---|
+| Zen Kaku Gothic New | 2.36MB | **86KB** |
+| （比較）Noto Sans JP | 9.59MB | 167KB |
+| （比較）M PLUS 2 | 4.20MB | 197KB |
+
+**86KBはラテン2書体の合計より小さい。** UIはほぼ全部日本語なので、
+これを積まないことは「誰も読まない部分の書体だけを選ぶ」ことでした。
+
+字の一覧はソースから毎回作り直すので、**新しい漢字を含むラベルを足しても
+次のbakeで拾われます**（1文字だけ別書体で出る、が起きない）。
 
 OFL はライセンス文の同梱を求めるので、両方の全文を `public/kit/font/` に置いてある。
 
