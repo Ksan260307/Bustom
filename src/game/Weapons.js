@@ -275,6 +275,15 @@ export class Projectiles {
       mesh, mat, life: 0, kind: 'bolt', color: 0xffffff,
       velocity: new THREE.Vector3(),
       damage: 0, radius: 0.2, speed: 0, turn: 0, owner: null, target: null,
+      /**
+       * Where it was fired from, and how distance changes what it does.
+       *
+       * Only the sniper carries a `rangeGain`; everything else leaves it
+       * null and pays nothing for this. The origin is kept on every round
+       * anyway because it costs one copy at spawn and it is the only way to
+       * answer "how far has this come" without a second vector per frame.
+       */
+      origin: new THREE.Vector3(), rangeGain: null,
       /** Homing state: whether it is still steering, and its best approach. */
       homing: false, closest: Infinity,
       gravity: 0, blast: null, streak: 0, trail: null, trailColor: 0xffffff,
@@ -377,7 +386,7 @@ export class Projectiles {
   spawn({
     position, direction, speed, life = 2, damage = 1, color = 0xffffff,
     radius = 0.2, kind = 'bolt', turn = 0, target = null, owner = null,
-    gravity = 0, blast = null, streak = 0, trail = null,
+    gravity = 0, blast = null, streak = 0, trail = null, rangeGain = null,
   }) {
     const s = this._take();
     s.kind = kind;
@@ -404,6 +413,8 @@ export class Projectiles {
     s.target = target;
     s.homing = turn > 0;
     s.closest = Infinity;
+    s.origin.copy(position);
+    s.rangeGain = rangeGain;
 
     s.velocity.copy(direction).normalize().multiplyScalar(speed);
     s.mesh.geometry = kind === 'missile' ? this.missileGeo
@@ -512,7 +523,10 @@ export class Projectiles {
       // behind one and still be shot through it, which is worse than having
       // no cover at all, because it looks like it should work.
       const inCover = this.world?.blocksAt?.(p) ?? false;
-      if (inCover) this.world.damageCover(p, s.damage);
+      // Cover takes what a machine standing there would have taken: a round
+      // that is only a third of itself at this range does not chew through
+      // a pillar as though it were at full strength.
+      if (inCover) this.world.damageCover(p, Projectiles.damageAt(s, p));
       if (inCover || p.y <= groundY + 0.05 || Math.hypot(p.x, p.z) > r + 8) {
         // A plain round reports where it struck; one with a blast reports
         // the blast instead, which is the bigger event and the one worth
@@ -531,14 +545,37 @@ export class Projectiles {
         if (!t || t === s.owner || !t.alive) continue;
         if (sameSide(s.owner, t)) continue;
         if (this._sweepHits(_prev, p, t, s.radius) === null) continue;
-        t.damage(s.damage, _near);
-        this.hits.push(this._hitRecord(s, _near, t, s.damage));
+        const dealt = Projectiles.damageAt(s, _near);
+        t.damage(dealt, _near);
+        this.hits.push(this._hitRecord(s, _near, t, dealt));
         this._detonate(s, _near, targets, t);
         this._kill(s);
         break;
       }
     }
     return this;
+  }
+
+  /**
+   * How hard this round lands, at the point it landed.
+   *
+   * A weapon with no `rangeGain` answers with its damage and nothing is
+   * computed. One with a gain scales linearly between two distances and
+   * clamps outside them, so a shot taken across the arena is worth several
+   * taken across the room.
+   *
+   * Computed ONCE per hit and handed to everything that reads it — the
+   * machine, the read-out, the cover — for the same reason the owner's
+   * damage scale is applied once at spawn: three places that work it out
+   * separately are three places that can disagree.
+   */
+  static damageAt(s, point) {
+    const g = s.rangeGain;
+    if (!g) return s.damage;
+    const flown = s.origin.distanceTo(point);
+    const span = Math.max(1e-3, g.far - g.near);
+    const t = clamp01((flown - g.near) / span);
+    return s.damage * (g.min + (g.max - g.min) * t);
   }
 
   /**
@@ -1016,6 +1053,9 @@ export class WeaponSystem {
         turn: meta.turn ?? 0,
         target: meta.turn ? lockTarget : null,
         owner: this.robot,
+        // Null for every weapon but the sniper, and the pool checks for it
+        // once per hit rather than per frame.
+        rangeGain: meta.rangeGain ?? null,
       });
     }
   }

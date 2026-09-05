@@ -85,7 +85,8 @@ export const TABLES = {
   '小型ミサイルを5発ばらまく。白い航跡を引いて追尾する':
     'Five small missiles, spread wide. They trail white and follow',
   'スナイパー': 'Sniper',
-  '超長射程の一撃。当てれば大きい': 'One shot, very long range. It hurts when it lands',
+  '距離で威力が変わる。至近で1/3、遠いほど重い。弾速は最速':
+    'Damage rises with distance: a third of it point-blank, brutal across the arena. The fastest round there is',
   'レーザー': 'Laser',
   '押している間、太いレーザーを撃ち続ける。撃ち続けると過熱する':
     'A thick beam for as long as you hold it. Holding it overheats',

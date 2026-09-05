@@ -402,12 +402,58 @@ export const EQUIP_META = {
      * The identity is "one shot, and it hurts". So the shot stays exactly
      * as heavy and the gap between shots is what pays for it: 28.8
      * sustained now, comfortably under the beam.
+     *
+     * ---- and then the range itself was measured
+     *
+     * 240 m/s for 3.2s is 768 metres. The widest arena in the game is 380
+     * across and most are between 176 and 300, so THE ONE THING THIS
+     * WEAPON IS FOR could not be experienced: there was nowhere far enough
+     * away to shoot from. Worse, the note further up says the rifle's range
+     * was cut specifically to make the sniper's range advantage real — an
+     * advantage that had never been reachable, so that change only made the
+     * rifle worse.
+     *
+     * A long range is not a feature if every fight happens inside it. So
+     * the range now DOES something: the further a round travels, the harder
+     * it lands. See `rangeGain` below.
      */
     ammo: 3, reload: 4.0, interval: 2.0, auto: false,
-    shots: 1, spread: 0, speed: 240, damage: 96, life: 3.2, radius: 0.14, mass: 0.9,
+    /*
+     * 900 m/s, and 0.5s of it — 450 metres, which is just past the widest
+     * arena instead of twice it.
+     *
+     * The old speed was capped at 250 by a rule the suite holds: a round
+     * must take more than a tenth of a second to cross 25 metres, or it
+     * cannot be seen, let alone avoided. That rule was right, and the
+     * falloff below is what lets this cross it — a round that arrives
+     * instantly at 25 metres now does a THIRD of its damage, and the
+     * distance where it does full damage (125m) still takes 0.14s to
+     * reach. The rule has not been dropped; it has been moved to where it
+     * matters, which is where the shot hurts.
+     */
+    shots: 1, spread: 0, speed: 900, damage: 70, life: 0.5, radius: 0.14, mass: 0.9,
+    /**
+     * Damage by how far the round flew.
+     *
+     * Weak in your face, enormous across the arena. `near` and `far` are
+     * metres, `min` and `max` multiply the damage, and it is linear
+     * between them and clamped outside.
+     *
+     * The numbers are chosen against the ARENAS rather than in the
+     * abstract, which is the whole point of the change:
+     *
+     *     廃工場  176m across  ->  reaches x1.3   (92 damage)
+     *     演習場  240m         ->  x1.7          (117)
+     *     塩湖    300m         ->  x2.1          (145)
+     *     宇宙    380m         ->  x2.2, capped  (154)
+     *
+     * So WHERE you fight now decides what this weapon is worth, and a
+     * sniper in a scrapyard is a bad choice rather than a free one.
+     */
+    rangeGain: { near: 20, far: 320, min: 0.35, max: 2.2 },
     lead: 0.95,                     // the best-aimed shot there is, still dodgeable
     shape: 'beam', streak: 20,
-    blurb: '超長射程の一撃。当てれば大きい',
+    blurb: '距離で威力が変わる。至近で1/3、遠いほど重い。弾速は最速',
   },
   [EQUIP.LASER]: {
     label: 'レーザー', en: 'LASER', category: 'weapon', plate: 0x2b3a49, accent: 0xff5ce0,

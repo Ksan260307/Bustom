@@ -7,6 +7,7 @@ import {
   EQUIP, EQUIP_META, WEAPON_TYPES, WEAPON_SLOTS, WEAPON_VOICE, weaponLead,
 } from '../src/core/constants.js';
 import { KIT_SFX, sfxName } from '../src/game/Kit.js';
+import { ARENAS, ARENA_ORDER } from '../src/game/Arenas.js';
 import { testWorld, stripEquips } from './helpers/dom.js';
 
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -1069,13 +1070,93 @@ describe('a locked shot can be dodged', () => {
     }
   });
 
-  it('every round is slow enough to watch cross the gap', () => {
+  it('every round is slow enough to watch cross the gap that matters', () => {
     // Twenty-five metres is a normal fighting range. A round that covers it
     // inside a couple of frames cannot be seen, let alone avoided.
+    //
+    // The rule is about the distance where a round is WORTH avoiding. For
+    // almost everything that is 25m, because damage does not depend on
+    // range. The sniper is the exception: it arrives at 25m in a blink and
+    // does a third of its damage there, and the distance where it does full
+    // damage is far enough away that the flight is still visible. So the
+    // question asked of it is the same question, asked where it applies.
+    const fullDamageRange = (meta) => {
+      const g = meta.rangeGain;
+      if (!g) return 25;
+      // Where the multiplier passes 1.0, or `far` if it never does.
+      if (g.max <= 1) return g.far;
+      if (g.min >= 1) return g.near;
+      return g.near + ((1 - g.min) / (g.max - g.min)) * (g.far - g.near);
+    };
+
     for (const type of WEAPON_TYPES) {
       const meta = EQUIP_META[type];
       if (!meta.speed) continue;         // the laser is a line, not a round
-      expect(25 / meta.speed, type + ' takes long enough').toBeGreaterThan(0.1);
+      const reach = fullDamageRange(meta);
+      expect(reach / meta.speed, type + ' takes long enough where it hurts')
+        .toBeGreaterThan(0.1);
+    }
+  });
+
+  it('the sniper hits harder the further the round has flown', () => {
+    const g = EQUIP_META.sniper.rangeGain;
+    expect(g, 'the sniper carries a range gain').toBeTruthy();
+    expect(g.min, 'weak in your face').toBeLessThan(1);
+    expect(g.max, 'and heavy across the arena').toBeGreaterThan(1);
+    expect(g.near).toBeLessThan(g.far);
+
+    const at = (d) => Projectiles.damageAt({
+      damage: EQUIP_META.sniper.damage,
+      rangeGain: g,
+      origin: V(0, 0, 0),
+    }, V(0, 0, d));
+
+    // Monotonic between the two ends, flat outside them.
+    expect(at(5), 'point blank is clamped to the floor').toBeCloseTo(at(g.near), 6);
+    expect(at(600), 'and past the far end to the ceiling').toBeCloseTo(at(g.far), 6);
+    const steps = [g.near, 100, 200, g.far].map(at);
+    for (let i = 1; i < steps.length; i++) {
+      expect(steps[i], 'further is always harder').toBeGreaterThan(steps[i - 1]);
+    }
+    expect(at(g.far) / at(g.near), 'and the spread is worth aiming for')
+      .toBeGreaterThan(4);
+  });
+
+  it('and every arena puts a different ceiling on it', () => {
+    // The point of the change: WHERE you fight decides what this weapon is
+    // worth. In the smallest arena there is nowhere far enough to reach the
+    // top of the curve; in the largest there is.
+    const g = EQUIP_META.sniper.rangeGain;
+    const gain = (d) => {
+      const t = Math.min(1, Math.max(0, (d - g.near) / (g.far - g.near)));
+      return g.min + (g.max - g.min) * t;
+    };
+    const widest = Math.max(...ARENA_ORDER.map((id) => ARENAS[id].radius)) * 2;
+    const narrowest = Math.min(...ARENA_ORDER.map((id) => ARENAS[id].radius)) * 2;
+
+    expect(widest, 'the widest arena can reach the top of the curve')
+      .toBeGreaterThanOrEqual(g.far);
+    expect(gain(narrowest), 'the narrowest cannot').toBeLessThan(g.max);
+    expect(gain(widest) / gain(narrowest), 'and the difference is worth choosing over')
+      .toBeGreaterThan(1.4);
+  });
+
+  it('a round that only counts for a third does not chew through cover either', () => {
+    // Cover, the machine and the read-out all read one number, for the same
+    // reason the owner's damage scale is applied once at spawn.
+    const near = Projectiles.damageAt({
+      damage: 100, rangeGain: EQUIP_META.sniper.rangeGain, origin: V(0, 0, 0),
+    }, V(0, 0, 10));
+    expect(near).toBeLessThan(100);
+  });
+
+  it('every other weapon is unaffected', () => {
+    for (const type of WEAPON_TYPES) {
+      const meta = EQUIP_META[type];
+      if (type === 'sniper' || !meta.damage) continue;
+      expect(meta.rangeGain, type + ' has no range gain').toBeFalsy();
+      // And a round with none answers with exactly its damage.
+      expect(Projectiles.damageAt({ damage: 42, rangeGain: null }, V(0, 0, 99))).toBe(42);
     }
   });
 
